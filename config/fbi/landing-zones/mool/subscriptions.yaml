@@ -1,0 +1,35 @@
+landingZone: mool
+businessOwner: fbi
+managementGroup: landingzones/corp
+region: westeurope
+
+subscriptions:
+  - name: mool-mgmt
+    environment: mgmt
+    type: management
+    workload: mool
+
+  - name: mool-dev
+    environment: dev
+    type: application
+    workload: mool
+
+  - name: mool-tst
+    environment: tst
+    type: application
+    workload: mool
+
+  - name: mool-acc
+    environment: acc
+    type: application
+    workload: mool
+
+  - name: mool-preprd
+    environment: preprd
+    type: application
+    workload: mool
+
+  - name: mool-prd
+    environment: prd
+    type: application
+    workload: mool

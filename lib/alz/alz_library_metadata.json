@@ -1,0 +1,9 @@
+{
+  "$schema": "https://raw.githubusercontent.com/Azure/Azure-Landing-Zones-Library/main/schemas/library_metadata.json",
+  "name": "fbi-alz-library",
+  "description": "FBI Azure Landing Zones library metadata. ALZ artifacts vendored from the official ALZ library.",
+  "version": "2024.07.0",
+  "source": "https://github.com/Azure/Azure-Landing-Zones-Library",
+  "lastUpdated": "2026-06-23",
+  "notes": "Update using: bicep registry list-modules and the ALZ library tooling. Review all policy changes before applying to production."
+}
