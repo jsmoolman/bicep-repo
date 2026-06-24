@@ -1,0 +1,32 @@
+parameters:
+  - name: templateFile
+    type: string
+  - name: paramFile
+    type: string
+  - name: deploymentScope
+    type: string
+    default: resourceGroup
+  - name: resourceGroupName
+    type: string
+    default: ''
+  - name: subscriptionId
+    type: string
+    default: ''
+  - name: managementGroupId
+    type: string
+    default: ''
+  - name: location
+    type: string
+    default: westeurope
+
+steps:
+  - task: PowerShell@2
+    displayName: Bicep what-if
+    inputs:
+      filePath: scripts/Invoke-BicepWhatIf.ps1
+      arguments: >-
+        -TemplateFile "${{ parameters.templateFile }}"
+        -ParameterFile "${{ parameters.paramFile }}"
+        -DeploymentScope "${{ parameters.deploymentScope }}"
+        -Location "${{ parameters.location }}"
+      pwsh: true

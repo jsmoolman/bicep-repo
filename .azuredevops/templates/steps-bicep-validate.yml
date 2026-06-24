@@ -1,0 +1,25 @@
+parameters:
+  - name: templateFile
+    type: string
+  - name: paramFile
+    type: string
+    default: ''
+
+steps:
+  - task: AzureCLI@2
+    displayName: Bicep build (compile check)
+    inputs:
+      azureSubscription: $(serviceConnection)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az bicep build --file ${{ parameters.templateFile }}
+
+  - task: AzureCLI@2
+    displayName: Bicep lint
+    inputs:
+      azureSubscription: $(serviceConnection)
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        az bicep lint --file ${{ parameters.templateFile }}

@@ -1,0 +1,35 @@
+parameters:
+  - name: templateFile
+    type: string
+  - name: paramFile
+    type: string
+  - name: deploymentScope
+    type: string
+    default: resourceGroup
+  - name: resourceGroupName
+    type: string
+    default: ''
+  - name: subscriptionId
+    type: string
+    default: ''
+  - name: managementGroupId
+    type: string
+    default: ''
+  - name: location
+    type: string
+    default: westeurope
+  - name: deploymentStackName
+    type: string
+    default: ''
+
+steps:
+  - task: PowerShell@2
+    displayName: Bicep deploy
+    inputs:
+      filePath: scripts/Invoke-BicepDeploy.ps1
+      arguments: >-
+        -TemplateFile "${{ parameters.templateFile }}"
+        -ParameterFile "${{ parameters.paramFile }}"
+        -DeploymentScope "${{ parameters.deploymentScope }}"
+        -Location "${{ parameters.location }}"
+      pwsh: true
