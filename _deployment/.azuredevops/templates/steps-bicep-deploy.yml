@@ -1,0 +1,43 @@
+parameters:
+  - name: templateFile
+    type: string
+  - name: paramFile
+    type: string
+  - name: deploymentScope
+    type: string
+    default: resourceGroup
+  - name: resourceGroupName
+    type: string
+    default: ''
+  - name: subscriptionId
+    type: string
+    default: ''
+  - name: managementGroupId
+    type: string
+    default: ''
+  - name: location
+    type: string
+    default: westeurope
+  - name: deploymentStackName
+    type: string
+    default: ''
+  - name: serviceConnection
+    type: string
+    default: sc-az-devops-trustedcloud-mgmt
+
+steps:
+  - task: AzureCLI@2
+    displayName: Bicep deploy
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: pscore
+      scriptLocation: scriptPath
+      scriptPath: scripts/Invoke-BicepDeploy.ps1
+      arguments: >-
+        -TemplateFile "${{ parameters.templateFile }}"
+        -ParameterFile "${{ parameters.paramFile }}"
+        -DeploymentScope "${{ parameters.deploymentScope }}"
+        -ResourceGroupName "${{ parameters.resourceGroupName }}"
+        -SubscriptionId "${{ parameters.subscriptionId }}"
+        -ManagementGroupId "${{ parameters.managementGroupId }}"
+        -Location "${{ parameters.location }}"

@@ -1,0 +1,35 @@
+landingZone: lims
+businessOwner: nfi
+managementGroup: landingzones/corp
+region: westeurope
+
+subscriptions:
+  - name: lims-mgmt
+    environment: mgmt
+    type: management
+    workload: lims
+
+  - name: lims-dev
+    environment: dev
+    type: application
+    workload: lims
+
+  - name: lims-tst
+    environment: tst
+    type: application
+    workload: lims
+
+  - name: lims-acc
+    environment: acc
+    type: application
+    workload: lims
+
+  - name: lims-preprd
+    environment: preprd
+    type: application
+    workload: lims
+
+  - name: lims-prd
+    environment: prd
+    type: application
+    workload: lims

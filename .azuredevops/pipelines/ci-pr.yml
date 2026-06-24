@@ -1,0 +1,48 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+      - release/*
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - template: ../templates/variables.yml
+
+stages:
+  - stage: Validate
+    displayName: Validate changed deployment units
+    jobs:
+      - job: DetectChanges
+        displayName: Detect changed deployment units
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: PowerShell@2
+            name: DetectChanges
+            displayName: Get changed deployment units
+            inputs:
+              filePath: scripts/Get-ChangedDeploymentUnits.cap
+              pwsh: true
+
+      - job: BicepValidate
+        displayName: Bicep validate
+        dependsOn: DetectChanges
+        steps:
+          - template: ../templates/steps-bicep-validate.yml
+
+      - job: BicepWhatIf
+        displayName: Bicep what-if
+        dependsOn: DetectChanges
+        steps:
+          - template: ../templates/steps-bicep-whatif.yml
+
+      - job: PSRule
+        displayName: PSRule for Azure
+        dependsOn: DetectChanges
+        steps:
+          - template: ../templates/steps-psrule.yml
