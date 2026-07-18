@@ -16,9 +16,9 @@ pool:
 variables:
 	deploymentUnit: landing-zones/subscription-vending
 	templateFile: src/landing-zones/subscription-vending/main.bicep
-	paramFile: config/fbi/landing-zones/mool/subscription-vending.bicepparam
+	paramFile: config/nfi/landing-zones/lims/subscription-vending.bicepparam
 	serviceConnection: sc-az-devops-trustedcloud-mgmt
-	managementGroupId: fbi-landingzones-corp
+	managementGroupId: nfi-landingzones-corp
 	location: westeurope
 
 stages:

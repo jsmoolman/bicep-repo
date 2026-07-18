@@ -16,7 +16,7 @@ pool:
 variables:
   deploymentUnit: platform/core
   templateFile: src/platform/core/main.bicep
-  paramFile: config/fbi/platform/core.bicepparam
+  paramFile: config/nfi/platform/core.bicepparam
   serviceConnection: sc-az-devops-trustedcloud-mgmt
   location: westeurope
 

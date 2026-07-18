@@ -2,7 +2,7 @@ variables:
   - name: serviceConnection
     value: sc-az-devops-trustedcloud-mgmt
   - name: customer
-    value: fbi
+    value: nfi
   - name: location
     value: westeurope
   - name: managementGroupId

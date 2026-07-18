@@ -2,13 +2,13 @@
 
 ## Approach
 
-Azure Policy is the primary governance control plane. Policies follow the ALZ baseline with FBI-specific customisations.
+Azure Policy is the primary governance control plane. Policies follow the ALZ baseline with nfi-specific customisations.
 
 ## Assignment Scopes
 
 | Scope | Assignment Type | Examples |
 |---|---|---|
-| FBI root management group | DeployIfNotExists, Audit, Deny | Mandatory tags, allowed locations |
+| nfi root management group | DeployIfNotExists, Audit, Deny | Mandatory tags, allowed locations |
 | Platform management group | DeployIfNotExists | Diagnostic settings to Log Analytics |
 | Landing Zones management group | Deny, Audit | No public IPs, encryption at rest |
 | Corp management group | Deny | Require private endpoints |

@@ -16,7 +16,7 @@ pool:
 variables:
   deploymentUnit: platform/identity
   templateFile: src/platform/identity/entra-groups.bicep
-  paramFile: config/fbi/platform/identity-entra-groups.bicepparam
+  paramFile: config/nfi/platform/identity-entra-groups.bicepparam
   serviceConnection: sc-az-devops-trustedcloud-mgmt
   location: westeurope
 

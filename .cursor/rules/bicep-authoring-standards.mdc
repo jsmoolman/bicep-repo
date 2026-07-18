@@ -1,0 +1,57 @@
+---
+description: Mandatory lookup chain, naming convention, and targetScope rules for all Bicep authoring in this repository.
+globs: **/*.bicep,**/*.bicepparam
+alwaysApply: false
+---
+
+# Bicep Authoring Standards
+
+## Mandatory lookup chain — run in this order, do not skip
+
+Before writing any resource block:
+
+1. **Azure Verified Modules (AVM)** — https://azure.github.io/Azure-Verified-Modules/
+   Use AVM when a module exists. It is Microsoft's current recommended standard.
+2. **Bicep Registry source** — https://github.com/Azure/bicep-registry-modules
+   Review params, outputs, and patterns before coding.
+3. **Microsoft Learn Bicep docs** — https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/
+   Authoritative source for syntax, scopes, and API versions.
+4. **Bicep MCP tools** (run AFTER the online checks):
+   - `list_avm_metadata` — find the AVM module and get the latest pinned version
+   - `get_az_resource_type_schema` — verify resource type properties and correct API version
+   - `get_bicep_best_practices` — review current guidance before coding
+   - `get_bicep_file_diagnostics` — lint every file after writing
+   - `format_bicep_file` — format before committing
+
+Do not write resource blocks from memory.
+
+## Naming convention
+
+```
+{type}-{workload}-{feature}-{environment}-{region-suffix}
+```
+
+| Resource | Example |
+|---|---|
+| Resource Group | `rg-lims-keyvault-dev-westeu` |
+| Key Vault | `kv-lims-keyvault-dev-westeu` |
+| Storage Account | `stlimsfeaturedevwesteu` (no hyphens — Azure constraint) |
+
+## targetScope rules
+
+- `subscription` — resource groups, subscription-level role assignments, policies
+- `resourceGroup` — any resource that lives inside a resource group
+- Never default every module to `subscription`. Choose based on the resource being deployed.
+
+## Parameter contract (every param file must include these five)
+
+```bicep
+param environment    = 'dev'           // dev | tst | acc | preprd | prd | mgmt
+param location       = 'westeurope'
+param purpose        = 'lims'
+param subscriptionId = '<guid>'
+param tags           = {
+  environment: 'development'           // long-form display name
+  purpose:     'lims'
+}
+```

@@ -16,7 +16,7 @@ pool:
 variables:
 	deploymentUnit: landing-zones/baseline
 	templateFile: src/landing-zones/baseline/main.bicep
-	paramFile: config/fbi/landing-zones/mool/baseline.prd.bicepparam
+	paramFile: config/nfi/landing-zones/lims/baseline.prd.bicepparam
 	serviceConnection: sc-az-devops-trustedcloud-mgmt
 	location: westeurope
 

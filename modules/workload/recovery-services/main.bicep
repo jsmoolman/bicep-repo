@@ -10,7 +10,7 @@
 //   This file is the canonical example of a "module" in this repository.
 //   A module MUST:
 //     1. Be reusable and environment-neutral — NO hardcoded environment codes
-//        (dev/tst/prd) and NO hardcoded workload names (e.g. "mool"). All such
+//        (dev/tst/prd) and NO hardcoded workload names (e.g. "lims"). All such
 //        values arrive as parameters from the composition in `src/`.
 //     2. Declare `targetScope = 'resourceGroup'` for resources that live inside
 //        a resource group (the caller in `src/` owns RG creation).

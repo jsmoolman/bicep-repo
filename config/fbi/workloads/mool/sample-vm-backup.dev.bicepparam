@@ -1,5 +1,5 @@
 // =============================================================================
-// SAMPLE PARAMETERS: MOOL — VM Backup (dev)
+// SAMPLE PARAMETERS: lims — VM Backup (dev)
 // =============================================================================
 // PURPOSE
 //   Environment-specific VALUES for the sample VM-backup composition. This is
@@ -19,24 +19,24 @@
 //   editors full type-checking and IntelliSense for the params below.
 // =============================================================================
 
-using '../../../../src/workloads/mool/sample-vm-backup.bicep'
+using '../../../../src/workloads/lims/sample-vm-backup.bicep'
 
 param location = 'westeurope'
 param environment = 'dev'
-param purpose = 'mool'
+param purpose = 'lims'
 
-// Subscription the MOOL dev landing zone lives in.
+// Subscription the lims dev landing zone lives in.
 param subscriptionId = 'jsm-dev-{guid}'
 
 // VM resource IDs to protect. Left empty for the first deployment so the vault
 // and policy are created up front; populate after the VMs exist, e.g.:
-//   '/subscriptions/<sub>/resourceGroups/rg-mool-dev-westeurope/providers/Microsoft.Compute/virtualMachines/vm-mool-app-dev-westeurope'
+//   '/subscriptions/<sub>/resourceGroups/rg-lims-dev-westeurope/providers/Microsoft.Compute/virtualMachines/vm-lims-app-dev-westeurope'
 param protectedVmResourceIds = []
 
 param tags = {
   Environment: 'dev'
-  Workload: 'mool'
+  Workload: 'lims'
   ManagedBy: 'bicep-iac'
-  Owner: 'team-mool'
+  Owner: 'team-lims'
   CostCenter: 'CC-1001'
 }

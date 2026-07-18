@@ -29,7 +29,7 @@ steps:
       azureSubscription: ${{ parameters.serviceConnection }}
       scriptType: pscore
       scriptLocation: scriptPath
-      scriptPath: scripts/Invoke-BicepWhatIf.cap
+      scriptPath: scripts/Invoke-BicepWhatIf.ps1
       arguments: >-
         -TemplateFile "${{ parameters.templateFile }}"
         -ParameterFile "${{ parameters.paramFile }}"

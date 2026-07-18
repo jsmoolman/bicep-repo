@@ -1,7 +1,7 @@
 targetScope = 'subscription'
 
-metadata name = 'Workload — MOOL'
-metadata description = 'Orchestrates the full MOOL workload deployment: app services, SQL VMs, backup, and monitoring.'
+metadata name = 'Workload — lims'
+metadata description = 'Orchestrates the full lims workload deployment: app services, SQL VMs, backup, and monitoring.'
 
 @description('Azure region for all resources.')
 param location string = 'westeurope'
@@ -14,12 +14,12 @@ param environment string
 param logAnalyticsWorkspaceId string
 
 @description('Recovery Services vault name.')
-param recoveryServicesVaultName string = 'rsv-mool-${environment}-${location}'
+param recoveryServicesVaultName string = 'rsv-lims-${environment}-${location}'
 
 @description('Tags to apply to all resources.')
 param tags object = {}
 
-var resourceGroupName = 'rg-mool-${environment}-${location}'
+var resourceGroupName = 'rg-lims-${environment}-${location}'
 
 resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
   name: resourceGroupName
@@ -28,7 +28,7 @@ resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
 }
 
 module appServices 'app-services.bicep' = {
-  name: 'mool-app-services'
+  name: 'lims-app-services'
   scope: rg
   params: {
     location: location
@@ -39,7 +39,7 @@ module appServices 'app-services.bicep' = {
 }
 
 module backup 'backup.bicep' = {
-  name: 'mool-backup'
+  name: 'lims-backup'
   scope: rg
   params: {
     location: location
@@ -49,7 +49,7 @@ module backup 'backup.bicep' = {
 }
 
 module monitoring 'monitoring.bicep' = {
-  name: 'mool-monitoring'
+  name: 'lims-monitoring'
   scope: rg
   params: {
     location: location

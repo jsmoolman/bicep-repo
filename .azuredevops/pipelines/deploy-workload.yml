@@ -4,8 +4,8 @@ trigger:
 			- main
 	paths:
 		include:
-			- src/workloads/mool/**
-			- config/*/workloads/mool/*.bicepparam
+			- src/workloads/lims/**
+			- config/*/workloads/lims/*.bicepparam
 			- modules/**
 
 pr: none
@@ -14,9 +14,9 @@ pool:
 	vmImage: ubuntu-latest
 
 variables:
-	deploymentUnit: workloads/mool
-	templateFile: src/workloads/mool/main.bicep
-	paramFile: config/fbi/workloads/mool/prd.bicepparam
+	deploymentUnit: workloads/lims
+	templateFile: src/workloads/lims/main.bicep
+	paramFile: config/nfi/workloads/lims/prd.bicepparam
 	serviceConnection: sc-az-devops-trustedcloud-mgmt
 	location: westeurope
 

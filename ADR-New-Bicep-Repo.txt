@@ -26,7 +26,7 @@ De structuur schaalt niet goed naar meerdere landing zones.
 Platformverantwoordelijkheden en workloadverantwoordelijkheden lopen door elkaar.
 Er is geen duidelijke scheiding tussen tenantbrede governance, subscription-level deployments en workload-level deployments.
 Het wordt lastig om management groups, policies, RBAC, monitoring, budgets en gedeelde platformservices consistent te standaardiseren binnen de klanttenant.
-Er is daarom een nieuw repositoryontwerp nodig dat zowel het huidige MOOL-achtige subscriptionmodel als toekomstige landing zones voor andere applicaties of businessdomeinen kan ondersteunen.
+Er is daarom een nieuw repositoryontwerp nodig dat zowel het huidige lims-achtige subscriptionmodel als toekomstige landing zones voor andere applicaties of businessdomeinen kan ondersteunen.
 Besluit
 We maken een moderne Azure Infrastructure-as-Code repository die is gestructureerd rond Azure deployment scope, lifecycle en eigenaarschapsgrenzen, in plaats van rond één applicatie of één omgeving.
 De repository volgt deze principes:
@@ -41,7 +41,7 @@ De structuur moet de huidige mgmt/dev/tst/acc/preprd/prd subscriptionpatronen on
 De repository moet aansluiten bij Azure Landing Zone, Azure Verified Modules, Azure Citadel en Terraform-achtige separation-of-concern principes.
 De repository wordt georganiseerd in de volgende hoofdonderdelen:
 Plain Text
-fbi-tenant-iac/
+nfi-tenant-iac/
 │
 ├── docs/
 ├── .azuredevops/
@@ -55,7 +55,7 @@ fbi-tenant-iac/
 
 Repositorystructuur
 Plain Text
-fbi-tenant-iac/
+nfi-tenant-iac/
 │
 ├── README.md
 ├── bicepconfig.json
@@ -116,7 +116,7 @@ fbi-tenant-iac/
 │   │       └── main.bicep
 │   │
 │   └── workloads/
-│       └── mool/
+│       └── lims/
 │           ├── main.bicep
 │           ├── backup.bicep
 │           ├── monitoring.bicep
@@ -161,7 +161,7 @@ fbi-tenant-iac/
 │       └── alz_library_metadata.json
 │
 ├── config/
-│   └── fbi/
+│   └── nfi/
 │       ├── global.bicepparam
 │       │
 │       ├── platform/
@@ -172,7 +172,7 @@ fbi-tenant-iac/
 │       │   └── security.bicepparam
 │       │
 │       ├── landing-zones/
-│       │   └── mool/
+│       │   └── lims/
 │       │       ├── subscriptions.yaml
 │       │       ├── baseline.mgmt.bicepparam
 │       │       ├── baseline.dev.bicepparam
@@ -182,7 +182,7 @@ fbi-tenant-iac/
 │       │       └── baseline.prd.bicepparam
 │       │
 │       └── workloads/
-│           └── mool/
+│           └── lims/
 │               ├── dev.bicepparam
 │               ├── tst.bicepparam
 │               ├── acc.bicepparam
@@ -215,7 +215,7 @@ Voorbeelden:
 Plain Text
 src/platform/core/main.bicep
 src/landing-zones/baseline/main.bicep
-src/workloads/mool/main.bicep
+src/workloads/lims/main.bicep
 
 
 modules/
@@ -225,7 +225,7 @@ Omgeving-neutraal zijn
 Waar mogelijk subscription-neutraal zijn
 Herbruikbaar zijn over meerdere landing zones heen
 Klein genoeg zijn om goed te testen en te onderhouden
-Geen hardcoded applicatienamen bevatten, zoals mool, tenzij ze onder modules/workload/mool-specific worden geplaatst. Dit moet echter alleen gebeuren als het echt noodzakelijk is
+Geen hardcoded applicatienamen bevatten, zoals lims, tenzij ze onder modules/workload/lims-specific worden geplaatst. Dit moet echter alleen gebeuren als het echt noodzakelijk is
 Voorbeelden:
 Plain Text
 modules/platform/log-analytics/
@@ -325,43 +325,43 @@ Plain Text
 
 
 Voorbeeld van landing zone-configuratie
-Het huidige MOOL-patroon kan worden weergegeven als een landing zone met meerdere subscriptions.
+Het huidige lims-patroon kan worden weergegeven als een landing zone met meerdere subscriptions.
 Plain Text
-landingZone: mool
-businessOwner: fbi
+landingZone: lims
+businessOwner: nfi
 managementGroup: landingzones/local
 region: westeurope
 subscriptions:
-  - name: mool-mgmt
+  - name: lims-mgmt
     environment: mgmt
     type: management
-    workload: mool
-    purpose: mool
-  - name: mool-dev
+    workload: lims
+    purpose: lims
+  - name: lims-dev
     environment: dev
     type: application
-    workload: mool
-    purpose: mool-project-reference-number
-  - name: mool-tst
+    workload: lims
+    purpose: lims-project-reference-number
+  - name: lims-tst
     environment: tst
     type: application
-    workload: mool
-    purpose: mool-project-reference-number
-  - name: mool-acc
+    workload: lims
+    purpose: lims-project-reference-number
+  - name: lims-acc
     environment: acc
     type: application
-    workload: mool
-    purpose: mool-project-reference-number
-  - name: mool-preprd
+    workload: lims
+    purpose: lims-project-reference-number
+  - name: lims-preprd
     environment: preprd
     type: application
-    workload: mool
-    purpose: mool-project-reference-number
-  - name: mool-prd
+    workload: lims
+    purpose: lims-project-reference-number
+  - name: lims-prd
     environment: prd
     type: application
-    workload: mool
-    purpose: mool-project-reference-number
+    workload: lims
+    purpose: lims-project-reference-number
  
  
 Ik zou aanraden om het "purpose" te gebruiken voor een uniek administratief referentienummer of projectnummer.
@@ -446,7 +446,7 @@ Deze optie heeft het uiteindelijke besluit beïnvloed, maar de gekozen implement
 Gevolgen
 Positieve gevolgen
 De repository kan meerdere landing zones ondersteunen.
-Dezelfde structuur kan het bestaande MOOL mgmt/dev/tst/acc/preprd/prd-patroon ondersteunen.
+Dezelfde structuur kan het bestaande lims mgmt/dev/tst/acc/preprd/prd-patroon ondersteunen.
 Dubbele Bicep-logica wordt verminderd.
 De eigenaarschapsgrenzen tussen platform en workload worden duidelijker.
 Governance-artifacts worden consistent beheerd.
@@ -473,7 +473,7 @@ De eerste implementatie moet beginnen met een minimale, bruikbare structuur:
 Plain Text
 src/platform/core/
 src/landing-zones/baseline/
-src/workloads/mool/
+src/workloads/lims/
 modules/org/
 modules/platform/
 modules/workload/
@@ -481,11 +481,11 @@ config/customer-a/
 .azuredevops/pipelines/
 .azuredevops/templates/
 docs/
-De eerste workload die wordt onboard moet de bestaande MOOL landing zone zijn, omdat deze al bekende omgevingen en subscriptions heeft.
+De eerste workload die wordt onboard moet de bestaande lims landing zone zijn, omdat deze al bekende omgevingen en subscriptions heeft.
 De initiële migratie moet zich richten op:
 Management group- en subscriptionstructuur.
 Gemeenschappelijke landing zone baseline.
-MOOL workload baseline.
+lims workload baseline.
 Monitoring en alerting.
 Budgets.
 RBAC.

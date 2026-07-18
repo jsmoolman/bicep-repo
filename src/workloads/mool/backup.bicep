@@ -1,7 +1,7 @@
 targetScope = 'resourceGroup'
 
-metadata name = 'MOOL — Backup'
-metadata description = 'Deploys Recovery Services vault and backup policies for MOOL.'
+metadata name = 'lims — Backup'
+metadata description = 'Deploys Recovery Services vault and backup policies for lims.'
 
 @description('Azure region.')
 param location string

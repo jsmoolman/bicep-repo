@@ -9,7 +9,7 @@
 | Segment | Description | Example |
 |---|---|---|
 | resource-type-abbreviation | Azure CAF abbreviation | `rg`, `vnet`, `kv` |
-| workload | Short workload or platform name | `mool`, `conn`, `mgmt` |
+| workload | Short workload or platform name | `lims`, `conn`, `mgmt` |
 | environment | Environment code | `dev`, `tst`, `acc`, `preprd`, `prd`, `mgmt` |
 | region | Full Azure region name | `westeurope`, `northeurope` |
 
@@ -19,11 +19,11 @@ The region segment is always the full Azure region name (e.g. `westeurope`). Nev
 
 | Resource | Name |
 |---|---|
-| Resource Group (MOOL prod) | `rg-mool-prd-westeurope` |
+| Resource Group (lims prod) | `rg-lims-prd-westeurope` |
 | Virtual Network (connectivity hub) | `vnet-conn-prd-westeurope` |
-| Key Vault (MOOL dev) | `kv-mool-dev-westeurope` |
+| Key Vault (lims dev) | `kv-lims-dev-westeurope` |
 | Log Analytics Workspace | `law-mgmt-prd-westeurope` |
-| Recovery Services Vault | `rsv-mool-prd-westeurope` |
+| Recovery Services Vault | `rsv-lims-prd-westeurope` |
 
 ## Globally Unique Resources
 
@@ -33,7 +33,7 @@ For resources requiring globally unique names (Storage Accounts, Key Vaults, ACR
 st<workload><env><region><uniquesuffix>
 ```
 
-Example: `stmoolprdwesteurope3f8a`
+Example: `stlimsprdwesteurope3f8a`
 
 ## Validation
 

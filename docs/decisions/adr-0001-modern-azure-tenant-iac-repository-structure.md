@@ -52,7 +52,7 @@ Although this structure worked for the initial application, it has several limit
 - It does not clearly separate tenant-wide governance from subscription-level or workload-level deployments.
 - It makes it difficult to standardise management groups, policies, RBAC, monitoring, budgets, and shared platform services across the customer tenant.
 
-A new repository design is required that can support both the current MOOL-style subscription model and future landing zones for other applications or business domains.
+A new repository design is required that can support both the current lims-style subscription model and future landing zones for other applications or business domains.
 
 ---
 
@@ -100,7 +100,7 @@ These files represent deployment entry points and orchestration files. They shou
 Examples:
 - `src/platform/core/main.bicep`
 - `src/landing-zones/baseline/main.bicep`
-- `src/workloads/mool/main.bicep`
+- `src/workloads/lims/main.bicep`
 
 ### `modules/`
 
@@ -111,7 +111,7 @@ Modules must be:
 - Subscription-neutral where possible
 - Reusable across landing zones
 - Small enough to test and maintain
-- Free from hardcoded application names such as `mool`, unless they are placed under `modules/workload/mool-specific`, which should be avoided unless absolutely required
+- Free from hardcoded application names such as `lims`, unless they are placed under `modules/workload/lims-specific`, which should be avoided unless absolutely required
 
 Examples:
 - `modules/platform/log-analytics/`
@@ -238,44 +238,44 @@ Deployments follow a layered order to ensure dependencies are satisfied.
 
 ## Example Landing Zone Configuration
 
-The current MOOL pattern can be represented as a landing zone with multiple subscriptions.
+The current lims pattern can be represented as a landing zone with multiple subscriptions.
 
 ```yaml
-landingZone: mool
-businessOwner: fbi
+landingZone: lims
+businessOwner: nfi
 managementGroup: landingzones/local
 region: westeurope
 
 subscriptions:
-  - name: mool-mgmt
+  - name: lims-mgmt
     environment: mgmt
     type: management
-    workload: mool
+    workload: lims
 
-  - name: mool-dev
+  - name: lims-dev
     environment: dev
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-tst
+  - name: lims-tst
     environment: tst
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-acc
+  - name: lims-acc
     environment: acc
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-preprd
+  - name: lims-preprd
     environment: preprd
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-prd
+  - name: lims-prd
     environment: prd
     type: application
-    workload: mool
+    workload: lims
 ```
 
 This allows the repository to support the existing subscription pattern while also allowing future landing zones to be added without changing the core structure.
@@ -366,7 +366,7 @@ The following design rules are accepted:
 - Config/code separation allows the same Bicep to be deployed for multiple customers or environments without duplication.
 - Aligns with ALZ best practices, reducing custom policy maintenance burden.
 - Reusable pipeline templates in `.azuredevops/templates/` apply consistently across all deployment units.
-- Supports both the existing MOOL subscription pattern and future landing zones without structural changes.
+- Supports both the existing lims subscription pattern and future landing zones without structural changes.
 - The identity separation (plan vs. apply) reduces the risk of unreviewed deployments reaching production.
 
 **Negative:**

@@ -26,7 +26,7 @@ stages:
             name: DetectChanges
             displayName: Get changed deployment units
             inputs:
-              filePath: scripts/Get-ChangedDeploymentUnits.cap
+              filePath: scripts/Get-ChangedDeploymentUnits.ps1
               pwsh: true
 
       - job: BicepValidate

@@ -48,7 +48,7 @@ metadata description = 'Reusable module: creates a single Microsoft Entra ID sec
 // PARAMETERS — the module's public contract.
 // -----------------------------------------------------------------------------
 
-@description('Immutable unique key for the group, used for idempotent deployments (alternate key). Lowercase, no spaces, e.g. "sg-mool-admins-prd".')
+@description('Immutable unique key for the group, used for idempotent deployments (alternate key). Lowercase, no spaces, e.g. "sg-lims-admins-prd".')
 @minLength(1)
 @maxLength(120)
 param uniqueName string

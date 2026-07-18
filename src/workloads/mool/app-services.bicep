@@ -1,7 +1,7 @@
 targetScope = 'resourceGroup'
 
-metadata name = 'MOOL — App Services'
-metadata description = 'Deploys App Service Plan and App Service instances for the MOOL application.'
+metadata name = 'lims — App Services'
+metadata description = 'Deploys App Service Plan and App Service instances for the lims application.'
 
 @description('Azure region.')
 param location string
@@ -15,8 +15,8 @@ param logAnalyticsWorkspaceId string
 @description('Tags to apply.')
 param tags object = {}
 
-var appServicePlanName = 'asp-mool-${environment}-${location}'
-var appServiceName = 'app-mool-${environment}-${location}'
+var appServicePlanName = 'asp-lims-${environment}-${location}'
+var appServiceName = 'app-lims-${environment}-${location}'
 
 resource appServicePlan 'Microsoft.Web/serverfarms@2023-01-01' = {
   name: appServicePlanName

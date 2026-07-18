@@ -1,9 +1,9 @@
 // =============================================================================
-// SAMPLE COMPOSITION: MOOL — VM Backup
+// SAMPLE COMPOSITION: lims — VM Backup
 // =============================================================================
 // PURPOSE
-//   A worked, end-to-end EXAMPLE of a deployable composition for the MOOL
-//   workload. It creates a resource group and protects the MOOL application VMs
+//   A worked, end-to-end EXAMPLE of a deployable composition for the lims
+//   workload. It creates a resource group and protects the lims application VMs
 //   with a Recovery Services vault + daily backup policy by calling the reusable
 //   `modules/workload/recovery-services` module.
 //
@@ -28,15 +28,15 @@
 // HOW TO DEPLOY (what-if first, then apply — see deployment-model-standards)
 //   az deployment sub create \
 //     --location westeurope \
-//     --template-file   src/workloads/mool/sample-vm-backup.bicep \
-//     --parameters      config/fbi/workloads/mool/sample-vm-backup.dev.bicepparam \
+//     --template-file   src/workloads/lims/sample-vm-backup.bicep \
+//     --parameters      config/nfi/workloads/lims/sample-vm-backup.dev.bicepparam \
 //     --what-if
 // =============================================================================
 
 targetScope = 'subscription'
 
-metadata name = 'MOOL — VM Backup (Sample)'
-metadata description = 'Sample composition: resource group + Recovery Services vault + VM backup policy protecting the MOOL VMs.'
+metadata name = 'lims — VM Backup (Sample)'
+metadata description = 'Sample composition: resource group + Recovery Services vault + VM backup policy protecting the lims VMs.'
 
 // -----------------------------------------------------------------------------
 // PARAMETER CONTRACT — the five standard params plus this deployment's inputs.
@@ -50,7 +50,7 @@ param location string = 'westeurope'
 param environment string
 
 @description('Workload / purpose identifier used in naming and tagging.')
-param purpose string = 'mool'
+param purpose string = 'lims'
 
 // Part of the standard parameter contract. It is consumed by the pipeline (to
 // select the service connection), not by the template itself, so we disable the
@@ -59,7 +59,7 @@ param purpose string = 'mool'
 #disable-next-line no-unused-params
 param subscriptionId string
 
-@description('Resource IDs of the MOOL VMs to protect. Leave empty on first run to create the vault + policy before the VMs exist.')
+@description('Resource IDs of the lims VMs to protect. Leave empty on first run to create the vault + policy before the VMs exist.')
 param protectedVmResourceIds array = []
 
 @description('Tags applied to all resources.')
@@ -92,7 +92,7 @@ resource rg 'Microsoft.Resources/resourceGroups@2023-07-01' = {
 
 // 2) Deploy the reusable backup module INTO the resource group above.
 module backup '../../../modules/workload/recovery-services/main.bicep' = {
-  name: 'mool-vm-backup'
+  name: 'lims-vm-backup'
   scope: rg
   params: {
     location: location

@@ -16,7 +16,7 @@ pool:
 variables:
 	deploymentUnit: platform/connectivity
 	templateFile: src/platform/connectivity/hub-spoke.bicep
-	paramFile: config/fbi/platform/connectivity.westeurope.bicepparam
+	paramFile: config/nfi/platform/connectivity.westeurope.bicepparam
 	serviceConnection: sc-az-devops-trustedcloud-mgmt
 	location: westeurope
 

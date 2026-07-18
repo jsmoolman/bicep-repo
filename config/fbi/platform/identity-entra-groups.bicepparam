@@ -26,10 +26,10 @@ param environment = 'prd'
 
 param groups = [
   {
-    uniqueName: 'sg-mool-admins-prd'
-    displayName: 'MOOL Administrators (prd)'
-    description: 'Administrative access to the MOOL production workload.'
-    mailNickname: 'sg-mool-admins-prd'
+    uniqueName: 'sg-lims-admins-prd'
+    displayName: 'lims Administrators (prd)'
+    description: 'Administrative access to the lims production workload.'
+    mailNickname: 'sg-lims-admins-prd'
     // Replace with real Entra object IDs (GUIDs) of owners/members.
     ownerObjectIds: []
     memberObjectIds: []
@@ -37,10 +37,10 @@ param groups = [
     assignableToRole: false
   }
   {
-    uniqueName: 'sg-mool-readers-prd'
-    displayName: 'MOOL Readers (prd)'
-    description: 'Read-only access to the MOOL production workload.'
-    mailNickname: 'sg-mool-readers-prd'
+    uniqueName: 'sg-lims-readers-prd'
+    displayName: 'lims Readers (prd)'
+    description: 'Read-only access to the lims production workload.'
+    mailNickname: 'sg-lims-readers-prd'
     memberObjectIds: []
   }
 ]

@@ -7,7 +7,7 @@ All Azure resources and resource groups must carry the following tags:
 | Tag Key | Description | Example |
 |---|---|---|
 | `Environment` | Deployment environment | `dev`, `tst`, `acc`, `preprd`, `prd` |
-| `Workload` | Workload or application name | `mool`, `platform-connectivity` |
+| `Workload` | Workload or application name | `lims`, `platform-connectivity` |
 | `CostCenter` | Finance cost center code | `CC-1234` |
 | `Owner` | Team or individual responsible | `team-infrastructure` |
 | `ManagedBy` | Deployment method | `bicep-iac` |
@@ -23,7 +23,7 @@ All Azure resources and resource groups must carry the following tags:
 
 ## Enforcement
 
-Tags are enforced via Azure Policy (initiative: `fbi-mandatory-tags`) assigned at the management group level. Non-compliant resources are flagged in the compliance dashboard and blocked from deployment via deny policies on resource groups.
+Tags are enforced via Azure Policy (initiative: `nfi-mandatory-tags`) assigned at the management group level. Non-compliant resources are flagged in the compliance dashboard and blocked from deployment via deny policies on resource groups.
 
 ## Inheritance
 

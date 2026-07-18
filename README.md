@@ -1,13 +1,13 @@
-# azure-fbi-iac
+# azure-nfi-iac
 
-Infrastructure as Code repository for the FBI Azure tenant, built on Azure Landing Zones (ALZ) principles using Bicep.
+Infrastructure as Code repository for the nfi Azure tenant, built on Azure Landing Zones (ALZ) principles using Bicep.
 
 All Azure changes must be deployed, reviewed, tracked, and managed through this repository and its CI/CD pipelines. **No manual Azure Portal changes are allowed.**
 
 ## Repository Structure
 
 ```
-azure-fbi-iac/
+azure-nfi-iac/
 ├── docs/               # Architecture decisions and standards documentation
 ├── .azuredevops/       # Azure DevOps pipeline definitions and reusable templates
 ├── src/                # Deployment entry points (platform, landing zones, workloads)

@@ -1,35 +1,35 @@
-landingZone: mool
-businessOwner: fbi
+landingZone: lims
+businessOwner: nfi
 managementGroup: landingzones/corp
 region: westeurope
 
 subscriptions:
-  - name: mool-mgmt
+  - name: lims-mgmt
     environment: mgmt
     type: management
-    workload: mool
+    workload: lims
 
-  - name: mool-dev
+  - name: lims-dev
     environment: dev
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-tst
+  - name: lims-tst
     environment: tst
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-acc
+  - name: lims-acc
     environment: acc
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-preprd
+  - name: lims-preprd
     environment: preprd
     type: application
-    workload: mool
+    workload: lims
 
-  - name: mool-prd
+  - name: lims-prd
     environment: prd
     type: application
-    workload: mool
+    workload: lims

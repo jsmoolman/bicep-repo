@@ -1,7 +1,7 @@
 targetScope = 'resourceGroup'
 
-metadata name = 'MOOL — Monitoring'
-metadata description = 'Deploys action groups and metric alerts for MOOL workload resources.'
+metadata name = 'lims — Monitoring'
+metadata description = 'Deploys action groups and metric alerts for lims workload resources.'
 
 @description('Azure region.')
 param location string
@@ -16,11 +16,11 @@ param alertEmailAddress string = ''
 param tags object = {}
 
 resource actionGroup 'Microsoft.Insights/actionGroups@2023-01-01' = {
-  name: 'ag-mool-ops'
+  name: 'ag-lims-ops'
   location: 'global'
   tags: tags
   properties: {
-    groupShortName: 'moolops'
+    groupShortName: 'limsops'
     enabled: true
     emailReceivers: empty(alertEmailAddress) ? [] : [
       {

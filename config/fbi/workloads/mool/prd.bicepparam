@@ -1,13 +1,13 @@
-using '../../../../src/workloads/mool/main.bicep'
+using '../../../../src/workloads/lims/main.bicep'
 
 param location = 'westeurope'
 param environment = 'prd'
 param logAnalyticsWorkspaceId = '' // TODO: replace with actual resource ID after platform/management deployment
-param recoveryServicesVaultName = 'rsv-mool-prd-westeurope'
+param recoveryServicesVaultName = 'rsv-lims-prd-westeurope'
 param tags = {
   Environment: 'prd'
-  Workload: 'mool'
+  Workload: 'lims'
   ManagedBy: 'bicep-iac'
-  Owner: 'team-mool'
+  Owner: 'team-lims'
   CostCenter: 'CC-1001'
 }

@@ -1,6 +1,6 @@
 using '../../../src/platform/core/main.bicep'
 
-param managementGroupPrefix = 'fbi'
+param managementGroupPrefix = 'nfi'
 param location = 'westeurope'
 param tags = {
   Environment: 'prd'

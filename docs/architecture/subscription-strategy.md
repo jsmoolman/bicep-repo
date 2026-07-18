@@ -10,15 +10,15 @@
 
 | Subscription Name | Purpose | Environment | Management Group |
 |---|---|---|---|
-| `fbi-mgmt-prd` | Centralized logging, monitoring, automation | prd | fbi-platform-management |
-| `fbi-conn-prd` | Hub VNet / vWAN, Azure Firewall, DNS | prd | fbi-platform-connectivity |
-| `fbi-id-prd` | Domain controllers, LDAP, PKI | prd | fbi-platform-identity |
-| `fbi-mool-dev` | MOOL workload — development | dev | fbi-landingzones-corp |
-| `fbi-mool-tst` | MOOL workload — test | tst | fbi-landingzones-corp |
-| `fbi-mool-acc` | MOOL workload — acceptance | acc | fbi-landingzones-corp |
-| `fbi-mool-preprd` | MOOL workload — pre-production | preprd | fbi-landingzones-corp |
-| `fbi-mool-prd` | MOOL workload — production | prd | fbi-landingzones-corp |
+| `nfi-mgmt-prd` | Centralized logging, monitoring, automation | prd | nfi-platform-management |
+| `nfi-conn-prd` | Hub VNet / vWAN, Azure Firewall, DNS | prd | nfi-platform-connectivity |
+| `nfi-id-prd` | Domain controllers, LDAP, PKI | prd | nfi-platform-identity |
+| `nfi-lims-dev` | lims workload — development | dev | nfi-landingzones-corp |
+| `nfi-lims-tst` | lims workload — test | tst | nfi-landingzones-corp |
+| `nfi-lims-acc` | lims workload — acceptance | acc | nfi-landingzones-corp |
+| `nfi-lims-preprd` | lims workload — pre-production | preprd | nfi-landingzones-corp |
+| `nfi-lims-prd` | lims workload — production | prd | nfi-landingzones-corp |
 
 ## Vending Process
 
-New subscriptions are provisioned via the `landing-zones/subscription-vending` deployment unit. See `config/customer-a/landing-zones/mool/subscriptions.yaml` for the subscription manifest format.
+New subscriptions are provisioned via the `landing-zones/subscription-vending` deployment unit. See `config/customer-a/landing-zones/lims/subscriptions.yaml` for the subscription manifest format.

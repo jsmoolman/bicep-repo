@@ -24,7 +24,7 @@
 //   az deployment sub create \
 //     --location westeurope \
 //     --template-file   src/platform/identity/entra-groups.bicep \
-//     --parameters      config/fbi/platform/identity-entra-groups.bicepparam \
+//     --parameters      config/nfi/platform/identity-entra-groups.bicepparam \
 //     --what-if
 //
 // REQUIRED PERMISSIONS
@@ -49,7 +49,7 @@ param environment string
 @description('''
 Array of Entra group definitions. Each object:
 {
-  uniqueName:       string        // immutable idempotency key, e.g. 'sg-mool-admins-prd'
+  uniqueName:       string        // immutable idempotency key, e.g. 'sg-lims-admins-prd'
   displayName:      string        // portal display name
   description:      string?       // optional
   mailNickname:     string        // ASCII alias, required by Graph

@@ -65,6 +65,7 @@ stages:
             runOnce:
               deploy:
                 steps:
+                  - checkout: self
                   - template: steps-bicep-deploy.yml
                     parameters:
                       templateFile: ${{ parameters.templateFile }}

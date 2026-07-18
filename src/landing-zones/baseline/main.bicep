@@ -6,10 +6,10 @@ metadata description = 'Applies the per-subscription governance baseline: resour
 @description('Azure region for all resources.')
 param location string = 'westeurope'
 
-@description('Workload name used in resource naming (e.g. mool).')
+@description('Workload name used in resource naming (e.g. lims).')
 param workloadName string
 
-@description('Workload / purpose identifier used in tagging (e.g. mool).')
+@description('Workload / purpose identifier used in tagging (e.g. lims).')
 param purpose string
 
 @description('Environment code.')

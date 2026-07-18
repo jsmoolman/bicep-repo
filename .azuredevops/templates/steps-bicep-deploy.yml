@@ -32,7 +32,7 @@ steps:
       azureSubscription: ${{ parameters.serviceConnection }}
       scriptType: pscore
       scriptLocation: scriptPath
-      scriptPath: scripts/Invoke-BicepDeploy.cap
+      scriptPath: scripts/Invoke-BicepDeploy.ps1
       arguments: >-
         -TemplateFile "${{ parameters.templateFile }}"
         -ParameterFile "${{ parameters.paramFile }}"

@@ -10,8 +10,8 @@ This document tracks manual and automated test cases for Azure Policy assignment
 
 | Field | Value |
 |---|---|
-| Policy | `fbi-mandatory-tags` initiative |
-| Scope | FBI root management group |
+| Policy | `nfi-mandatory-tags` initiative |
+| Scope | nfi root management group |
 | Effect | Deny |
 
 **Steps:**
@@ -29,7 +29,7 @@ This document tracks manual and automated test cases for Azure Policy assignment
 | Field | Value |
 |---|---|
 | Policy | `Allowed locations` (built-in) |
-| Scope | FBI root management group |
+| Scope | nfi root management group |
 | Allowed | West Europe, North Europe |
 | Effect | Deny |
 
