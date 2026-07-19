@@ -12,12 +12,18 @@ using '../../../src/platform/connectivity/private-dns-vnet-links.bicep'
 //     --parameters config/nfi/platform/private-dns-vnet-links.dev.bicepparam
 
 param environment      = 'dev'
+param location         = 'westeurope'
+param subscriptionId   = '719f5040-fa8e-4b0a-bc2b-2e3fdc8163c2'
+param purpose          = 'lims'
+param linkNamePrefix   = 'vnl-nfi-lims'
 
 // DEV application VNet — subscription AZ-NFI-lims-dev (8ebb26a1-...), resource group rg-connectivity
+// Note: VNet name uses legacy short region code 'westeu' — pre-dates the current naming standard.
+//       Do not rename; this is an existing resource.
 param virtualNetworkId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-connectivity/providers/Microsoft.Network/virtualNetworks/nfi-lims-dev-westeu-vnet'
 
 param tags = {
-  environment: 'development'
-  purpose:     'lims'
+  Environment: 'dev'
+  Workload:    'lims'
   ManagedBy:   'bicep-iac'
 }

@@ -23,6 +23,8 @@ parameters:
   - name: serviceConnection
     type: string
     default: sc-az-devops-trustedcloud-mgmt
+  - name: environmentName
+    type: string
   - name: requireApproval
     type: boolean
     default: true
@@ -60,7 +62,7 @@ stages:
       jobs:
         - deployment: Deploy
           displayName: Deploy
-          environment: ${{ parameters.deploymentUnit }}
+          environment: ${{ parameters.environmentName }}
           strategy:
             runOnce:
               deploy:

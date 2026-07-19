@@ -30,3 +30,4 @@ stages:
       managementGroupId: $(managementGroupId)
       location: ${{ variables.location }}
       serviceConnection: ${{ variables.serviceConnection }}
+      environmentName: ${{ variables.deploymentUnit }}

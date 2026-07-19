@@ -26,6 +26,7 @@ stages:
 			deploymentUnit: ${{ variables.deploymentUnit }}
 			templateFile: ${{ variables.templateFile }}
 			paramFile: ${{ variables.paramFile }}
-			deploymentScope: subscription
-			location: ${{ variables.location }}
-			serviceConnection: ${{ variables.serviceConnection }}
+      deploymentScope: subscription
+      location: ${{ variables.location }}
+      serviceConnection: ${{ variables.serviceConnection }}
+      environmentName: ${{ variables.deploymentUnit }}

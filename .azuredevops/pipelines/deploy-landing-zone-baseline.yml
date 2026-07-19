@@ -29,3 +29,4 @@ stages:
 			deploymentScope: subscription
 			location: ${{ variables.location }}
 			serviceConnection: ${{ variables.serviceConnection }}
+			environmentName: ${{ variables.deploymentUnit }}
