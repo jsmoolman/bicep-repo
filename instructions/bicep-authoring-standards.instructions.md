@@ -26,16 +26,16 @@ Do not write resource blocks from memory.
 ## Naming convention
 
 ```
-{type}-{workload}-{environment}-{region}
+{type}-{workload}-{environment}-{region-suffix}
 ```
 
-The region segment is always the full Azure region name (e.g. `westeurope`). Never use short region codes such as `weu`. An optional zero-padded instance suffix (e.g. `-01`) is only added when explicitly required.
+The region segment in resource names uses the **short region code** (e.g. `westeu`). The full Azure region name (e.g. `westeurope`) is used only in deployment location parameters and properties — never as a name segment.
 
 | Resource | Example |
 |---|---|
-| Resource Group | `rg-lims-dev-westeurope` |
-| Key Vault | `kv-lims-dev-westeurope` |
-| Storage Account | `stlimsdevwesteurope` (no hyphens — Azure constraint) |
+| Resource Group | `rg-lims-dev-westeu` |
+| Key Vault | `kv-lims-dev-westeu` |
+| Storage Account | `stlimsdevwesteu` (no hyphens — Azure constraint) |
 
 ## targetScope rules
 

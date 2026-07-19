@@ -1,4 +1,4 @@
-// =============================================================================
+﻿// =============================================================================
 // SAMPLE PARAMETERS: lims — VM Backup (dev)
 // =============================================================================
 // PURPOSE
@@ -30,7 +30,7 @@ param subscriptionId = 'jsm-dev-{guid}'
 
 // VM resource IDs to protect. Left empty for the first deployment so the vault
 // and policy are created up front; populate after the VMs exist, e.g.:
-//   '/subscriptions/<sub>/resourceGroups/rg-lims-dev-westeurope/providers/Microsoft.Compute/virtualMachines/vm-lims-app-dev-westeurope'
+//   '/subscriptions/<sub>/resourceGroups/rg-lims-dev-westeu/providers/Microsoft.Compute/virtualMachines/vm-lims-app-dev-westeu'
 param protectedVmResourceIds = []
 
 param tags = {

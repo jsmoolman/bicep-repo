@@ -1,4 +1,4 @@
-# Subscription Strategy
+﻿# Subscription Strategy
 
 ## Principles
 
@@ -21,4 +21,4 @@
 
 ## Vending Process
 
-New subscriptions are provisioned via the `landing-zones/subscription-vending` deployment unit. See `config/customer-a/landing-zones/lims/subscriptions.yaml` for the subscription manifest format.
+New subscriptions are provisioned via the `landing-zones/subscription-vending` deployment unit. See `config/nfi/landing-zones/lims/subscriptions.yaml` for the subscription manifest format.

@@ -20,8 +20,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Pattern: <abbrev>-<workload>-<env>-<region>-<instance>
-$namingPattern = '^[a-z]{2,6}-[a-z0-9]+-(dev|tst|acc|preprd|prd|mgmt)-(westeurope|northeurope|uksouth|ukwest)(-\d{2})?$'
+# Pattern: <abbrev>-<workload>-<env>-<region-suffix>-<instance>
+$namingPattern = '^[a-z]{2,6}-[a-z0-9]+-(dev|tst|acc|preprd|prd|mgmt)-(westeu|northeu|uksouth|ukwest)(-\d{2})?$'
 
 $bicepFiles = Get-ChildItem -Path $Path -Filter '*.bicep' -Recurse
 $violations = [System.Collections.Generic.List[pscustomobject]]::new()

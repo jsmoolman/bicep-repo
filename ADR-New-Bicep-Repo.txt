@@ -477,7 +477,7 @@ src/workloads/lims/
 modules/org/
 modules/platform/
 modules/workload/
-config/customer-a/
+config/nfi/
 .azuredevops/pipelines/
 .azuredevops/templates/
 docs/

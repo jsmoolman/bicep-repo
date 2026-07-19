@@ -1,4 +1,4 @@
-# azure-nfi-iac
+﻿# azure-nfi-iac
 
 Infrastructure as Code repository for the nfi Azure tenant, built on Azure Landing Zones (ALZ) principles using Bicep.
 
@@ -29,8 +29,8 @@ azure-nfi-iac/
 
 1. Clone this repository.
 2. Authenticate with Azure: `az login --tenant <tenant-id>`
-3. Review and update parameter files under `config/customer-a/`.
-4. Run a what-if deployment: `./scripts/Invoke-BicepWhatIf.ps1 -TemplateFile src/platform/core/main.bicep -ParameterFile config/customer-a/platform/core.bicepparam -DeploymentScope managementGroup`
+3. Review and update parameter files under `config/nfi/`.
+4. Run a what-if deployment: `./scripts/Invoke-BicepWhatIf.ps1 -TemplateFile src/platform/core/main.bicep -ParameterFile config/nfi/platform/core.bicepparam -DeploymentScope managementGroup`
 5. Submit a PR — the CI pipeline will run validate, lint, PSRule, and what-if automatically.
 
 ## Deployment Order
