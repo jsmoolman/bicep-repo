@@ -1,0 +1,61 @@
+trigger: none
+
+pr:
+  branches:
+    include:
+      - main
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - bash: |
+      set -euo pipefail
+      shopt -s globstar nullglob
+      files=(**/*.bicep)
+      if [ ${#files[@]} -eq 0 ]; then
+        echo "No .bicep files found — nothing to build or lint."
+        exit 0
+      fi
+      status=0
+      for f in "${files[@]}"; do
+        echo "== bicep build: $f =="
+        az bicep build --file "$f" --stdout > /dev/null || status=1
+        echo "== bicep lint: $f =="
+        az bicep lint --file "$f" || status=1
+      done
+      exit $status
+    displayName: Bicep build and lint
+
+  - bash: |
+      set -euo pipefail
+      shopt -s globstar nullglob
+      files=(**/*.bicepparam)
+      if [ ${#files[@]} -eq 0 ]; then
+        echo "No .bicepparam files found — nothing to build."
+        exit 0
+      fi
+      status=0
+      for f in "${files[@]}"; do
+        echo "== bicep build-params: $f =="
+        az bicep build-params --file "$f" --stdout > /dev/null || status=1
+      done
+      exit $status
+    displayName: Bicep parameter file validation
+
+  - bash: |
+      set -euo pipefail
+      shopt -s globstar nullglob
+      # Guards the customer policy documented in docs/scope.md: no Entra/Graph
+      # mutation, no tenant-wide RBAC, no management-group/subscription creation.
+      pattern='Microsoft\.Graph/|Microsoft\.Management/managementGroups|Microsoft\.Subscription/|Microsoft\.Authorization/roleAssignments|Microsoft\.Authorization/roleDefinitions'
+      matches=$(grep -RInE "$pattern" --include='*.bicep' --include='*.bicepparam' . || true)
+      if [ -n "$matches" ]; then
+        echo "Prohibited resource types found in deployable Bicep files (see docs/scope.md):"
+        echo "$matches"
+        exit 1
+      fi
+      echo "No prohibited resource types found."
+    displayName: Prohibited resource type guard

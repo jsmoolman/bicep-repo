@@ -6,6 +6,8 @@ alwaysApply: false
 
 # Bicep Authoring Standards
 
+Before authoring any resource, confirm it falls within the allowed capability categories in `docs/scope.md`. Do not author Entra/Graph resources, RBAC, management groups, subscription vending, or general infrastructure (networking, VMs, storage, databases, Key Vault, app hosting) — these are prohibited or require an explicit architecture decision.
+
 ## Mandatory lookup chain — run in this order, do not skip
 
 Before writing any resource block:
@@ -18,9 +20,8 @@ Before writing any resource block:
    Authoritative source for syntax, scopes, and API versions.
 4. **Bicep MCP tools** (run AFTER the online checks):
    - `list_avm_metadata` — find the AVM module and get the latest pinned version
-   - `get_az_resource_type_schema` — verify resource type properties and correct API version
+   - `get_azure_resource_type_schema` — verify resource type properties and correct API version
    - `get_bicep_best_practices` — review current guidance before coding
-   - `get_bicep_file_diagnostics` — lint every file after writing
    - `format_bicep_file` — format before committing
 
 Do not write resource blocks from memory.
@@ -28,28 +29,26 @@ Do not write resource blocks from memory.
 ## Naming convention
 
 ```
-{type}-{workload}-{feature}-{environment}-{region-suffix}
+{type}-{workload}-{environment}-{region-suffix}
 ```
 
 | Resource | Example |
 |---|---|
-| Resource Group | `rg-lims-keyvault-dev-westeu` |
-| Key Vault | `kv-lims-keyvault-dev-westeu` |
-| Storage Account | `stlimsfeaturedevwesteu` (no hyphens — Azure constraint) |
+| Resource Group | `rg-lims-dev-westeu` |
+| Log Analytics Workspace | `law-lims-dev-westeu` |
 
 ## targetScope rules
 
-- `subscription` — resource groups, subscription-level role assignments, policies
+- `subscription` — resource groups, subscription-level role assignments (only where explicitly approved), policies
 - `resourceGroup` — any resource that lives inside a resource group
 - Never default every module to `subscription`. Choose based on the resource being deployed.
 
-## Parameter contract (every param file must include these five)
+## Parameter contract (every param file must include these)
 
 ```bicep
-param environment    = 'dev'           // dev | tst | acc | preprd | prd | mgmt
+param environment    = 'dev'           // dev | tst | acc | preprd | prd
 param location       = 'westeurope'
 param purpose        = 'lims'
-param subscriptionId = '<guid>'
 param tags           = {
   environment: 'development'           // long-form display name
   purpose:     'lims'

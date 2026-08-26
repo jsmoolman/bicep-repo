@@ -1,84 +1,74 @@
 ﻿# azure-nfi-iac
 
-Infrastructure as Code repository for the nfi Azure tenant, built on Azure Landing Zones (ALZ) principles using Bicep.
+Infrastructure-as-code foundation for **NFI Azure operational automation, observability, reporting, and approved maintenance-as-code**, built with Bicep.
 
-All Azure changes must be deployed, reviewed, tracked, and managed through this repository and its CI/CD pipelines. **No manual Azure Portal changes are allowed.**
+The primary consumer is **LIMS**. Selected reusable capabilities (for example availability or cost workbooks) may also target other NFI project subscriptions or a management-group scope, without duplicating implementation per consumer.
 
-## Repository Structure
+## What this repository is not
+
+This repository is **not** a general Azure Landing Zone or tenant-provisioning framework. It does not manage the NFI tenant, landing zones, identity, networking, or general workload infrastructure. See [`docs/scope.md`](docs/scope.md) for the exact boundary between what is allowed by default, what requires an explicit architecture decision, and what is prohibited.
+
+Key boundaries:
+
+- **Identity is out of scope.** The Azure DevOps service connection used by this repository has intentionally been granted no Entra ID permissions. This repository contains no deployable functionality for Entra users/groups, app registrations, service principals, directory roles, Microsoft Graph mutations, or RBAC/managed-identity creation.
+- **General infrastructure provisioning is out of scope by default.** Networking, virtual machines, storage, databases, Key Vault, application hosting, management groups, subscription vending, and landing-zone construction are not provisioned from this repository unless a specific, separate architecture decision approves it.
+- **No Terraform-style state.** This repository relies on normal idempotent Azure Resource Manager / Bicep deployment behavior — no state files, state storage accounts, or deployment-state databases.
+
+## Supported LIMS environments
+
+Exactly:
+
+- `dev`
+- `tst`
+- `acc`
+- `preprd`
+- `prd`
+
+## Repository structure
 
 ```
 azure-nfi-iac/
-├── docs/               # Architecture decisions and standards documentation
-├── .azuredevops/       # Azure DevOps pipeline definitions and reusable templates
-├── src/                # Deployment entry points (platform, landing zones, workloads)
-├── modules/            # Reusable Bicep modules (org, platform, workload, policy)
-├── lib/                # ALZ library artifacts (policy definitions, archetypes, etc.)
-├── config/             # Customer-specific parameter files per environment
-├── scripts/            # PowerShell helper scripts (supporting tasks only)
-└── tests/              # PSRule, Bicep test harnesses, and policy tests
+├── .azuredevops/pipelines/   # Pipeline definitions (currently: one static-validation CI pipeline)
+├── docs/                     # Purpose, scope, and architecture documentation
+├── bicepconfig.json
+└── README.md
 ```
+
+Additional areas are added only once they contain real, deployable content:
+
+| Area | Purpose |
+|---|---|
+| `src/observability/` | Deployable compositions for workbooks, alerts, dashboards, monitoring |
+| `src/automation/` | Declarative operational automation (approved Logic Apps) |
+| `modules/` | Genuinely reusable, environment-neutral Bicep modules |
+| `operations/` | Imperative operational functions (e.g. VM start/stop/restart) |
+| `config/nfi/lims/` | LIMS-specific configuration per environment (dev/tst/acc/preprd/prd) |
+| `config/nfi/shared/` | Configuration for reusable services targeting other subscriptions/management groups |
+
+This repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why) — those directories will only reappear once there is real operational capability to put in them. No feature backlog (workbooks, alerts, Logic Apps, etc.) has been implemented yet.
+
+## Development / deployment philosophy
+
+```
+feature branch → static validation (CI) → review → merge to main → automated validation → what-if where applicable → deployment
+```
+
+- Implementation is reusable; **configuration** (parameter files) drives differences between environments and targets.
+- A change intended for `prd` is not artificially routed through `dev`/`tst`/`acc`/`preprd` — environment applicability is explicit configuration, not a forced promotion chain.
+- There are no default manual Azure DevOps approval gates in this repository's model.
+- A deployment pipeline is added alongside the first real operational capability, not speculatively ahead of it.
+
+See [`docs/architecture.md`](docs/architecture.md) for more detail.
 
 ## Prerequisites
 
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) >= 2.60
-- [Bicep CLI](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install) >= 0.29
-- [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) >= 7.4
-- [PSRule for Azure](https://azure.github.io/PSRule.Rules.Azure/) >= 1.38
-
-## Getting Started
-
-1. Clone this repository.
-2. Authenticate with Azure: `az login --tenant <tenant-id>`
-3. Review and update parameter files under `config/nfi/`.
-4. Run a what-if deployment: `./scripts/Invoke-BicepWhatIf.ps1 -TemplateFile src/platform/core/main.bicep -ParameterFile config/nfi/platform/core.bicepparam -DeploymentScope managementGroup`
-5. Submit a PR — the CI pipeline will run validate, lint, PSRule, and what-if automatically.
-
-## Deployment Order
-
-Deployments follow a strict layered order. See [`docs/architecture/deployment-flow.md`](docs/architecture/deployment-flow.md) for the full dependency graph and pipeline flow.
-
-| Step | Layer | Pipeline |
-|---|---|---|
-| 0 | **Bootstrap** _(manual, one-time)_ | — |
-| 1 | **Platform Core** — management groups, policies, RBAC | `deploy-platform-core.yml` |
-| 2 | **Platform Subscriptions** — management, connectivity, identity | `deploy-platform-core.yml` |
-| 3 | **Platform Shared Services** — Log Analytics, hub networking, Defender | `deploy-platform-management.yml`, `deploy-platform-connectivity.yml` |
-| 4 | **Subscription Vending** — workload subscriptions, budgets, baseline RBAC | `deploy-subscription-vending.yml` |
-| 5 | **Landing Zone Baseline** — resource groups, tags, diagnostics, monitoring | `deploy-landing-zone-baseline.yml` |
-| 6 | **Workload Deployment** — application resources, backup, alerting | `deploy-workload.yml` |
-
-## Identity and Access Model
-
-Two identities separate planning from applying:
-
-| Identity | Permissions | Used by |
-|---|---|---|
-| **Plan identity** | Reader + What-if | PR pipelines |
-| **Apply identity** | Contributor (scoped) | Deploy pipelines, post-approval only |
-
-The apply identity requires an Azure DevOps environment approval before any pipeline can use it for protected environments (`acc`, `preprd`, `prd`).
-
-## Bicep Design Rules
-
-1. Bicep files must not be duplicated per environment — reuse the same composition with different parameter files.
-2. Environment-specific values belong in `config/` parameter files, not in `src/` or `modules/`.
-3. Reusable modules must not contain hardcoded environment names or application names.
-4. Naming and tagging must be centralised and consistently applied (see [`docs/architecture/naming-standard.md`](docs/architecture/naming-standard.md)).
-5. Policy and RBAC must be managed as code.
-6. Workload deployments must not directly modify tenant-wide platform resources.
-7. Platform deployments must not contain workload-specific implementation details.
-8. Scripts support deployments but do not replace Bicep where Bicep is suitable.
-9. What-if output must be reviewed before applying to protected environments.
-10. Portal changes are not allowed except for approved break-glass scenarios.
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) with the Bicep extension
+- [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) >= 7.4 (for any operational scripts under `operations/` or `scripts/`, once added)
 
 ## Documentation
 
 | Document | Description |
 |---|---|
-| [`docs/architecture/management-group-hierarchy.md`](docs/architecture/management-group-hierarchy.md) | Management group structure and policy inheritance |
-| [`docs/architecture/subscription-strategy.md`](docs/architecture/subscription-strategy.md) | Subscription catalogue and placement strategy |
-| [`docs/architecture/naming-standard.md`](docs/architecture/naming-standard.md) | Resource naming convention and examples |
-| [`docs/architecture/tagging-standard.md`](docs/architecture/tagging-standard.md) | Mandatory and optional tags |
-| [`docs/architecture/policy-strategy.md`](docs/architecture/policy-strategy.md) | Policy assignment scopes and ALZ alignment |
-| [`docs/architecture/deployment-flow.md`](docs/architecture/deployment-flow.md) | Layered deployment model, pipeline flow, identity model |
-| [`docs/decisions/adr-0001-modern-azure-tenant-iac-repository-structure.md`](docs/decisions/adr-0001-modern-azure-tenant-iac-repository-structure.md) | Architecture decision record for this repository structure |
+| [`docs/scope.md`](docs/scope.md) | Allowed / explicit-decision / prohibited capability boundaries |
+| [`docs/architecture.md`](docs/architecture.md) | Design principles and deployment model |
+| [`docs/operations.md`](docs/operations.md) | Operational behavior that actually exists today |

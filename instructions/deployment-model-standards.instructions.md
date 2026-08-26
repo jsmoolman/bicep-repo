@@ -4,58 +4,28 @@ applyTo: "**"
 
 # Deployment Model Standards
 
-## Layered deployment order
-
-Always deploy in this sequence — later layers depend on earlier ones.
-
-| Step | Layer | Scope |
-|---|---|---|
-| 0 | **Bootstrap** _(manual, once)_ — identities, service connections, initial RBAC | tenant |
-| 1 | **Platform Core** — MG hierarchy, role definitions, policy definitions, initiatives, assignments | management group |
-| 2 | **Platform Subscriptions** — management, connectivity, identity/security subscriptions | management group |
-| 3 | **Platform Shared Services** — Log Analytics, Automation, Defender/Sentinel, DCRs, alerts, hub network | subscription |
-| 4 | **Subscription Vending** — create workload subscriptions, MG placement, budgets, baseline RBAC | management group |
-| 5 | **Landing Zone Baseline** — resource groups, tags, diagnostics, monitoring, backup, RBAC per subscription | subscription |
-| 6 | **Workload Deployment** — application resources, alerts, VM extensions, backup policies | subscription / resource group |
-
-## Pipeline model
+## Operating model
 
 ```
-Pull Request
-  -> bicep restore → build → lint
-  -> PSRule for Azure
-  -> what-if  (plan identity — read/what-if only)
-  -> publish what-if output as artefact
-
-Merge to main
-  -> what-if again  (plan identity)
-  -> manual approval gate for protected environments
-  -> deploy  (apply identity — scoped write, post-approval only)
+feature branch → static validation (CI) → review → merge to main → automated validation → what-if where applicable → deployment
 ```
 
-## Identity separation
+There is no layered platform → landing-zone → workload-vending deployment sequence in this repository, and no default manual Azure DevOps approval gate. A change intended for `prd` must not be forced artificially through `dev`, `tst`, `acc`, and `preprd` — environment applicability is explicit configuration, not a duplicated implementation or a mandatory promotion chain.
 
-| Identity | Permissions | Used by |
-|---|---|---|
-| **Plan identity** | Reader + What-if | PR pipelines |
-| **Apply identity** | Contributor (scoped to deployment scope) | Deploy pipelines, after approval |
+## Current pipeline
 
-Scope as narrowly as possible: prefer resource group scope for workload resources; only use management group or tenant scope where strictly required.
+The only pipeline is `.azuredevops/pipelines/ci.yml`. It performs static validation on pull requests (Bicep build/lint, Bicep parameter file build, and a prohibited-resource-type guard) and does not deploy anything.
 
-## Deployment Stacks guidance
+A deployment pipeline is added alongside the first real operational capability — do not build deployment/what-if/approval machinery ahead of an actual deployable composition.
 
-Consider Azure Deployment Stacks for platform and baseline layers.
+## Identity boundary
 
-**Good candidates** — `detach-on-unmanage` safe to start:
-- Management group policy assignments
-- Landing zone baseline resources
-- Standard monitoring resources
-- Dev/test environments
+The Azure DevOps service connection used by this repository has intentionally been granted **no Entra ID permissions** (customer policy). Never implement or plan around Entra/Graph mutations, RBAC creation, service principal management, or managed-identity creation. Do not treat the lack of identity permission as a defect to work around, and do not broaden permissions. See `docs/scope.md`.
 
-**Avoid delete-on-unmanage for:**
-- Production workload resources
-- Shared connectivity resources
-- Anything with persistent data
-- Anything where accidental deletion would be dangerous
+## Deployment Stacks
 
-Start with `actionOnUnmanage: detachAll`. Only move to `deleteAll` for well-understood, non-data stacks.
+Do not use Azure Deployment Stacks purely to introduce resource-ownership/state tracking. Normal idempotent ARM/Bicep deployment behavior is sufficient unless a later, specific requirement approves Deployment Stacks.
+
+## Scope discipline
+
+Infrastructure, networking, policy, RBAC, and subscription/management-group configuration changes require an explicit architecture decision before implementation — they are not default repository authority. See `docs/scope.md` for the full boundary.
