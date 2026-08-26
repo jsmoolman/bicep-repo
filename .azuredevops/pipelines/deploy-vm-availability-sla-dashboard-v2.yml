@@ -1,0 +1,118 @@
+# =============================================================================
+# Deploy VM Availability SLA Dashboard v2
+# =============================================================================
+# Purpose:
+#   Deploys the reusable VM Availability SLA Workbook v2 composition
+#   (src/observability/vm-availability-sla-dashboard-v2/main.bicep) using a
+#   project-specific parameter file. Defaults to the LIMS configuration but
+#   accepts a different parameter-file path so the same reusable module and
+#   entrypoint can later be reused for another NFI project.
+#
+# Commissioning note:
+#   trigger/pr are intentionally disabled. This pipeline does not run
+#   automatically on push or merge. It is run manually (Run pipeline) only
+#   after a reviewed, explicit decision to validate or deploy.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (Contributor on the target subscription)
+    type: string
+    default: 'sc-lims-mgt'
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+variables:
+  templateFile: 'src/observability/vm-availability-sla-dashboard-v2/main.bicep'
+  deploymentName: 'vm-availability-sla-dashboard-v2-$(Build.BuildId)'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        echo "== bicep build: $(templateFile) =="
+        az bicep build --file "$(templateFile)" --stdout > /dev/null
+        echo "== bicep lint: $(templateFile) =="
+        az bicep lint --file "$(templateFile)"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az deployment sub what-if \
+              --name "$(deploymentName)" \
+              --location "${{ parameters.location }}" \
+              --template-file "$(templateFile)" \
+              --parameters "${{ parameters.parametersFile }}"
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployWorkbook
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "$(deploymentName)" \
+              --location "${{ parameters.location }}" \
+              --template-file "$(templateFile)" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            workbookResourceId=$(echo "$outputs" | jq -r '.workbookResourceId.value')
+            workbookName=$(echo "$outputs"        | jq -r '.workbookName.value')
+            workbookDisplayName=$(echo "$outputs" | jq -r '.workbookDisplayName.value')
+            workbookRg=$(echo "$outputs"          | jq -r '.workbookResourceGroupName.value')
+
+            echo "##vso[task.setvariable variable=workbookResourceId;isOutput=true]$workbookResourceId"
+            echo "##vso[task.setvariable variable=workbookName;isOutput=true]$workbookName"
+
+            echo "========================================="
+            echo "Workbook deployed successfully"
+            echo "========================================="
+            echo "  Display name : $workbookDisplayName"
+            echo "  Resource ID  : $workbookResourceId"
+            echo "  Resource name: $workbookName"
+            echo "  Resource group: $workbookRg"
