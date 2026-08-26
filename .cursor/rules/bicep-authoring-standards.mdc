@@ -1,5 +1,5 @@
 ---
-description: Mandatory lookup chain, naming convention, and targetScope rules for all Bicep authoring in this repository.
+description: Bicep authoring standards for this repository — module selection, naming, scope, and parameter contracts.
 globs: **/*.bicep,**/*.bicepparam
 alwaysApply: false
 ---
@@ -8,34 +8,16 @@ alwaysApply: false
 
 Before authoring any resource, confirm it falls within the allowed capability categories in `docs/scope.md`. Do not author Entra/Graph resources, RBAC, management groups, subscription vending, or general infrastructure (networking, VMs, storage, databases, Key Vault, app hosting) — these are prohibited or require an explicit architecture decision.
 
-## Mandatory lookup chain — run in this order, do not skip
+## Module selection
 
-Before writing any resource block:
+- Consider Azure Verified Modules (AVM) — https://azure.github.io/Azure-Verified-Modules/ — and use one where it genuinely reduces implementation or maintenance effort. Do not reach for AVM (or any external module) simply because a module exists; a plain resource declaration is often simpler and easier to maintain for small, focused compositions.
+- Pin exact versions for any external module reference (AVM, Bicep Registry, or other) — never float an unpinned or `:latest` version.
+- Verify resource types, properties, and API versions against authoritative Microsoft documentation (https://learn.microsoft.com/azure/azure-resource-manager/bicep/) or the ARM resource schema before writing a resource block.
+- Bicep MCP tools (e.g. `get_azure_resource_type_schema`, `get_bicep_best_practices`, `format_bicep_file`) are useful when available, but their availability is not a prerequisite for development — Microsoft Learn and the Bicep CLI are sufficient on their own.
 
-1. **Azure Verified Modules (AVM)** — https://azure.github.io/Azure-Verified-Modules/
-   Use AVM when a module exists. It is Microsoft's current recommended standard.
-2. **Bicep Registry source** — https://github.com/Azure/bicep-registry-modules
-   Review params, outputs, and patterns before coding.
-3. **Microsoft Learn Bicep docs** — https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/
-   Authoritative source for syntax, scopes, and API versions.
-4. **Bicep MCP tools** (run AFTER the online checks):
-   - `list_avm_metadata` — find the AVM module and get the latest pinned version
-   - `get_azure_resource_type_schema` — verify resource type properties and correct API version
-   - `get_bicep_best_practices` — review current guidance before coding
-   - `format_bicep_file` — format before committing
+## Naming
 
-Do not write resource blocks from memory.
-
-## Naming convention
-
-```
-{type}-{workload}-{environment}-{region-suffix}
-```
-
-| Resource | Example |
-|---|---|
-| Resource Group | `rg-lims-dev-westeu` |
-| Log Analytics Workspace | `law-lims-dev-westeu` |
+Follow the naming convention required by the target customer, subscription, or resource type. Do not force a fixed pattern such as `{type}-{workload}-{environment}-{region}` onto scopes or resources where workload, environment, or region genuinely do not apply (e.g. management-group-scoped resources or cross-project shared services).
 
 ## targetScope rules
 
@@ -43,14 +25,8 @@ Do not write resource blocks from memory.
 - `resourceGroup` — any resource that lives inside a resource group
 - Never default every module to `subscription`. Choose based on the resource being deployed.
 
-## Parameter contract (every param file must include these)
+## Parameter contracts
 
-```bicep
-param environment    = 'dev'           // dev | tst | acc | preprd | prd
-param location       = 'westeurope'
-param purpose        = 'lims'
-param tags           = {
-  environment: 'development'           // long-form display name
-  purpose:     'lims'
-}
-```
+Include only the parameters a composition or module actually uses. Do not require every parameter file to declare `environment`, `location`, `purpose`, and `tags` by default — add each one only when the deployment genuinely needs it.
+
+Do not hardcode or assume a specific workload (e.g. `purpose = 'lims'`) in reusable modules or shared compositions. LIMS is the primary but not the only consumer of this repository's reusable capabilities — workload/project identifiers are supplied by the caller through `config/`, so the same composition stays usable for other projects, subscriptions, or management-group scopes.

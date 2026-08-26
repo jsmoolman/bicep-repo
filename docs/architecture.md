@@ -19,7 +19,7 @@ The old platform/landing-zone/subscription-vending/tenant-RBAC code and pipeline
 ## Design principles
 
 1. **Reuse over duplication.** One reusable Bicep composition per deployment unit; environment and target differences are driven by configuration, not by duplicated Bicep.
-2. **Configuration-driven targeting.** `config/` defines target environment, subscription, management group (where relevant), region, and workload-specific values. Reusable modules and compositions stay environment- and customer-neutral.
+2. **Configuration-driven targeting.** Target environment, subscription, management group (where relevant), region, and workload-specific values are supplied through configuration (`config/`, once it has content — see "Current state" below), not hardcoded into reusable modules or compositions, which stay environment- and customer-neutral.
 3. **Bicep for declarative operational resources.** Workbooks, alerts, dashboards, diagnostic settings, and Logic Apps are declared in Bicep.
 4. **PowerShell/Azure CLI for imperative maintenance.** Operational actions that are inherently imperative (e.g. a VM start/stop/restart) are implemented as scripts under `operations/`, not forced into Bicep.
 5. **No state backend.** Normal idempotent ARM/Bicep deployment behavior is sufficient — no Terraform-style state, and no Azure Deployment Stacks used purely for resource-ownership tracking.
@@ -35,4 +35,4 @@ The old platform/landing-zone/subscription-vending/tenant-RBAC code and pipeline
 
 ## Current state
 
-As of this milestone, the repository contains no deployable Bicep, modules, or operational scripts — only the pipeline, configuration, and documentation foundation. A deployment pipeline and the first real operational capability (e.g. a LIMS availability workbook or alert) will be added together in a future change, once specifically scoped and approved. This avoids speculative framework code for capabilities that do not exist yet.
+As of this milestone, the repository contains no deployable Bicep, modules, configuration, or operational scripts — only the pipeline and documentation foundation. There is no `config/` content yet; it is added alongside the first real composition that needs it. A deployment pipeline and the first real operational capability (e.g. a LIMS availability workbook or alert) will be added together in a future change, once specifically scoped and approved. This avoids speculative framework code for capabilities that do not exist yet.

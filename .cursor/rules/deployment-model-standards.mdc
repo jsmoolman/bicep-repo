@@ -15,7 +15,7 @@ There is no layered platform → landing-zone → workload-vending deployment se
 
 ## Current pipeline
 
-The only pipeline is `.azuredevops/pipelines/ci.yml`. It performs static validation on pull requests (Bicep build/lint, Bicep parameter file build, and a prohibited-resource-type guard) and does not deploy anything.
+The only pipeline is `.azuredevops/pipelines/ci.yml`. It runs on every push to every branch, including `main` (Bicep build/lint, Bicep parameter file build, and a prohibited-resource-type guard), and does not deploy anything. There is no PR-specific trigger.
 
 A deployment pipeline is added alongside the first real operational capability — do not build deployment/what-if/approval machinery ahead of an actual deployable composition.
 

@@ -8,7 +8,7 @@ No operational capability (workbooks, alerts, Logic Apps, VM maintenance, backup
 
 ## Continuous Integration
 
-The only pipeline in this repository is [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml). It runs on pull requests targeting `main` and performs static validation only — it does not deploy or otherwise mutate Azure:
+The only pipeline in this repository is [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml). It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger.
 
 1. **Bicep build and lint** — every `*.bicep` file in the repository is compiled and linted.
 2. **Bicep parameter file validation** — every `*.bicepparam` file is built to confirm it resolves against its composition.

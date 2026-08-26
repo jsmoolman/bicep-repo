@@ -1,6 +1,6 @@
 ﻿# azure-nfi-iac
 
-Infrastructure-as-code foundation for **NFI Azure operational automation, observability, reporting, and approved maintenance-as-code**, built with Bicep.
+**NFI Azure operational automation and observability-as-code** foundation, built with Bicep — for operational automation, observability, reporting, and approved maintenance-as-code, not general infrastructure provisioning.
 
 The primary consumer is **LIMS**. Selected reusable capabilities (for example availability or cost workbooks) may also target other NFI project subscriptions or a management-group scope, without duplicating implementation per consumer.
 
@@ -62,7 +62,7 @@ See [`docs/architecture.md`](docs/architecture.md) for more detail.
 
 ## Prerequisites
 
-- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli) with the Bicep extension
+- [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli), which installs and manages the [Bicep CLI](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install#azure-cli) automatically (`az bicep install` / `az bicep upgrade`) — Bicep is a standalone CLI, not an Azure CLI extension
 - [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) >= 7.4 (for any operational scripts under `operations/` or `scripts/`, once added)
 
 ## Documentation
