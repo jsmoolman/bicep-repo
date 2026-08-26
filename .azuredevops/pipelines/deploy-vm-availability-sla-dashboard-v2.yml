@@ -79,7 +79,6 @@ steps:
             az deployment sub what-if \
               --name "$(deploymentName)" \
               --location "${{ parameters.location }}" \
-              --template-file "$(templateFile)" \
               --parameters "${{ parameters.parametersFile }}"
 
   - ${{ if eq(parameters.action, 'deploy') }}:
@@ -96,7 +95,6 @@ steps:
             outputs=$(az deployment sub create \
               --name "$(deploymentName)" \
               --location "${{ parameters.location }}" \
-              --template-file "$(templateFile)" \
               --parameters "${{ parameters.parametersFile }}" \
               --query properties.outputs \
               --output json)

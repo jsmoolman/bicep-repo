@@ -28,24 +28,23 @@ Exactly:
 
 ```
 azure-nfi-iac/
-├── .azuredevops/pipelines/   # Pipeline definitions (currently: one static-validation CI pipeline)
+├── .azuredevops/pipelines/   # ci.yml (static validation) + per-capability deployment pipelines
+├── src/observability/        # Deployable compositions (entrypoints) for workbooks, alerts, dashboards
+├── modules/observability/    # Genuinely reusable, environment-neutral Bicep modules
+├── config/nfi/lims/          # LIMS-specific configuration (parameter files)
 ├── docs/                     # Purpose, scope, and architecture documentation
 ├── bicepconfig.json
 └── README.md
 ```
 
-Additional areas are added only once they contain real, deployable content:
+The first implemented capability is the migrated LIMS **VM Availability SLA Dashboard v2** (`src/observability/vm-availability-sla-dashboard-v2/`, `modules/observability/vm-availability-sla-dashboard-v2/`, `config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`). See [`docs/operations.md`](docs/operations.md) for its full operational detail.
 
-| Area | Purpose |
-|---|---|
-| `src/observability/` | Deployable compositions for workbooks, alerts, dashboards, monitoring |
-| `src/automation/` | Declarative operational automation (approved Logic Apps) |
-| `modules/` | Genuinely reusable, environment-neutral Bicep modules |
-| `operations/` | Imperative operational functions (e.g. VM start/stop/restart) |
-| `config/nfi/lims/` | LIMS-specific configuration per environment (dev/tst/acc/preprd/prd) |
-| `config/nfi/shared/` | Configuration for reusable services targeting other subscriptions/management groups |
+Further areas (`src/automation/`, `operations/`, `config/nfi/shared/`, etc.) are added only once they contain real, deployable content — this repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why).
 
-This repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why) — those directories will only reappear once there is real operational capability to put in them. No feature backlog (workbooks, alerts, Logic Apps, etc.) has been implemented yet.
+There are two kinds of pipeline in `.azuredevops/pipelines/`:
+
+- **`ci.yml`** — triggers automatically on every push to every branch; static Bicep/parameter validation only, no deployment.
+- **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability.
 
 ## Development / deployment philosophy
 
