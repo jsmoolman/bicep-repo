@@ -54,24 +54,51 @@ var envMapKql = 'let EnvironmentMap = datatable(SubscriptionId:string, Environme
 var formatMoneyKql = 'let FormatMoney = (v:double) {\n    let isNeg = v < 0;\n    let av = abs(v);\n    let cents = tostring(round((av - floor(av)) * 100, 0));\n    let cents2 = case(strlen(cents) == 0, "00", strlen(cents) == 1, strcat("0", cents), cents);\n    let intPart = tostring(toint(floor(av)));\n    let len = strlen(intPart);\n    let r = len % 3;\n    let head = iff(r == 0, "", substring(intPart, 0, r));\n    let remainder = substring(intPart, r);\n    let remLen = strlen(remainder);\n    let groups = remLen / 3;\n    let seg1 = iff(groups >= 1, substring(remainder, 0, 3), "");\n    let seg2 = iff(groups >= 2, substring(remainder, 3, 3), "");\n    let seg3 = iff(groups >= 3, substring(remainder, 6, 3), "");\n    let segCount = iff(r == 0, groups, groups + 1);\n    let grouped = case(\n        segCount <= 1, iff(r == 0, seg1, head),\n        segCount == 2, iff(r == 0, strcat(seg1, ".", seg2), strcat(head, ".", seg1)),\n        segCount == 3, iff(r == 0, strcat(seg1, ".", seg2, ".", seg3), strcat(head, ".", seg1, ".", seg2)),\n        strcat(head, ".", seg1, ".", seg2, ".", seg3)\n    );\n    strcat(iff(isNeg, "-", ""), "€ ", grouped, ",", cents2)\n};\n'
 
 // ─── KQL: parse the single Cost Management result (embedded in both grid queries) ─
-// hasData is false only when the ARM call genuinely failed to return a usable
-// response shape (no "columns" metadata) — a real Cost Management error, not a
-// legitimate zero-cost result. A legitimate empty "rows" array with "columns"
-// present is a valid zero-cost answer and is zero-filled as € 0,00, not "-".
+// CostDataJson is injected using the workbook parameter's documented "escapejson"
+// formatter ({CostDataJson:escapejson}), not hand-written escaping — this is the
+// safe, Microsoft-documented mechanism for embedding an arbitrary JSON-valued text
+// parameter inside a KQL string literal (learn.microsoft.com/azure/azure-monitor/
+// visualize/workbooks-parameters#parameter-formatting-options).
+//
+// hasData is false when either:
+//   - the ARM call genuinely failed to return a usable response shape (no
+//     "columns" metadata) — a real Cost Management error, not a legitimate
+//     zero-cost result; or
+//   - the response is paged (properties.nextLink present). This workbook
+//     intentionally issues exactly one Cost Management request per Report Month
+//     and never follows nextLink — pagination loops, additional queries, and
+//     caching/state are all explicitly out of scope. A paged response therefore
+//     fails closed: it is treated the same as "no usable data" so first-page
+//     figures are never presented as complete totals.
+// A legitimate empty "rows" array with "columns" present and no nextLink is a
+// valid zero-cost answer and is zero-filled as € 0,00, not "-".
 // Row layout is positional and matches the request shape below exactly:
 //   [0]=Cost (aggregation "totalCost"), [1]=SubscriptionId, [2]=ServiceName,
 //   [3]=date column added by "granularity":"Monthly" (either "UsageDate" in
 //   YYYYMMDD form or "BillingMonth" in YYYYMM form — both formats share the same
 //   first 4 (year) + next 2 (month) digits, so the substring below is format-agnostic).
 
-var parseCostDataKql = 'let raw = parse_json("{CostDataJson}");\nlet hasData = isnotnull(raw.properties) and isnotnull(raw.properties.columns);\nlet costRowsRaw = iff(hasData, raw.properties.rows, dynamic(null));\nlet costRows = iff(isnull(costRowsRaw), dynamic([]), costRowsRaw);\nlet base =\n    print RawRows = costRows\n    | mv-expand Row = RawRows\n    | project\n        Cost = todouble(Row[0]),\n        SubId = tolower(tostring(Row[1])),\n        ServiceName = tostring(Row[2]),\n        DateStr = tostring(Row[3])\n    | extend MonthKey = strcat(substring(DateStr, 0, 4), "-", substring(DateStr, 4, 2))\n    | join kind=leftouter (EnvironmentMap | project SubId=SubscriptionId, Environment) on SubId\n    | where isnotempty(Environment);\nlet selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM");\n'
+var parseCostDataKql = 'let raw = parse_json("{CostDataJson:escapejson}");\nlet hasColumns = isnotnull(raw.properties) and isnotnull(raw.properties.columns);\nlet nextLinkVal = tostring(raw.properties.nextLink);\nlet isPaged = isnotempty(nextLinkVal);\nlet hasData = hasColumns and not(isPaged);\nlet costRowsRaw = iff(hasData, raw.properties.rows, dynamic(null));\nlet costRows = iff(isnull(costRowsRaw), dynamic([]), costRowsRaw);\nlet base =\n    print RawRows = costRows\n    | mv-expand Row = RawRows\n    | project\n        Cost = todouble(Row[0]),\n        SubId = tolower(tostring(Row[1])),\n        ServiceName = tostring(Row[2]),\n        DateStr = tostring(Row[3])\n    | extend MonthKey = strcat(substring(DateStr, 0, 4), "-", substring(DateStr, 4, 2))\n    | join kind=leftouter (EnvironmentMap | project SubId=SubscriptionId, Environment) on SubId\n    | where isnotempty(Environment);\nlet selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM");\n'
+
+// ─── KQL: paging warning (hidden, visible-text signal only, no extra query) ────
+// Reuses the already-fetched CostDataJson — does not add a second Cost
+// Management request. Yields an empty string when the response is not paged.
+
+var kqlPagingWarning = 'let raw = parse_json("{CostDataJson:escapejson}");\nlet nextLinkVal = tostring(raw.properties.nextLink);\nprint Warning = iff(isnotempty(nextLinkVal), "Warning: Cost Management returned a paged response for this Report Month (nextLink present). This workbook intentionally issues only one Cost Management request and does not follow pagination links, so the figures below are incomplete and shown as unavailable until this is resolved.", "")'
 
 // ─── KQL: Environment pivot grid ──────────────────────────────────────────────
 // Rows: environments (+ final "Total" row). Columns: 6 calendar months (YYYY-MM) + Total.
 // Environment selector filters this already-retrieved dataset only — no new
 // Cost Management call is issued when it changes.
+//
+// The environment selection is applied to selectedEnvList BEFORE the month grid,
+// totals, and grand Total row are built — every downstream aggregate (including
+// the Total row) is therefore computed only from the selected subset, never from
+// a pre-computed all-environment grand total that gets filtered afterwards. When
+// Environment = All, selectedEnvList is every configured environment, so behavior
+// is unchanged from the All case.
 
-var kqlEnvironmentGrid = '${envMapKql}${formatMoneyKql}${parseCostDataKql}let envList = EnvironmentMap | summarize by Environment;\nlet envMonthGrid = envList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project Environment, MonthKey;\nlet envMonthActual =\n    envMonthGrid\n    | join kind=leftouter (base | summarize ActualCost=sum(Cost) by Environment, MonthKey) on Environment, MonthKey\n    | project Environment, MonthKey, RawCost = iff(hasData, coalesce(ActualCost, 0.0), real(null));\nlet totals = envMonthActual | summarize Total = iff(hasData, sum(coalesce(RawCost,0.0)), real(null)) by Environment;\nlet envPivotSrc = envMonthActual | extend Display = iff(isnull(RawCost), "-", FormatMoney(RawCost)) | project Environment, MonthKey, Display;\nlet envPivot = envPivotSrc | evaluate pivot(MonthKey, take_any(Display), Environment);\nlet grandRowSrc =\n    envMonthActual\n    | summarize RawCost = iff(hasData, sum(coalesce(RawCost,0.0)), real(null)) by MonthKey\n    | extend Display = iff(isnull(RawCost), "-", FormatMoney(RawCost))\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = toscalar(totals | summarize s = iff(hasData, sum(coalesce(Total,0.0)), real(null)));\nlet grandRow = grandPivot | extend Environment = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal));\nlet envRows =\n    envPivot\n    | join kind=inner totals on Environment\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | project-away Total;\nunion envRows, grandRow\n| where "{Environment}" == "All" or Environment == "{Environment}" or Environment == "Total"\n| order by iff(Environment == "Total", 1, 0) asc, Environment asc'
+var kqlEnvironmentGrid = '${envMapKql}${formatMoneyKql}${parseCostDataKql}let selectedEnvList = (EnvironmentMap | summarize by Environment) | where "{Environment}" == "All" or Environment == "{Environment}";\nlet envMonthGrid = selectedEnvList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project Environment, MonthKey;\nlet envMonthActual =\n    envMonthGrid\n    | join kind=leftouter (base | summarize ActualCost=sum(Cost) by Environment, MonthKey) on Environment, MonthKey\n    | project Environment, MonthKey, RawCost = iff(hasData, coalesce(ActualCost, 0.0), real(null));\nlet totals = envMonthActual | summarize Total = iff(hasData, sum(coalesce(RawCost,0.0)), real(null)) by Environment;\nlet envPivotSrc = envMonthActual | extend Display = iff(isnull(RawCost), "-", FormatMoney(RawCost)) | project Environment, MonthKey, Display;\nlet envPivot = envPivotSrc | evaluate pivot(MonthKey, take_any(Display), Environment);\nlet grandRowSrc =\n    envMonthActual\n    | summarize RawCost = iff(hasData, sum(coalesce(RawCost,0.0)), real(null)) by MonthKey\n    | extend Display = iff(isnull(RawCost), "-", FormatMoney(RawCost))\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = toscalar(totals | summarize s = iff(hasData, sum(coalesce(Total,0.0)), real(null)));\nlet grandRow = grandPivot | extend Environment = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal));\nlet envRows =\n    envPivot\n    | join kind=inner totals on Environment\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | project-away Total;\nunion envRows, grandRow\n| order by iff(Environment == "Total", 1, 0) asc, Environment asc'
 
 // ─── KQL: Service pivot grid (with Trend) ─────────────────────────────────────
 // Rows: Cost Management ServiceName values observed in the (environment-filtered)
@@ -254,6 +281,22 @@ var workbookContent = {
             queryType: 12
           }
 
+          // Computed after CostDataJson (parameters in this list execute in order and
+          // may reference earlier ones). Empty string when the response is not paged;
+          // wired into the visible title text below so a paged response produces a
+          // clear, visible warning without a second Cost Management request.
+          {
+            id: guid(workloadName, 'p-pagingWarning')
+            version: 'KqlParameterItem/1.0'
+            name: 'PagingWarning'
+            type: 1
+            isRequired: false
+            query: kqlPagingWarning
+            queryType: 0
+            resourceType: 'microsoft.operationalinsights/workspaces'
+            crossComponentResources: [workspaceResourceId]
+          }
+
         ]
       }
       name: 'parameters-hidden-cost-source'
@@ -268,7 +311,7 @@ var workbookContent = {
     {
       type: 1
       content: {
-        json: '# Cost Management Dashboard — {workloadName}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Cost type** | Actual Cost (management-group scope) |\n| **Query scope** | One Cost Management query per Report Month — Environment selection filters the already-retrieved result only |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Ordinary least-squares linear regression over completed months only — the current month-to-date is always excluded from trend |\n| **Trend bands** | ≤ -3% Downward · -3%..+3% Stable · +3%..+10% Mild Upward · ≥ +10% Strong Upward — absolute changes under €10/month are always Stable regardless of percentage |\n| **Zero vs. unavailable** | € 0,00 = confirmed zero cost. "-" = cost data could not be determined |\n\nThis workbook currently queries costs at the **Tenant Root Group** as a query-scope decision only — the Cost Management query explicitly filters to the subscriptions configured for this project. RBAC for the costing security group is reviewed and applied separately; it is not part of this deployment.'
+        json: '# Cost Management Dashboard — {workloadName}\n\n{PagingWarning}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Cost type** | Actual Cost (management-group scope) |\n| **Query scope** | One Cost Management query per Report Month — Environment selection filters the already-retrieved result only |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Ordinary least-squares linear regression over completed months only — the current month-to-date is always excluded from trend |\n| **Trend bands** | ≤ -3% Downward · -3%..+3% Stable · +3%..+10% Mild Upward · ≥ +10% Strong Upward — absolute changes under €10/month are always Stable regardless of percentage |\n| **Zero vs. unavailable** | € 0,00 = confirmed zero cost. "-" = cost data could not be determined |\n\nThis workbook currently queries costs at the **Tenant Root Group** as a query-scope decision only — the Cost Management query explicitly filters to the subscriptions configured for this project. RBAC for the costing security group is reviewed and applied separately; it is not part of this deployment.'
       }
       name: 'text-title'
     }
