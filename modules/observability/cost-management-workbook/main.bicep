@@ -60,31 +60,40 @@ var formatMoneyKql = 'let FormatMoney = (v:double) {\n    let isNeg = v < 0;\n  
 // parameter inside a KQL string literal (learn.microsoft.com/azure/azure-monitor/
 // visualize/workbooks-parameters#parameter-formatting-options).
 //
-// hasData is false when either:
+// Column indexes are resolved BY NAME from the response's own "properties.columns"
+// metadata, not assumed from a fixed position. This is deliberate: a customer-side
+// read-only commissioning probe proved the live column order is
+// Cost, BillingMonth, SubscriptionId, ServiceName, Currency (BillingMonth at index 1,
+// not a fixed "last column" as originally assumed) — but the parser must remain
+// correct even if Azure returns the same named columns in a different order.
+//
+// hasData is false (fail closed — never a plausible-looking but wrong total) when:
 //   - the ARM call genuinely failed to return a usable response shape (no
 //     "columns" metadata) — a real Cost Management error, not a legitimate
 //     zero-cost result; or
+//   - any of the five required columns (Cost, BillingMonth, SubscriptionId,
+//     ServiceName, Currency) is absent from "properties.columns" — the schema is
+//     not as expected, so column positions cannot be trusted; or
 //   - the response is paged (properties.nextLink present). This workbook
 //     intentionally issues exactly one Cost Management request per Report Month
 //     and never follows nextLink — pagination loops, additional queries, and
 //     caching/state are all explicitly out of scope. A paged response therefore
 //     fails closed: it is treated the same as "no usable data" so first-page
 //     figures are never presented as complete totals.
-// A legitimate empty "rows" array with "columns" present and no nextLink is a
-// valid zero-cost answer and is zero-filled as € 0,00, not "-".
-// Row layout is positional and matches the request shape below exactly:
-//   [0]=Cost (aggregation "totalCost"), [1]=SubscriptionId, [2]=ServiceName,
-//   [3]=date column added by "granularity":"Monthly" (either "UsageDate" in
-//   YYYYMMDD form or "BillingMonth" in YYYYMM form — both formats share the same
-//   first 4 (year) + next 2 (month) digits, so the substring below is format-agnostic).
+// A legitimate empty "rows" array with all required "columns" present and no
+// nextLink is a valid zero-cost answer and is zero-filled as € 0,00, not "-".
+// BillingMonth is the authoritative calendar-month field for each row (proven live
+// format "yyyy-MM-ddTHH:mm:ss", e.g. "2026-07-01T00:00:00") — it is parsed as a
+// real datetime, never derived from array position or synthetic row numbering.
 
-var parseCostDataKql = 'let raw = parse_json("{CostDataJson:escapejson}");\nlet hasColumns = isnotnull(raw.properties) and isnotnull(raw.properties.columns);\nlet nextLinkVal = tostring(raw.properties.nextLink);\nlet isPaged = isnotempty(nextLinkVal);\nlet hasData = hasColumns and not(isPaged);\nlet costRowsRaw = iff(hasData, raw.properties.rows, dynamic(null));\nlet costRows = iff(isnull(costRowsRaw), dynamic([]), costRowsRaw);\nlet base =\n    print RawRows = costRows\n    | mv-expand Row = RawRows\n    | project\n        Cost = todouble(Row[0]),\n        SubId = tolower(tostring(Row[1])),\n        ServiceName = tostring(Row[2]),\n        DateStr = tostring(Row[3])\n    | extend MonthKey = strcat(substring(DateStr, 0, 4), "-", substring(DateStr, 4, 2))\n    | join kind=leftouter (EnvironmentMap | project SubId=SubscriptionId, Environment) on SubId\n    | where isnotempty(Environment);\nlet selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM");\n'
+var parseCostDataKql = 'let raw = parse_json("{CostDataJson:escapejson}");\nlet hasColumns = isnotnull(raw.properties) and isnotnull(raw.properties.columns);\nlet colIndexTable =\n    print ColsArr = iff(hasColumns, raw.properties.columns, dynamic([]))\n    | mv-expand with_itemindex=ColIdx Col = ColsArr\n    | project ColName = tostring(Col.name), ColIdx = toint(ColIdx);\nlet requiredCols = dynamic(["Cost","BillingMonth","SubscriptionId","ServiceName","Currency"]);\nlet foundCols = toscalar(colIndexTable | summarize make_set(ColName));\nlet missingCols = set_difference(requiredCols, foundCols);\nlet hasAllRequiredCols = array_length(missingCols) == 0;\nlet nextLinkVal = tostring(raw.properties.nextLink);\nlet isPaged = isnotempty(nextLinkVal);\nlet hasData = hasColumns and hasAllRequiredCols and not(isPaged);\nlet idxCost           = coalesce(toscalar(colIndexTable | where ColName == "Cost" | project ColIdx), -1);\nlet idxBillingMonth   = coalesce(toscalar(colIndexTable | where ColName == "BillingMonth" | project ColIdx), -1);\nlet idxSubscriptionId = coalesce(toscalar(colIndexTable | where ColName == "SubscriptionId" | project ColIdx), -1);\nlet idxServiceName    = coalesce(toscalar(colIndexTable | where ColName == "ServiceName" | project ColIdx), -1);\nlet idxCurrency       = coalesce(toscalar(colIndexTable | where ColName == "Currency" | project ColIdx), -1);\nlet costRowsRaw = iff(hasData, raw.properties.rows, dynamic(null));\nlet costRows = iff(isnull(costRowsRaw), dynamic([]), costRowsRaw);\nlet base =\n    print RawRows = costRows\n    | mv-expand Row = RawRows\n    | project\n        Cost = todouble(Row[idxCost]),\n        SubId = tolower(tostring(Row[idxSubscriptionId])),\n        ServiceName = tostring(Row[idxServiceName]),\n        Currency = tostring(Row[idxCurrency]),\n        BillingMonthStr = tostring(Row[idxBillingMonth])\n    | extend MonthKey = format_datetime(todatetime(BillingMonthStr), "yyyy-MM")\n    | join kind=leftouter (EnvironmentMap | project SubId=SubscriptionId, Environment) on SubId\n    | where isnotempty(Environment);\nlet selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM");\n'
 
-// ─── KQL: paging warning (hidden, visible-text signal only, no extra query) ────
-// Reuses the already-fetched CostDataJson — does not add a second Cost
-// Management request. Yields an empty string when the response is not paged.
+// ─── KQL: data warning (hidden, visible-text signal only, no extra query) ─────
+// Reuses the already-fetched CostDataJson and the same column-resolution/pagination
+// logic as parseCostDataKql — does not add a second Cost Management request. Yields
+// an empty string when the response is complete, correctly-shaped, and unpaged.
 
-var kqlPagingWarning = 'let raw = parse_json("{CostDataJson:escapejson}");\nlet nextLinkVal = tostring(raw.properties.nextLink);\nprint Warning = iff(isnotempty(nextLinkVal), "Warning: Cost Management returned a paged response for this Report Month (nextLink present). This workbook intentionally issues only one Cost Management request and does not follow pagination links, so the figures below are incomplete and shown as unavailable until this is resolved.", "")'
+var kqlDataWarning = '${envMapKql}${parseCostDataKql}print Warning = case(\n    not(hasColumns), "Warning: The Cost Management response did not include the expected result metadata (properties.columns). Cost data is unavailable for this Report Month.",\n    not(hasAllRequiredCols), strcat("Warning: The Cost Management response is missing required column(s): ", strcat_array(missingCols, ", "), ". Cost data is unavailable for this Report Month."),\n    isPaged, "Warning: Cost Management returned a paged response for this Report Month (nextLink present). This workbook intentionally issues only one Cost Management request and does not follow pagination links, so the figures below are incomplete and shown as unavailable until this is resolved.",\n    ""\n  )'
 
 // ─── KQL: Environment pivot grid ──────────────────────────────────────────────
 // Rows: environments (+ final "Total" row). Columns: 6 calendar months (YYYY-MM) + Total.
@@ -282,16 +291,17 @@ var workbookContent = {
           }
 
           // Computed after CostDataJson (parameters in this list execute in order and
-          // may reference earlier ones). Empty string when the response is not paged;
-          // wired into the visible title text below so a paged response produces a
-          // clear, visible warning without a second Cost Management request.
+          // may reference earlier ones). Empty string when the response is complete,
+          // correctly-shaped, and unpaged; wired into the visible title text below so
+          // an unexpected schema or a paged response produces a clear, visible
+          // warning without a second Cost Management request.
           {
-            id: guid(workloadName, 'p-pagingWarning')
+            id: guid(workloadName, 'p-dataWarning')
             version: 'KqlParameterItem/1.0'
-            name: 'PagingWarning'
+            name: 'DataWarning'
             type: 1
             isRequired: false
-            query: kqlPagingWarning
+            query: kqlDataWarning
             queryType: 0
             resourceType: 'microsoft.operationalinsights/workspaces'
             crossComponentResources: [workspaceResourceId]
@@ -311,7 +321,7 @@ var workbookContent = {
     {
       type: 1
       content: {
-        json: '# Cost Management Dashboard — {workloadName}\n\n{PagingWarning}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Cost type** | Actual Cost (management-group scope) |\n| **Query scope** | One Cost Management query per Report Month — Environment selection filters the already-retrieved result only |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Ordinary least-squares linear regression over completed months only — the current month-to-date is always excluded from trend |\n| **Trend bands** | ≤ -3% Downward · -3%..+3% Stable · +3%..+10% Mild Upward · ≥ +10% Strong Upward — absolute changes under €10/month are always Stable regardless of percentage |\n| **Zero vs. unavailable** | € 0,00 = confirmed zero cost. "-" = cost data could not be determined |\n\nThis workbook currently queries costs at the **Tenant Root Group** as a query-scope decision only — the Cost Management query explicitly filters to the subscriptions configured for this project. RBAC for the costing security group is reviewed and applied separately; it is not part of this deployment.'
+        json: '# Cost Management Dashboard — {workloadName}\n\n{DataWarning}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Cost type** | Actual Cost (management-group scope) |\n| **Query scope** | One Cost Management query per Report Month — Environment selection filters the already-retrieved result only |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Ordinary least-squares linear regression over completed months only — the current month-to-date is always excluded from trend |\n| **Trend bands** | ≤ -3% Downward · -3%..+3% Stable · +3%..+10% Mild Upward · ≥ +10% Strong Upward — absolute changes under €10/month are always Stable regardless of percentage |\n| **Zero vs. unavailable** | € 0,00 = confirmed zero cost. "-" = cost data could not be determined |\n\nThis workbook currently queries costs at the **Tenant Root Group** as a query-scope decision only — the Cost Management query explicitly filters to the subscriptions configured for this project. RBAC for the costing security group is reviewed and applied separately; it is not part of this deployment.'
       }
       name: 'text-title'
     }
