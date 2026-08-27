@@ -35,6 +35,13 @@ The old platform/landing-zone/subscription-vending/tenant-RBAC code and pipeline
 
 ## Current state
 
-The first real operational capability now exists: the LIMS **VM Availability SLA Dashboard v2**, migrated losslessly from a prior, customer-approved implementation. It consists of a reusable module (`modules/observability/vm-availability-sla-dashboard-v2/`), a reusable subscription-scoped composition (`src/observability/vm-availability-sla-dashboard-v2/`), LIMS-specific configuration (`config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`), and a commissioning-safe deployment pipeline that does not trigger automatically and must be run manually. See [`docs/operations.md`](operations.md) for its full operational detail, including its current live-validation status.
+Two real operational capabilities now exist, following the same reusable-module + configuration pattern:
 
-No other operational capability (other workbooks, alerts, Logic Apps, or operational scripts under `operations/`) exists yet. Further capabilities continue to be added only once specifically scoped and approved, following the same reusable-module + configuration pattern, avoiding speculative framework code for capabilities that do not exist yet.
+- The LIMS **VM Availability SLA Dashboard v2**, migrated losslessly from a prior, customer-approved implementation. It consists of a reusable module (`modules/observability/vm-availability-sla-dashboard-v2/`), a reusable subscription-scoped composition (`src/observability/vm-availability-sla-dashboard-v2/`), LIMS-specific configuration (`config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`), and a commissioning-safe deployment pipeline that does not trigger automatically and must be run manually.
+- A from-scratch **Cost Management Dashboard** single-query pivot proof of concept, following the identical pattern (`modules/observability/cost-management-workbook/`, `src/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`), reusing the existing central Log Analytics workspace purely as a stateless KQL compute engine (no data ingestion, no new LAW resources). It has not yet been live-validated.
+
+Both capabilities' deployment pipelines share their validate/what-if/deploy steps via one small template (`.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`) — extracted because there are now two genuine consumers, not speculatively ahead of need.
+
+See [`docs/operations.md`](operations.md) for full operational detail on both, including current live-validation status.
+
+No other operational capability (alerts, Logic Apps, or operational scripts under `operations/`) exists yet. Further capabilities continue to be added only once specifically scoped and approved, avoiding speculative framework code for capabilities that do not exist yet.

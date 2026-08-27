@@ -37,14 +37,19 @@ azure-nfi-iac/
 └── README.md
 ```
 
-The first implemented capability is the migrated LIMS **VM Availability SLA Dashboard v2** (`src/observability/vm-availability-sla-dashboard-v2/`, `modules/observability/vm-availability-sla-dashboard-v2/`, `config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`). See [`docs/operations.md`](docs/operations.md) for its full operational detail.
+Implemented capabilities:
+
+- The migrated LIMS **VM Availability SLA Dashboard v2** (`src/observability/vm-availability-sla-dashboard-v2/`, `modules/observability/vm-availability-sla-dashboard-v2/`, `config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`).
+- A from-scratch **Cost Management Dashboard** single-query pivot POC (`src/observability/cost-management-workbook/`, `modules/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`) — not yet live-validated.
+
+See [`docs/operations.md`](docs/operations.md) for full operational detail on both.
 
 Further areas (`src/automation/`, `operations/`, `config/nfi/shared/`, etc.) are added only once they contain real, deployable content — this repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why).
 
 There are two kinds of pipeline in `.azuredevops/pipelines/`:
 
 - **`ci.yml`** — triggers automatically on every push to every branch; static Bicep/parameter validation only, no deployment.
-- **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability.
+- **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`, `deploy-cost-management-workbook.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability. Their shared validate/what-if/deploy steps live in `.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`.
 
 ## Development / deployment philosophy
 

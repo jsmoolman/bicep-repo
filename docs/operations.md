@@ -21,17 +21,48 @@ The first migrated observability capability. This is a lossless migration of a p
 
 This migration intentionally preserved both values unchanged, since the deployed workbook, its resource GUID/name logic, and its customer-visible display name/title must not change as part of relocating the implementation into this repository.
 
+### Cost Management Dashboard — lims (single-query pivot POC)
+
+A from-scratch proof of concept, built to the same repository pattern as the VM Availability SLA Dashboard v2. Its core objective is architectural: prove that **one** management-group-scoped Azure Cost Management query per selected Report Month can drive both an Environment cost pivot and a Service cost pivot, without querying subscriptions individually and without Environment selection ever triggering a second Cost Management API call.
+
+- **Reusable module:** [`modules/observability/cost-management-workbook/main.bicep`](../modules/observability/cost-management-workbook/main.bicep) — no LIMS-specific subscription IDs, management-group ID, or workspace ID; all are parameters.
+- **Reusable entrypoint:** [`src/observability/cost-management-workbook/main.bicep`](../src/observability/cost-management-workbook/main.bicep) — subscription-scoped orchestrator; workbook hosting (subscription/resource group/location) is configured independently from the Cost Management query scope (management group).
+- **LIMS configuration:** [`config/nfi/lims/observability/cost-management-workbook.bicepparam`](../config/nfi/lims/observability/cost-management-workbook.bicepparam) — reuses the existing LIMS reporting resource group/location and the existing central Log Analytics workspace; the management-group ID is the Tenant Root Group (`c7adbc6a-e0b3-4eb7-9403-ed7f7f48ec4b`), a **query-scope decision only**, per explicit customer confirmation — see the caveat below.
+- **Deployment pipeline:** [`.azuredevops/pipelines/deploy-cost-management-workbook.yml`](../.azuredevops/pipelines/deploy-cost-management-workbook.yml) — same commissioning posture as the VM Availability pipeline (`trigger: none`, `pr: none`, default `what-if`, explicit `deploy`). It has not been run from this repository.
+
+**Design:**
+
+- **One Cost Management query, management-group scope:** a single hidden workbook parameter issues one `Microsoft.CostManagement/query` POST at the configured management group, `type: ActualCost`, `granularity: Monthly`, grouped by `SubscriptionId` and the native Cost Management `ServiceName` dimension, **explicitly filtered** (`In` operator) to only the subscription IDs listed in `subscriptionEnvironmentMappings` — subscriptions are never dynamically enumerated from the management group. The Cost Management API version is pinned in the module (`2026-06-01`), not exposed as a parameter.
+- **Static subscription/environment mapping:** identical mechanism to the VM Availability workbook's `subscriptionEnvironmentMappings` — repository configuration is authoritative for which subscriptions are included and how they map to `mgt`/`dev`/`tst`/`acc`/`preprd`/`prd`.
+- **Report Month drives the query window; Environment does not:** two further hidden parameters compute the Cost Management request's `from`/`to` date range from the selected Report Month using calendar-month arithmetic (never a 30-day approximation). The `Environment` selector is never referenced anywhere in the query construction — changing it can only re-filter the already-retrieved result.
+- **Six-month window, calendar-accurate:** every grid shows the selected Report Month plus the five preceding calendar months, labelled with real `YYYY-MM` values.
+- **Pivot and trend run as Log Analytics KQL against the existing central LAW, used purely as a stateless compute engine:** because pure Workbook JSON cannot pivot by calendar month or perform linear regression, the single Cost Management JSON result is passed into ordinary KQL (`mv-expand`, `evaluate pivot()`, manual ordinary-least-squares regression) executed against the same central Log Analytics workspace already used by the VM Availability workbook. **No Cost Management data is ingested into, stored in, or queried from that workspace** — no tables, DCRs, saved searches, or functions are created; the workspace is reused exclusively as a query-execution engine for data that is already in memory as a workbook parameter.
+- **Trend:** ordinary least-squares linear regression over completed months only (the current month-to-date is always excluded). Classification applies a €10/month absolute noise floor first (below it, always `Stable`), then `Downward` (≤ -3%), `Stable` (-3%..+3%), `Mild Upward` (+3%..+10%), `Strong Upward` (≥ +10%).
+- **Zero vs. unavailable:** a valid query response with no cost for a given month/environment/service renders as `€ 0,00`; a genuinely unusable Cost Management response renders as `-`.
+
+**Validation performed (local/offline only):**
+
+- Bicep build, lint, and `build-params` passed for the module, entrypoint, and LIMS parameter file.
+- Structural checks against the compiled `serializedData` confirmed: exactly one ARMEndpoint (`queryType: 12`) query in the whole template; exactly one `Microsoft.CostManagement/query` path reference; management-group-scoped path; explicit config-driven subscription filter; `Environment` absent from the upstream query construction; `ReportMonth` present in the date-window parameters; both grids reference the shared Cost Management result parameter.
+- The pivot, zero/no-data, and trend classification algorithms (including the six required synthetic scenarios: stable-by-percentage, stable-by-noise-floor, downward, mild upward, strong upward, current-month-excludes-partial-month, historical-month-uses-all-six) were ported to a local JS fixture harness and verified to produce the expected classifications and formatted values.
+
+**Known limitations / outstanding work:**
+
+- **No live runtime validation has been performed.** No Azure login, Cost Management call, Log Analytics query, what-if, or deployment has been run from this repository for this capability. The KQL has been reasoned through and validated as an algorithm, but has not been executed against a real Kusto engine — this is the primary outstanding risk before this POC can be treated as production-proven.
+- **Management-group scope caveat:** using the Tenant Root Group as the query scope is a query-scope decision only, made because the query already explicitly filters to the configured LIMS subscriptions. It should not be read as a recommendation to grant tenant-wide Cost Management visibility. RBAC for the costing security group (both Cost Management access at the management-group scope and read/query access to the configured Log Analytics workspace) is reviewed and applied separately by the customer and is intentionally outside this repository's authority — see [`docs/scope.md`](scope.md). This repository does not create, modify, or assign any RBAC.
+- This POC is not customer-approved or presentation-polished; cosmetic aspects (exact trend iconography, explanatory text wording) were intentionally left simple per the milestone scope.
+
 No other operational capability (alerts, Logic Apps, VM maintenance, backup automation, or scripts under `operations/`) has been implemented yet.
 
 ## Continuous Integration
 
-The only pipeline in this repository is [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml). It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger.
+[`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml) is the only *automatically triggered* pipeline in this repository. It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger. Capability-specific deployment pipelines (see above) exist alongside it but are commissioning-safe and do not trigger automatically.
 
 1. **Bicep build and lint** — every `*.bicep` file in the repository is compiled and linted.
 2. **Bicep parameter file validation** — every `*.bicepparam` file is built to confirm it resolves against its composition.
 3. **Prohibited resource type guard** — a static search blocks any checked-in Bicep or parameter file that references Microsoft Graph, management-group creation, subscription creation, or role assignment/definition resource types, enforcing the boundaries in [`docs/scope.md`](scope.md).
 
-There is currently no automatic *deployment* pipeline. The deployment pipeline described above for the VM Availability SLA Dashboard v2 exists but does not trigger automatically (`trigger: none`, `pr: none`) and must be run manually.
+There is currently no automatic *deployment* pipeline. The two capability deployment pipelines described above (VM Availability SLA Dashboard v2, Cost Management Dashboard) share their validate/what-if/deploy steps via [`.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml), but neither triggers automatically (`trigger: none`, `pr: none`) — both must be run manually.
 
 ## Future operational documentation
 
