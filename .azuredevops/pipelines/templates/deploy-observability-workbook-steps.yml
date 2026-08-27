@@ -1,0 +1,96 @@
+# =============================================================================
+# Shared steps template: deploy a subscription-scoped observability workbook
+# =============================================================================
+# Purpose:
+#   Extracted because two capability-specific commissioning pipelines
+#   (VM Availability SLA Dashboard v2, Cost Management Dashboard) need the
+#   exact same validate / what-if / deploy plumbing against a subscription-scope
+#   Bicep composition selected purely by a .bicepparam file's `using` declaration.
+#   Each capability pipeline stays a thin wrapper supplying its own defaults;
+#   this template holds no capability-specific values.
+#
+# Deployment commands intentionally omit --template-file: the .bicepparam's
+# `using` declaration is authoritative for selecting the Bicep entrypoint.
+# --template-file is used only for the local build/lint validation step, where
+# an explicit target is required.
+# =============================================================================
+
+parameters:
+  - name: templateFile
+    type: string
+  - name: deploymentNamePrefix
+    type: string
+  - name: action
+    type: string
+  - name: serviceConnection
+    type: string
+  - name: parametersFile
+    type: string
+  - name: location
+    type: string
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        echo "== bicep build: ${{ parameters.templateFile }} =="
+        az bicep build --file "${{ parameters.templateFile }}" --stdout > /dev/null
+        echo "== bicep lint: ${{ parameters.templateFile }} =="
+        az bicep lint --file "${{ parameters.templateFile }}"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az deployment sub what-if \
+              --name "${{ parameters.deploymentNamePrefix }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}"
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployWorkbook
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "${{ parameters.deploymentNamePrefix }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            workbookResourceId=$(echo "$outputs" | jq -r '.workbookResourceId.value')
+            workbookName=$(echo "$outputs"        | jq -r '.workbookName.value')
+            workbookDisplayName=$(echo "$outputs" | jq -r '.workbookDisplayName.value')
+            workbookRg=$(echo "$outputs"          | jq -r '.workbookResourceGroupName.value')
+
+            echo "##vso[task.setvariable variable=workbookResourceId;isOutput=true]$workbookResourceId"
+            echo "##vso[task.setvariable variable=workbookName;isOutput=true]$workbookName"
+
+            echo "========================================="
+            echo "Workbook deployed successfully"
+            echo "========================================="
+            echo "  Display name : $workbookDisplayName"
+            echo "  Resource ID  : $workbookResourceId"
+            echo "  Resource name: $workbookName"
+            echo "  Resource group: $workbookRg"
