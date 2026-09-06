@@ -1,0 +1,343 @@
+# =============================================================================
+# TEMPORARY DIAGNOSTIC — Cost Management throttling isolation
+# =============================================================================
+# Purpose:
+#   Determine whether persistent Azure Cost Management HTTP 429 responses are
+#   caused by (1) the management-group query scope, or (2) a broader/client
+#   throttle that also affects subscription-scope queries. This pipeline does
+#   NOT deploy, modify, or otherwise touch the Cost Management workbook
+#   implementation — it is a pure, read-only diagnostic.
+#
+#   This file is TEMPORARY. It must be removed before this feature branch is
+#   ultimately merged.
+#
+# Cursor does not have customer Azure access and must not run this pipeline.
+# It is synchronized manually to the customer Azure DevOps repository and run
+# there by the user.
+#
+# -----------------------------------------------------------------------------
+# Intended customer-side execution sequence
+# -----------------------------------------------------------------------------
+#
+# Test A (run first):
+#   scopeMode    = managementGroup
+#   reportMonth  = 2026-08
+#   -> Queries 1 month x all configured subscriptions at management-group
+#      scope, with ClientType = NFI-LIMS-CostCollector.
+#   -> If this returns HTTP 200: STOP TESTING. The management-group collector
+#      strategy is viable — no need to run Test B.
+#
+# Test B (ONLY if Test A returned HTTP 429):
+#   Do NOT immediately rerun. Wait for the throttle/cooldown period indicated
+#   by any retry-after header returned by Test A, if one exists.
+#   Then run:
+#     scopeMode        = subscription
+#     probeEnvironment = dev
+#     reportMonth      = 2026-08
+#   -> Queries 1 month x 1 subscription at subscription scope, with the same
+#      stable ClientType.
+#
+#   Test B is never triggered automatically from Test A. Each test is a
+#   separate, manually started Azure DevOps run.
+#
+# -----------------------------------------------------------------------------
+# Interpretation
+# -----------------------------------------------------------------------------
+#
+#   Management group -> HTTP 200:
+#     Likely preferred collector model: one monthly-scope management-group
+#     query per collection run.
+#
+#   Management group -> HTTP 429, Subscription -> HTTP 200:
+#     Likely collector fallback: paced one-month subscription queries. A
+#     future collector could make these sequentially in the background and
+#     ingest all normalized results into the Log Analytics workspace.
+#
+#   Both management group AND subscription -> persistent HTTP 429:
+#     Stop API experimentation. This is a Cost Management/API throttling
+#     problem to investigate directly (potentially requiring Microsoft
+#     support), not something to solve by aggressive retrying.
+#
+# -----------------------------------------------------------------------------
+# Hard constraints (read before modifying)
+# -----------------------------------------------------------------------------
+#   - Exactly ONE Cost Management POST per pipeline run. No retries, no
+#     loops, no automatic fallback between scope modes, no pagination calls,
+#     no backoff/sleep-then-retry. A 429 is a valid diagnostic result: capture
+#     its headers, then fail the run.
+#   - Read-only: no az deployment/group/resource create, no RBAC/Entra
+#     changes, no LAW/DCR/DCE creation, no data ingestion.
+#   - The access token is never printed. Real subscription IDs are never
+#     printed (only counts and environment-name coverage).
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: scopeMode
+    displayName: Cost Management query scope to test
+    type: string
+    default: managementGroup
+    values:
+      - managementGroup
+      - subscription
+
+  - name: reportMonth
+    displayName: Report month to query (YYYY-MM, one complete calendar month)
+    type: string
+    default: '2026-08'
+
+  - name: probeEnvironment
+    displayName: Logical environment to probe (used only when scopeMode = subscription)
+    type: string
+    default: 'dev'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Cost Management throttling diagnostic (single request, no retries)'
+    inputs:
+      azureSubscription: 'sc-az-devops-trustedcloud-mgmt'
+      scriptType: pscore
+      scriptLocation: inlineScript
+      inlineScript: |
+        $ErrorActionPreference = 'Stop'
+
+        # --- Fixed diagnostic inputs -----------------------------------------
+        $scopeMode         = '${{ parameters.scopeMode }}'
+        $reportMonth       = '${{ parameters.reportMonth }}'
+        $probeEnvironment  = '${{ parameters.probeEnvironment }}'
+        $clientType        = 'NFI-LIMS-CostCollector'
+        $apiVersion        = '2026-06-01'
+        $parametersFile    = 'config/nfi/lims/observability/cost-management-workbook.bicepparam'
+
+        Write-Host '== Cost Management throttling diagnostic =='
+        Write-Host "Scope mode: $scopeMode"
+        Write-Host "Report month: $reportMonth"
+        Write-Host 'Months queried: 1'
+        Write-Host "ClientType: $clientType"
+
+        # --- Resolve authoritative configuration from the checked-in .bicepparam
+        # (never from hard-coded YAML values). Known output envelope: the outer
+        # JSON has a "parametersJson" property that is itself a JSON *string*
+        # and must be parsed a second time.
+        $outerJsonText = az bicep build-params --file $parametersFile --stdout
+        if ($LASTEXITCODE -ne 0) {
+          throw "az bicep build-params failed against $parametersFile"
+        }
+        $outerJson    = $outerJsonText | Out-String | ConvertFrom-Json
+        $innerParams  = $outerJson.parametersJson | ConvertFrom-Json
+
+        $managementGroupId              = $innerParams.parameters.managementGroupId.value
+        $subscriptionEnvironmentMappings = @($innerParams.parameters.subscriptionEnvironmentMappings.value)
+
+        Write-Host "Number of configured subscriptions: $($subscriptionEnvironmentMappings.Count)"
+        if ($scopeMode -eq 'subscription') {
+          Write-Host "Probe environment: $probeEnvironment"
+        }
+
+        # --- Resolve target subscription ID(s) for the request. Never printed.
+        if ($scopeMode -eq 'managementGroup') {
+          $subscriptionIds = @($subscriptionEnvironmentMappings | ForEach-Object { $_.subscriptionId })
+        }
+        else {
+          $matches = @($subscriptionEnvironmentMappings | Where-Object { $_.environment -eq $probeEnvironment })
+          if ($matches.Count -eq 0) {
+            throw "No subscription is mapped to environment '$probeEnvironment' in $parametersFile."
+          }
+          if ($matches.Count -gt 1) {
+            throw "Multiple subscriptions map to environment '$probeEnvironment' -- refusing to guess which single subscription to probe."
+          }
+          $subscriptionIds = @($matches[0].subscriptionId)
+        }
+
+        # --- Calendar-month time window derived from reportMonth (never 30d). -
+        $monthStart = [datetime]::ParseExact($reportMonth, 'yyyy-MM', $null)
+        $monthEnd   = $monthStart.AddMonths(1).AddSeconds(-1)
+        $fromDate   = $monthStart.ToString('yyyy-MM-ddTHH:mm:ss') + 'Z'
+        $toDate     = $monthEnd.ToString('yyyy-MM-ddTHH:mm:ss') + 'Z'
+
+        # --- Request body: same proven shape as the production workbook query -
+        $body = @{
+          type       = 'ActualCost'
+          timeframe  = 'Custom'
+          timePeriod = @{ from = $fromDate; to = $toDate }
+          dataset    = @{
+            granularity = 'Monthly'
+            aggregation = @{ totalCost = @{ name = 'Cost'; function = 'Sum' } }
+            grouping    = @(
+              @{ type = 'Dimension'; name = 'SubscriptionId' }
+              @{ type = 'Dimension'; name = 'ServiceName' }
+            )
+            filter = @{
+              dimensions = @{ name = 'SubscriptionId'; operator = 'In'; values = $subscriptionIds }
+            }
+          }
+        } | ConvertTo-Json -Depth 10
+
+        # --- Request URL: management-group scope or exactly one subscription --
+        if ($scopeMode -eq 'managementGroup') {
+          $url = "https://management.azure.com/providers/Microsoft.Management/managementGroups/$managementGroupId/providers/Microsoft.CostManagement/query?api-version=$apiVersion"
+        }
+        else {
+          $subId = $subscriptionIds[0]
+          $url   = "https://management.azure.com/subscriptions/$subId/providers/Microsoft.CostManagement/query?api-version=$apiVersion"
+        }
+
+        # --- ARM access token from the already-authenticated az CLI context. --
+        # Never printed.
+        $token = az account get-access-token --resource https://management.azure.com/ --query accessToken -o tsv
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($token)) {
+          throw 'Failed to obtain an ARM access token from the authenticated Azure CLI context.'
+        }
+
+        $headers = @{
+          'Authorization' = "Bearer $token"
+          'Content-Type'  = 'application/json'
+          'ClientType'    = $clientType
+        }
+
+        # =======================================================================
+        # EXACTLY ONE Cost Management POST. No retries. No loops. No fallback.
+        # A 429 is a valid diagnostic outcome — headers are captured below and
+        # the task then fails intentionally so the run is visibly red.
+        # =======================================================================
+        $stopwatch = [System.Diagnostics.Stopwatch]::StartNew()
+        $response = Invoke-WebRequest -Uri $url -Method Post -Headers $headers -Body $body -SkipHttpErrorCheck -ContentType 'application/json'
+        $stopwatch.Stop()
+        $token = $null
+
+        Write-Host "HTTP status: $($response.StatusCode)"
+        Write-Host "Request duration (ms): $($stopwatch.ElapsedMilliseconds)"
+
+        # --- Capture every Cost Management throttle/QPU header, on ANY status -
+        $knownThrottleHeaders = @(
+          'x-ms-ratelimit-microsoft.costmanagement-qpu-retry-after',
+          'x-ms-ratelimit-microsoft.costmanagement-qpu-consumed',
+          'x-ms-ratelimit-microsoft.costmanagement-qpu-remaining',
+          'x-ms-ratelimit-microsoft.costmanagement-entity-retry-after',
+          'x-ms-ratelimit-microsoft.costmanagement-tenant-retry-after',
+          'x-ms-ratelimit-microsoft.costmanagement-client-retry-after',
+          'x-ms-ratelimit-microsoft.consumption-retry-after',
+          'Retry-After'
+        )
+
+        Write-Host '== Cost Management rate-limit / throttle headers =='
+        $printedHeaders = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($headerName in $response.Headers.Keys) {
+          $isKnownThrottleHeader = $knownThrottleHeaders -contains $headerName
+          $isCostManagementPrefixed = $headerName.ToLowerInvariant().StartsWith('x-ms-ratelimit-microsoft.costmanagement-')
+          if ($isKnownThrottleHeader -or $isCostManagementPrefixed) {
+            $value = $response.Headers[$headerName]
+            if ($value -is [System.Array]) { $value = ($value -join ', ') }
+            Write-Host "  $headerName = $value"
+            [void]$printedHeaders.Add($headerName)
+          }
+        }
+        foreach ($headerName in $knownThrottleHeaders) {
+          if (-not $printedHeaders.Contains($headerName)) {
+            Write-Host "  $headerName = (not present)"
+          }
+        }
+
+        # --- Compact error extraction helper (never dumps a huge response) ----
+        function Write-CompactErrorBody {
+          param([string]$RawContent)
+          try {
+            $errorObject = $RawContent | ConvertFrom-Json
+            Write-Host "  Error code: $($errorObject.error.code)"
+            Write-Host "  Error message: $($errorObject.error.message)"
+          }
+          catch {
+            $truncated = if ($RawContent.Length -gt 300) { $RawContent.Substring(0, 300) + '...' } else { $RawContent }
+            Write-Host "  Error body (raw, truncated): $truncated"
+          }
+        }
+
+        # --- Status-specific handling ------------------------------------------
+        if ($response.StatusCode -eq 200) {
+          $result  = $response.Content | ConvertFrom-Json
+          $columns = @($result.properties.columns)
+
+          if ($columns.Count -eq 0) {
+            Write-Host 'RESULT: UNEXPECTED — HTTP 200 but no properties.columns in the response body.'
+            throw 'Cost Management returned HTTP 200 with an unusable response shape (no columns). Not retrying.'
+          }
+
+          Write-Host '== Schema =='
+          for ($i = 0; $i -lt $columns.Count; $i++) {
+            Write-Host "  $i`: $($columns[$i].name) / $($columns[$i].type)"
+          }
+
+          $rows      = @($result.properties.rows)
+          $nextLink  = $result.properties.nextLink
+          $colNames  = @($columns | ForEach-Object { $_.name })
+          $subIdx    = [array]::IndexOf($colNames, 'SubscriptionId')
+          $curIdx    = [array]::IndexOf($colNames, 'Currency')
+          $monthIdx  = -1
+          foreach ($candidateName in @('BillingMonth', 'UsageDate')) {
+            $candidateIdx = [array]::IndexOf($colNames, $candidateName)
+            if ($candidateIdx -ge 0) { $monthIdx = $candidateIdx; break }
+          }
+
+          Write-Host '== Summary =='
+          Write-Host "  Row count: $($rows.Count)"
+          Write-Host "  nextLink: $(if ([string]::IsNullOrEmpty($nextLink)) { 'empty' } else { 'present' })"
+
+          if ($curIdx -ge 0) {
+            $currencies = @($rows | ForEach-Object { $_[$curIdx] } | Sort-Object -Unique)
+            Write-Host "  Currency/currencies: $($currencies -join ', ')"
+          }
+          else {
+            Write-Host '  Currency/currencies: (Currency column not present in this response)'
+          }
+
+          if ($subIdx -ge 0) {
+            $seenSubsLower = @($rows | ForEach-Object { ([string]$_[$subIdx]).ToLowerInvariant() } | Sort-Object -Unique)
+            Write-Host "  Subscriptions represented count: $($seenSubsLower.Count)"
+          }
+          else {
+            $seenSubsLower = @()
+            Write-Host '  Subscriptions represented count: (SubscriptionId column not present in this response)'
+          }
+
+          if ($monthIdx -ge 0) {
+            $months = @($rows | ForEach-Object { ([string]$_[$monthIdx]).Substring(0, 7) } | Sort-Object -Unique)
+            Write-Host "  Months represented: $($months -join ', ')"
+          }
+          else {
+            Write-Host '  Months represented: (month column not present in this response)'
+          }
+
+          if ($scopeMode -eq 'managementGroup' -and $subIdx -ge 0) {
+            Write-Host '== Environment coverage (subscription IDs never printed) =='
+            foreach ($mapping in $subscriptionEnvironmentMappings) {
+              $present = $seenSubsLower -contains $mapping.subscriptionId.ToLowerInvariant()
+              $label   = if ($present) { 'PRESENT' } else { 'NOT RETURNED' }
+              Write-Host ('  {0,-8} {1}' -f $mapping.environment, $label)
+            }
+          }
+
+          Write-Host 'RESULT: SUCCESS'
+          exit 0
+        }
+        elseif ($response.StatusCode -eq 429) {
+          Write-Host 'RESULT: THROTTLED'
+          Write-Host "  scopeMode: $scopeMode"
+          Write-Host "  reportMonth: $reportMonth"
+          Write-Host "  ClientType: $clientType"
+          Write-Host "  Request duration (ms): $($stopwatch.ElapsedMilliseconds)"
+          Write-CompactErrorBody -RawContent $response.Content
+          throw 'Cost Management request returned HTTP 429 (throttled). Diagnostics captured above. Not retrying — this is a valid diagnostic result, see the pipeline header comments for interpretation and the manual Test A/Test B sequence.'
+        }
+        else {
+          Write-Host "RESULT: UNEXPECTED HTTP STATUS $($response.StatusCode)"
+          Write-CompactErrorBody -RawContent $response.Content
+          throw "Cost Management request returned unexpected HTTP status $($response.StatusCode). Not retrying."
+        }
