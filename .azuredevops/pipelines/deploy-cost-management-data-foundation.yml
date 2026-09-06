@@ -1,0 +1,138 @@
+# =============================================================================
+# Deploy Cost Management LAW Ingestion Foundation
+# =============================================================================
+# Purpose:
+#   Deploys the reusable Cost Management LAW ingestion foundation composition
+#   (src/observability/cost-management-data-foundation/main.bicep) using a
+#   project-specific parameter file. Creates only the CostManagementSnapshot_CL
+#   custom Log Analytics table and its Direct-ingestion Data Collection Rule
+#   against the existing central LIMS reporting Log Analytics workspace.
+#   Defaults to the LIMS configuration but accepts a different parameter-file
+#   path so the same reusable module and entrypoint can later be reused for
+#   another NFI project's table/DCR.
+#
+# Commissioning note:
+#   trigger/pr are intentionally disabled. This pipeline does not run
+#   automatically on push or merge. It is run manually (Run pipeline) only
+#   after a reviewed, explicit decision to validate or deploy. This capability
+#   has not yet been deployed or ingestion-tested — see docs/operations.md for
+#   outstanding work (scheduled collector, workbook LAW refactor, RBAC).
+#
+# Pipeline-reuse decision:
+#   The `what-if` action reuses the existing shared
+#   templates/deploy-observability-workbook-steps.yml unchanged — its build/
+#   lint/build-params + `az deployment sub what-if` steps are generic
+#   subscription-scope Bicep-parameter-file logic with no workbook-specific
+#   assumptions, so it is a clean fit here despite its workbook-era name.
+#   The `deploy` action is intentionally NOT routed through that same shared
+#   template: the template's post-deploy step parses workbook-specific output
+#   names (workbookResourceId/workbookName/workbookDisplayName/
+#   workbookResourceGroupName) that this composition does not produce, and the
+#   approved VM Availability / Cost Management Dashboard pipelines that already
+#   depend on that template are out of scope to modify. Rather than force a
+#   misleading "Workbook deployed" summary (with null fields) onto a table/DCR
+#   deployment, or edit shared, already-approved pipeline plumbing, the small
+#   `deploy` action below duplicates only the unavoidably different part (the
+#   post-deploy output summary) — the validate/what-if logic itself is not
+#   duplicated.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (Contributor on the resource group hosting the Log Analytics workspace)
+    type: string
+    default: 'sc-lims-mgt'
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/nfi/lims/observability/cost-management-data-foundation.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - template: templates/deploy-observability-workbook-steps.yml
+        parameters:
+          templateFile: 'src/observability/cost-management-data-foundation/main.bicep'
+          deploymentNamePrefix: 'cost-management-data-foundation'
+          action: what-if
+          serviceConnection: ${{ parameters.serviceConnection }}
+          parametersFile: ${{ parameters.parametersFile }}
+          location: ${{ parameters.location }}
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - checkout: self
+
+      - task: AzureCLI@2
+        displayName: 'Bicep build and lint validation'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            echo "== bicep build: src/observability/cost-management-data-foundation/main.bicep =="
+            az bicep build --file "src/observability/cost-management-data-foundation/main.bicep" --stdout > /dev/null
+            echo "== bicep lint: src/observability/cost-management-data-foundation/main.bicep =="
+            az bicep lint --file "src/observability/cost-management-data-foundation/main.bicep"
+            echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+            az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+
+      - task: AzureCLI@2
+        name: deployFoundation
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "cost-management-data-foundation-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            tableName=$(echo "$outputs"                  | jq -r '.tableName.value')
+            streamName=$(echo "$outputs"                 | jq -r '.streamName.value')
+            dcrResourceId=$(echo "$outputs"               | jq -r '.dataCollectionRuleResourceId.value')
+            dcrImmutableId=$(echo "$outputs"               | jq -r '.dataCollectionRuleImmutableId.value')
+            directLogsIngestionEndpoint=$(echo "$outputs" | jq -r '.directLogsIngestionEndpoint.value')
+
+            echo "##vso[task.setvariable variable=tableName;isOutput=true]$tableName"
+            echo "##vso[task.setvariable variable=dataCollectionRuleResourceId;isOutput=true]$dcrResourceId"
+
+            echo "========================================="
+            echo "Cost Management LAW ingestion foundation deployed successfully"
+            echo "========================================="
+            echo "  Table name           : $tableName"
+            echo "  Stream name          : $streamName"
+            echo "  DCR resource ID      : $dcrResourceId"
+            echo "  DCR immutable ID     : $dcrImmutableId"
+            echo "  Direct ingestion URL : $directLogsIngestionEndpoint"
+            echo ""
+            echo "Reminder: the future collector identity still needs the"
+            echo "'Monitoring Metrics Publisher' role at this DCR's scope before"
+            echo "ingestion will succeed. That RBAC assignment is not performed by"
+            echo "this pipeline or this repository — see docs/operations.md."
