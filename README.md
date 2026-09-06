@@ -41,15 +41,16 @@ Implemented capabilities:
 
 - The migrated LIMS **VM Availability SLA Dashboard v2** (`src/observability/vm-availability-sla-dashboard-v2/`, `modules/observability/vm-availability-sla-dashboard-v2/`, `config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`).
 - A from-scratch **Cost Management Dashboard** single-query pivot POC (`src/observability/cost-management-workbook/`, `modules/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`) — not yet live-validated.
+- A **Cost Management LAW Ingestion Foundation** (`src/observability/cost-management-data-foundation/`, `modules/observability/cost-management-data-foundation/`, `config/nfi/lims/observability/cost-management-data-foundation.bicepparam`) — a persisted-reporting-data destination (custom Log Analytics table + Data Collection Rule) for a future scheduled cost collector; not yet deployed.
 
-See [`docs/operations.md`](docs/operations.md) for full operational detail on both.
+See [`docs/operations.md`](docs/operations.md) for full operational detail on all three.
 
 Further areas (`src/automation/`, `operations/`, `config/nfi/shared/`, etc.) are added only once they contain real, deployable content — this repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why).
 
 There are two kinds of pipeline in `.azuredevops/pipelines/`:
 
 - **`ci.yml`** — triggers automatically on every push to every branch; static Bicep/parameter validation only, no deployment.
-- **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`, `deploy-cost-management-workbook.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability. Their shared validate/what-if/deploy steps live in `.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`.
+- **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`, `deploy-cost-management-workbook.yml`, `deploy-cost-management-data-foundation.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability. Their validate/what-if steps largely share `.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`.
 
 ## Development / deployment philosophy
 
