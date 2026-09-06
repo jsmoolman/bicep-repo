@@ -28,7 +28,7 @@ param location = 'westeurope'
 
 param tableName = 'CostManagementSnapshot_CL'
 
-param dataCollectionRuleName = 'dcr-cost-management-snapshot-westeu'
+param dataCollectionRuleName = 'dcr-cost-snapshot-westeu'
 
 param retentionInDays = 730
 

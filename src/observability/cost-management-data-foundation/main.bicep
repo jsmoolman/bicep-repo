@@ -13,7 +13,7 @@ param location string = 'westeurope'
 @description('Name of the custom Log Analytics table to create, e.g. CostManagementSnapshot_CL.')
 param tableName string
 
-@description('Name of the Data Collection Rule to create, e.g. dcr-cost-management-snapshot-westeu.')
+@description('Name of the Data Collection Rule to create, e.g. dcr-cost-snapshot-westeu.')
 param dataCollectionRuleName string
 
 @description('Analytics-plan interactive retention in days for the custom table (4-730).')

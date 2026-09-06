@@ -15,7 +15,9 @@ param location string = 'westeurope'
 @maxLength(63)
 param tableName string
 
-@description('Name of the Data Collection Rule to create, e.g. dcr-cost-management-snapshot-westeu. Kept configurable rather than hard-coded so a future project can supply its own instance name.')
+@description('Name of the Data Collection Rule to create, e.g. dcr-cost-snapshot-westeu. Kept configurable rather than hard-coded so a future project can supply its own instance name.')
+@minLength(3)
+@maxLength(30)
 param dataCollectionRuleName string
 
 @description('Analytics-plan interactive retention in days for the custom table (4-730). Does not modify workspace-wide retention.')
