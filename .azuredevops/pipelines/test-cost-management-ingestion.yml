@@ -105,7 +105,11 @@ steps:
         # Logs Ingestion API always expects a JSON array of records, even for one.
         $body = ConvertTo-Json -InputObject @($record) -Depth 5
 
-        $url = "$ingestionEndpoint/dataCollectionRules/$dcrImmutableId/streams/$streamName?api-version=$apiVersion"
+        $url = '{0}/dataCollectionRules/{1}/streams/{2}?api-version={3}' -f `
+            $ingestionEndpoint.TrimEnd('/'),
+            $dcrImmutableId,
+            $streamName,
+            $apiVersion
         Write-Host "Ingestion URL: $url"
 
         # --- Access token for the Logs Ingestion API (aud = monitor.azure.com,
