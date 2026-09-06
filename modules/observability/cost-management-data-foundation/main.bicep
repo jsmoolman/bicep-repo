@@ -28,7 +28,7 @@ param retentionInDays int = 730
 @maxValue(4383)
 param totalRetentionInDays int = 730
 
-@description('''Optional: full ARM resource ID of an existing Data Collection Endpoint (DCE). Empty string (the current LIMS state — no DCE exists yet due to insufficient private-networking IP address space) means the DCR is provisioned without a DCE and works through its own Direct logs-ingestion endpoint. Supplying a DCE resource ID here in the future switches properties.dataCollectionEndpointId without any change to the table schema, stream declaration, destination, data flow, or collector/workbook ingestion contract. This module never invents or creates a DCE.''')
+@description('''Optional: full ARM resource ID of an existing Data Collection Endpoint (DCE). Empty string (the current LIMS state — no DCE exists yet due to insufficient private-networking IP address space) means the DCR is provisioned without a DCE and works through its own Direct logs-ingestion endpoint. Supplying a DCE resource ID here in the future sets properties.dataCollectionEndpointId on the DCR without any change to the table schema, stream declaration, destination, or data flow. This alone does not switch ingestion to the DCE, since a Direct DCR may retain its own standalone endpoint even once associated with a DCE: the future collector own logsIngestionEndpoint configuration value must also be switched, separately, from directLogsIngestionEndpoint to the DCE resource own properties.logsIngestion.endpoint. This module never invents, creates, or resolves a DCE.''')
 param dataCollectionEndpointResourceId string = ''
 
 @description('Tags applied to the Data Collection Rule. The custom table resource does not support tags.')
@@ -124,10 +124,31 @@ resource table 'Microsoft.OperationalInsights/workspaces/tables@2025-07-01' = {
 
 // ─── Data Collection Rule ──────────────────────────────────────────────────────
 // kind: Direct — obtains a Direct logs-ingestion endpoint now (no DCE available
-// yet). One stream, one destination (the existing LAW only), one schema-preserving
-// data flow. dataCollectionEndpointId is included only when a DCE resource ID is
-// actually supplied — omitted (not present in the properties object at all) for
-// the current no-DCE LIMS state, so the DCR relies on its own Direct endpoint.
+// yet). One stream, one destination (the existing LAW only), one data flow with
+// an explicit, schema-preserving transformKql: 'source' passthrough (no mapping/
+// enrichment logic — normalization belongs in the future collector, not here).
+// dataCollectionEndpointId is included only when a DCE resource ID is actually
+// supplied — omitted (not present in the properties object at all) for the
+// current no-DCE LIMS state, so the DCR relies on its own Direct endpoint.
+//
+// Current vs. future ingestion-endpoint model:
+//   Current (no DCE):    the future collector configures its generic
+//                         "logsIngestionEndpoint" value from this module output
+//                         directLogsIngestionEndpoint — this DCR own Direct
+//                         endpoint (properties.endpoints.logsIngestion).
+//   Future (DCE present): supplying dataCollectionEndpointResourceId here sets
+//                         properties.dataCollectionEndpointId on this DCR below,
+//                         but that alone does not switch ingestion to the DCE —
+//                         a Direct DCR may retain its own standalone endpoint
+//                         even once associated with a DCE, and the caller
+//                         chooses which endpoint to send data to. Adopting
+//                         DCE-routed ingestion needs two separate changes: this
+//                         configuration setting dataCollectionEndpointResourceId,
+//                         AND the future collector own "logsIngestionEndpoint"
+//                         configuration value being switched from this module
+//                         output directLogsIngestionEndpoint to the DCE resource
+//                         own properties.logsIngestion.endpoint. This module
+//                         does not create, invent, or resolve a DCE endpoint.
 
 var dcrPropertiesBase = {
   streamDeclarations: {
@@ -152,6 +173,7 @@ var dcrPropertiesBase = {
         logAnalyticsDestinationName
       ]
       outputStream: streamName
+      transformKql: 'source'
     }
   ]
 }
@@ -193,5 +215,5 @@ output dataCollectionRuleResourceId string = dcr.id
 @description('Immutable ID of the deployed Data Collection Rule, required by the Logs Ingestion API.')
 output dataCollectionRuleImmutableId string = dcr.properties.immutableId
 
-@description('Direct logs-ingestion endpoint URL of the deployed Data Collection Rule (server-populated; becomes a DCE endpoint transparently if dataCollectionEndpointResourceId is supplied in a future configuration).')
+@description('''The Direct DCR logs-ingestion endpoint (properties.endpoints.logsIngestion, server-populated) of the deployed Data Collection Rule — the endpoint this DCR exposes on its own. This is the value the future collector configures as its logsIngestionEndpoint today (no Data Collection Endpoint, DCE, exists for LIMS). It does not automatically become a DCE endpoint if dataCollectionEndpointResourceId is supplied later: a Direct DCR may retain its own endpoint even once associated with a DCE, and the caller chooses which endpoint to send data to. See the Data Collection Rule comment above for the two separate changes required to adopt DCE-routed ingestion.''')
 output directLogsIngestionEndpoint string = dcr.properties.endpoints.logsIngestion
