@@ -43,7 +43,7 @@ parameters:
   - name: dcrImmutableId
     displayName: Immutable ID of the deployed Data Collection Rule
     type: string
-    default: 'dcr-2b4d2bd87e8437db5ea31bf6cca04fb'
+    default: 'dcr-2b4d2bd887e8437db5ea31bf6cea04fb'
 
   - name: ingestionEndpoint
     displayName: DCR Direct logs-ingestion endpoint (no trailing slash)
