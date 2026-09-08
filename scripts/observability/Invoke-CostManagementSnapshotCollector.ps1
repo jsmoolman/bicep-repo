@@ -127,9 +127,14 @@ function Get-BillingMonthWindow {
                     to   = NowUtc (partial month; never a full six-month range)
       'YYYY-MM'  -> from = first day of that month, 00:00:00Z
                     to   = final day of that month, 23:59:59Z (complete month)
+                    Must name a completed historical month — an explicit
+                    'YYYY-MM' equal to the current calendar month is rejected
+                    (the current, still-in-progress month has no "final day"
+                    yet; use the literal 'current' for it instead).
 
-      Rejects an invalid month format and any month later than the current
-      calendar month.
+      Rejects an invalid month format, an explicit 'YYYY-MM' naming the
+      current (incomplete) calendar month, and any month later than the
+      current calendar month.
     #>
     param(
         [Parameter(Mandatory)]
@@ -155,7 +160,10 @@ function Get-BillingMonthWindow {
 
     $monthStart = [datetime]::ParseExact($BillingMonth, 'yyyy-MM', [System.Globalization.CultureInfo]::InvariantCulture)
     if ($monthStart -gt $currentMonthStart) {
-        throw "BillingMonth '$BillingMonth' is in the future. The collector only accepts the current month or a completed past month."
+        throw "BillingMonth '$BillingMonth' is in the future. The collector only accepts the current month (use 'current') or a completed past month (an exact past YYYY-MM)."
+    }
+    if ($monthStart -eq $currentMonthStart) {
+        throw "BillingMonth '$BillingMonth' is the current, still-in-progress calendar month. An explicit YYYY-MM must name a completed historical month. Use the literal 'current' to collect the current month instead."
     }
 
     $monthEnd = $monthStart.AddMonths(1).AddSeconds(-1)
@@ -419,14 +427,16 @@ function ConvertTo-NormalizedCostRecords {
             })
     }
 
-    # Write-Output -NoEnumerate (not "return $records") is required here: a
-    # plain "return" of an IEnumerable causes PowerShell to stream its
-    # elements individually to the pipeline, and when there is exactly one
-    # element, the caller's assignment then collapses to that single element
-    # (unwrapped) rather than a one-item collection — silently corrupting
-    # exactly the single-row case. -NoEnumerate guarantees the List itself is
-    # always what the caller receives, regardless of row count (0, 1, or many).
-    Write-Output -NoEnumerate $records
+    # "return $records" streams each normalized record object to the pipeline
+    # individually (not the List container itself) — this is deliberate: the
+    # caller always wraps this call in @() (see Invoke-CostManagementSnapshot-
+    # CollectorMain below), which guarantees a flat, one-element-per-row array
+    # regardless of row count (0, 1, or many). Do not switch this back to
+    # "Write-Output -NoEnumerate $records": that would make the caller receive
+    # the List container as a single object instead of one array element per
+    # Cost row, which is not the record shape the Logs Ingestion API or the
+    # LAW table schema expects.
+    return $records
 }
 
 # =============================================================================
