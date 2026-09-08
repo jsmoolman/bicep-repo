@@ -28,9 +28,10 @@ Exactly:
 
 ```
 azure-nfi-iac/
-├── .azuredevops/pipelines/   # ci.yml (static validation) + per-capability deployment pipelines
+├── .azuredevops/pipelines/   # ci.yml (static validation) + per-capability deployment/collector pipelines
 ├── src/observability/        # Deployable compositions (entrypoints) for workbooks, alerts, dashboards
 ├── modules/observability/    # Genuinely reusable, environment-neutral Bicep modules
+├── scripts/observability/    # Operational scripts invoked by pipelines (e.g. the Cost Management collector)
 ├── config/nfi/lims/          # LIMS-specific configuration (parameter files)
 ├── docs/                     # Purpose, scope, and architecture documentation
 ├── bicepconfig.json
@@ -41,16 +42,18 @@ Implemented capabilities:
 
 - The migrated LIMS **VM Availability SLA Dashboard v2** (`src/observability/vm-availability-sla-dashboard-v2/`, `modules/observability/vm-availability-sla-dashboard-v2/`, `config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`).
 - A from-scratch **Cost Management Dashboard** single-query pivot POC (`src/observability/cost-management-workbook/`, `modules/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`) — not yet live-validated.
-- A **Cost Management LAW Ingestion Foundation** (`src/observability/cost-management-data-foundation/`, `modules/observability/cost-management-data-foundation/`, `config/nfi/lims/observability/cost-management-data-foundation.bicepparam`) — a persisted-reporting-data destination (custom Log Analytics table + Data Collection Rule) for a future scheduled cost collector; not yet deployed.
+- A **Cost Management LAW Ingestion Foundation** (`src/observability/cost-management-data-foundation/`, `modules/observability/cost-management-data-foundation/`, `config/nfi/lims/observability/cost-management-data-foundation.bicepparam`) — a persisted-reporting-data destination (custom Log Analytics table + Data Collection Rule) for the cost collector below; not yet deployed.
+- A **Cost Management Snapshot Collector** (`scripts/observability/Invoke-CostManagementSnapshotCollector.ps1`, run manually via `.azuredevops/pipelines/collect-cost-management-snapshot.yml`) — the real collector for the data path above (one Cost Management query, normalization, one Logs Ingestion write); manual-only during commissioning, no schedule enabled yet, and no real row has been ingested by it yet.
 
-See [`docs/operations.md`](docs/operations.md) for full operational detail on all three.
+See [`docs/operations.md`](docs/operations.md) for full operational detail on all four.
 
 Further areas (`src/automation/`, `operations/`, `config/nfi/shared/`, etc.) are added only once they contain real, deployable content — this repository was reset from a prior Azure Landing Zone-style tenant-provisioning design (see [`docs/architecture.md`](docs/architecture.md) for why).
 
-There are two kinds of pipeline in `.azuredevops/pipelines/`:
+There are three kinds of pipeline in `.azuredevops/pipelines/`:
 
 - **`ci.yml`** — triggers automatically on every push to every branch; static Bicep/parameter validation only, no deployment.
 - **Per-capability deployment pipelines** (e.g. `deploy-vm-availability-sla-dashboard-v2.yml`, `deploy-cost-management-workbook.yml`, `deploy-cost-management-data-foundation.yml`) — do not trigger automatically (`trigger: none`, `pr: none`) while commissioning; run manually to `what-if` (default) or `deploy` a specific capability. Their validate/what-if steps largely share `.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`.
+- **Manual operational/collector pipelines** (`collect-cost-management-snapshot.yml`, and the temporary `test-cost-management-ingestion.yml` probe) — also `trigger: none`/`pr: none`; wrap a script under `scripts/` rather than performing a Bicep deployment. `collect-cost-management-snapshot.yml` deliberately has no `schedules:` block yet — see [`docs/operations.md`](docs/operations.md).
 
 ## Development / deployment philosophy
 
@@ -68,7 +71,7 @@ See [`docs/architecture.md`](docs/architecture.md) for more detail.
 ## Prerequisites
 
 - [Azure CLI](https://learn.microsoft.com/en-us/cli/azure/install-azure-cli), which installs and manages the [Bicep CLI](https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/install#azure-cli) automatically (`az bicep install` / `az bicep upgrade`) — Bicep is a standalone CLI, not an Azure CLI extension
-- [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) >= 7.4 (for any operational scripts under `operations/` or `scripts/`, once added)
+- [PowerShell](https://learn.microsoft.com/en-us/powershell/scripting/install/installing-powershell) >= 7.4 (used by operational scripts under `scripts/`, e.g. the Cost Management Snapshot Collector)
 
 ## Documentation
 
