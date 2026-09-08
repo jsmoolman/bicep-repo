@@ -31,10 +31,17 @@
   This script is intended to be invoked from
   .azuredevops/pipelines/collect-cost-management-snapshot.yml, inside an
   AzureCLI@2 task (so `az` is already logged in with the pipeline's service
-  connection). It can also be dot-sourced for local, offline testing of its
-  pure functions (column resolution, environment mapping, month-window
-  arithmetic, normalization) without making any Azure or network call —
-  see the guard at the bottom of this file.
+  connection). AzureCLI@2 with scriptType: pscore / scriptLocation: scriptPath
+  dot-sources the target script rather than executing it as a child process,
+  so this script cannot rely on "was I dot-sourced?" (e.g.
+  $MyInvocation.InvocationName -ne '.') to decide whether to run — that would
+  incorrectly suppress Main in the real pipeline. Instead, -ImportOnly is the
+  explicit switch that local, offline testing passes to load only the pure
+  functions (column resolution, environment mapping, month-window arithmetic,
+  normalization) without executing Main and without making any Azure or
+  network call — see the guard at the bottom of this file. Any normal
+  invocation (with or without dot-sourcing, as long as -ImportOnly is not
+  passed) runs Main.
 #>
 
 [CmdletBinding()]
@@ -52,7 +59,10 @@ param(
     [string]$BillingMonth = 'current',
 
     [Parameter()]
-    [string]$ClientType = 'NFI-LIMS-CostCollector'
+    [string]$ClientType = 'NFI-LIMS-CostCollector',
+
+    [Parameter()]
+    [switch]$ImportOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -634,12 +644,19 @@ function Invoke-CostManagementSnapshotCollectorMain {
 }
 
 # =============================================================================
-# Entry point guard — only run Main when this file is executed directly.
-# Dot-sourcing this file (". ./Invoke-CostManagementSnapshotCollector.ps1")
-# loads only the functions above, with no Azure/network call, for local
-# offline testing.
+# Entry point guard — only run Main when -ImportOnly was not passed.
+#
+# This deliberately does NOT check $MyInvocation.InvocationName (e.g.
+# "-ne '.'" to detect dot-sourcing): AzureCLI@2 with scriptType: pscore and
+# scriptLocation: scriptPath dot-sources the target script to run it, so an
+# InvocationName-based guard would incorrectly suppress Main in the real
+# collect-cost-management-snapshot.yml pipeline. -ImportOnly is the explicit,
+# unambiguous switch that only local/offline testing passes — dot-sourcing
+# this file with ". ./Invoke-CostManagementSnapshotCollector.ps1 -ImportOnly"
+# loads only the functions above, with no Azure/network call. Any other
+# invocation (dot-sourced by AzureCLI@2, or run directly) executes Main.
 # =============================================================================
 
-if ($MyInvocation.InvocationName -ne '.') {
+if (-not $ImportOnly) {
     Invoke-CostManagementSnapshotCollectorMain -CostParametersFile $CostParametersFile -FoundationParametersFile $FoundationParametersFile -Project $Project -BillingMonth $BillingMonth -ClientType $ClientType
 }
