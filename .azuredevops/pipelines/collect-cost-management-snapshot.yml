@@ -1,0 +1,69 @@
+# =============================================================================
+# Collect Cost Management Snapshot — MANUAL commissioning pipeline
+# =============================================================================
+# Purpose:
+#   Runs the real Cost Management -> LAW snapshot collector
+#   (scripts/observability/Invoke-CostManagementSnapshotCollector.ps1) for one
+#   billing month: one management-group Cost Management query, normalization,
+#   Environment mapping from the checked-in repo config, and one Logs
+#   Ingestion API POST into CostManagementSnapshot_CL.
+#
+#   This pipeline is a thin wrapper only — all collector logic lives in the
+#   PowerShell script above and is not duplicated here.
+#
+# Commissioning note:
+#   trigger/pr are intentionally disabled, and there is deliberately no
+#   `schedules:` block yet. This pipeline is run manually (Run pipeline) only.
+#   Scheduling is a separate, later, tiny follow-up change made only after one
+#   real month has been collected and verified in the Log Analytics workspace.
+#   See docs/operations.md for current commissioning state.
+#
+# This pipeline performs exactly the two API calls the collector script makes
+# (one Cost Management query, one Logs Ingestion write) and nothing else: no
+# deployment command, no RBAC/Entra change, no DCR/table/DCE mutation.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: billingMonth
+    displayName: Billing month to collect ('current' or an exact past YYYY-MM)
+    type: string
+    default: current
+
+  - name: project
+    displayName: Project name written into the Project column
+    type: string
+    default: lims
+
+  - name: costParametersFile
+    displayName: Path to the Cost Management workbook parameter file (authoritative for managementGroupId / subscriptionEnvironmentMappings)
+    type: string
+    default: 'config/nfi/lims/observability/cost-management-workbook.bicepparam'
+
+  - name: foundationParametersFile
+    displayName: Path to the LAW foundation parameter file (authoritative for workspaceResourceId / dataCollectionRuleName / tableName)
+    type: string
+    default: 'config/nfi/lims/observability/cost-management-data-foundation.bicepparam'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Run Cost Management snapshot collector'
+    inputs:
+      azureSubscription: 'sc-az-devops-trustedcloud-mgmt'
+      scriptType: pscore
+      scriptLocation: scriptPath
+      scriptPath: 'scripts/observability/Invoke-CostManagementSnapshotCollector.ps1'
+      arguments: >-
+        -CostParametersFile "${{ parameters.costParametersFile }}"
+        -FoundationParametersFile "${{ parameters.foundationParametersFile }}"
+        -Project "${{ parameters.project }}"
+        -BillingMonth "${{ parameters.billingMonth }}"
+        -ClientType "NFI-LIMS-CostCollector"
