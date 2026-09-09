@@ -158,6 +158,12 @@ var workbookContent = {
           // Unchanged by this LAW migration: this query is synthetic (range/print
           // only) and never touches CostManagementSnapshot_CL, so it needs no
           // explicit timeContext.
+          //
+          // Default selection uses the query's own `selected` column (true only
+          // for MonthOffset == 0, the current month) — the documented Azure
+          // Workbook dropdown contract for a query-backed parameter's default
+          // value — rather than a static `value: 'value::0'` override, which
+          // depends on row order instead of an explicit selection flag.
           {
             id: guid(workloadName, 'p-reportMonth-cost')
             version: 'KqlParameterItem/1.0'
@@ -165,11 +171,10 @@ var workbookContent = {
             label: 'Report Month'
             type: 2
             isRequired: true
-            query: 'range MonthOffset from 0 to 12 step 1\n| extend MonthStart = datetime_add("month", -MonthOffset, startofmonth(now()))\n| order by MonthStart desc\n| project value=format_datetime(MonthStart, "yyyy-MM"), label=strcat(format_datetime(MonthStart, "yyyy-MM"), iff(MonthOffset == 0, " (current, month-to-date)", ""))'
+            query: 'range MonthOffset from 0 to 12 step 1\n| extend MonthStart = datetime_add("month", -MonthOffset, startofmonth(now()))\n| order by MonthStart desc\n| project value=format_datetime(MonthStart, "yyyy-MM"), label=strcat(format_datetime(MonthStart, "yyyy-MM"), iff(MonthOffset == 0, " (current, month-to-date)", "")), selected=(MonthOffset == 0)'
             queryType: 0
             resourceType: 'microsoft.operationalinsights/workspaces'
             crossComponentResources: [workspaceResourceId]
-            value: 'value::0'
             typeSettings: {
               additionalResourceOptions: []
               showDefault: false
