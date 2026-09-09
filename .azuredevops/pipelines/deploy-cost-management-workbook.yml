@@ -38,7 +38,7 @@ parameters:
   - name: serviceConnection
     displayName: Azure DevOps service connection (Contributor on the target subscription; this pipeline only deploys the workbook resource — it does not query Cost Management or the Log Analytics workspace itself)
     type: string
-    default: 'sc-lims-mgt'
+    default: 'sc-az-devops-trustedcloud-mgmt'
 
   - name: parametersFile
     displayName: Path to the project-specific Bicep parameter file
