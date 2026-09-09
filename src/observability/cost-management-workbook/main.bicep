@@ -12,7 +12,10 @@ param workloadName string
 @description('Customer-facing workbook title/display name.')
 param workbookDisplayName string
 
-@description('Name of the existing resource group, in this deployments target subscription, that will host the workbook resource. Independent from the Cost Management query scope below.')
+@description('''Subscription ID that hosts the workbook resource group below. An explicit, independent configuration decision — deliberately not derived from workspaceResourceId (that ARM ID identifies an unrelated resource, the Log Analytics workspace this workbook queries) or from the deployment''s ambient/service-connection subscription context, which is not guaranteed to be the intended hosting subscription.''')
+param workbookSubscriptionId string
+
+@description('Name of the existing resource group, in the workbookSubscriptionId subscription above, that will host the workbook resource. Independent from the Cost Management query scope below.')
 param workbookResourceGroupName string
 
 @description('Azure region for the workbook resource.')
@@ -35,7 +38,7 @@ param tags object = {}
 
 module workbook '../../../modules/observability/cost-management-workbook/main.bicep' = {
   name: 'cost-mgmt-workbook-${take(uniqueString(workloadName, managementGroupId, workspaceResourceId), 8)}'
-  scope: resourceGroup(workbookResourceGroupName)
+  scope: resourceGroup(workbookSubscriptionId, workbookResourceGroupName)
   params: {
     workloadName:                    workloadName
     workbookDisplayName:             workbookDisplayName
@@ -60,3 +63,6 @@ output workbookDisplayName string = workbook.outputs.workbookDisplayName
 
 @description('Resource group hosting the workbook.')
 output workbookResourceGroupName string = workbookResourceGroupName
+
+@description('''Subscription ID hosting the workbook (deployment diagnostics only — proves the deployment targeted the intended explicit subscription rather than the service connection''s ambient/default one).''')
+output workbookSubscriptionId string = workbookSubscriptionId

@@ -47,6 +47,13 @@ param workloadName = 'lims'
 
 param workbookDisplayName = 'Cost Management Dashboard - lims'
 
+// Explicit, independent hosting-subscription decision — this is the AZ-NFI-lims-mgt
+// subscription (same one workspaceResourceId below already points at), but it is
+// declared here directly rather than derived from workspaceResourceId, so the
+// deployment always targets the intended subscription regardless of the Azure
+// DevOps service connection's ambient/default subscription context.
+param workbookSubscriptionId = 'cd9bed50-c972-49d0-83b0-b97bf801c804'
+
 param workbookResourceGroupName = 'rg-lims-reports-mgmt-westeu'
 
 param location = 'westeurope'
