@@ -1,24 +1,46 @@
-// Parameters for the LIMS Cost Management Dashboard (single-query pivot POC).
+// Parameters for the LIMS Cost Management Dashboard.
+//
+// This workbook reads exclusively from the CostManagementSnapshot_CL Log
+// Analytics table — it no longer calls the Azure Cost Management REST API
+// itself (see modules/observability/cost-management-workbook/main.bicep for
+// the full LAW-based query architecture). CostManagementSnapshot_CL is
+// populated separately, on a manual-only basis today, by
+// scripts/observability/Invoke-CostManagementSnapshotCollector.ps1 via
+// .azuredevops/pipelines/collect-cost-management-snapshot.yml — see
+// docs/operations.md for current commissioning state.
 //
 // Workbook hosting reuses the existing LIMS reporting resource group/location
 // (same as the VM Availability SLA Dashboard v2) — this is a hosting-location
-// decision only and is independent from the Cost Management query scope below.
+// decision only and is independent from workspaceResourceId below.
 //
 // managementGroupId is the Tenant Root Group (c7adbc6a-e0b3-4eb7-9403-ed7f7f48ec4b),
-// per explicit customer confirmation. This is a query-scope decision only: the
-// Cost Management query explicitly filters to only the subscription IDs listed
-// in subscriptionEnvironmentMappings below — subscriptions are never dynamically
-// enumerated from the management group. RBAC for the costing security group at
-// this (or any) management-group scope is reviewed and applied separately, and
-// is intentionally not part of this repository's authority — see docs/scope.md.
-// Using the Tenant Root Group here should not be read as a recommendation to grant
-// tenant-wide Cost Management visibility; that scope should be revisited once the
-// costing security group's actual required boundary is confirmed.
+// per explicit customer confirmation. This workbook no longer uses this value to
+// query Azure Cost Management (see the module's managementGroupId parameter
+// description for why it is still declared here: resource-name/GUID stability,
+// and this file's continued use as the separate collector's own authoritative
+// Cost Management query-scope configuration, read directly via
+// `az bicep build-params` from scripts/observability/Invoke-CostManagementSnapshotCollector.ps1).
+// RBAC for the costing security group at this (or any) management-group scope
+// is reviewed and applied separately, and is intentionally not part of this
+// repository's authority — see docs/scope.md. Using the Tenant Root Group here
+// should not be read as a recommendation to grant tenant-wide Cost Management
+// visibility; that scope should be revisited once the costing security group's
+// actual required boundary is confirmed.
 //
-// workspaceResourceId reuses the existing central Log Analytics Workspace (same
-// one used by the VM Availability SLA Dashboard v2) purely as a stateless KQL
-// compute engine for pivot/trend calculation. No Cost Management data is
-// ingested into, stored in, or queried from that workspace.
+// workspaceResourceId is the existing central Log Analytics Workspace (same one
+// used by the VM Availability SLA Dashboard v2) that hosts CostManagementSnapshot_CL
+// (see config/nfi/lims/observability/cost-management-data-foundation.bicepparam
+// for the table/DCR that provisioned it — same workspaceResourceId value). This
+// workbook queries that table directly and exclusively for all cost figures.
+//
+// subscriptionEnvironmentMappings below is read by both this workbook (only the
+// environment values, for the Environment selector/grid zero-fill — LAW rows
+// already carry their own Environment column, written by the collector) and,
+// separately, by the collector script itself (both subscriptionId and
+// environment, to build its own Cost Management query filter and Environment
+// mapping). Do not remove or rename this parameter or its shape for the
+// workbook's sake — the collector's configuration contract is unrelated to this
+// refactor and must not be restructured.
 using '../../../../src/observability/cost-management-workbook/main.bicep'
 
 param workloadName = 'lims'

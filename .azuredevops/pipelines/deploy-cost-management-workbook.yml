@@ -2,11 +2,13 @@
 # Deploy Cost Management Dashboard
 # =============================================================================
 # Purpose:
-#   Deploys the reusable Cost Management single-query pivot Workbook
-#   composition (src/observability/cost-management-workbook/main.bicep) using
-#   a project-specific parameter file. Defaults to the LIMS configuration but
+#   Deploys the reusable Cost Management Dashboard Workbook composition
+#   (src/observability/cost-management-workbook/main.bicep) using a
+#   project-specific parameter file. Defaults to the LIMS configuration but
 #   accepts a different parameter-file path so the same reusable module and
-#   entrypoint can later be reused for another NFI project.
+#   entrypoint can later be reused for another NFI project. The workbook reads
+#   exclusively from the CostManagementSnapshot_CL Log Analytics table — it
+#   does not call the Azure Cost Management API itself.
 #
 # Commissioning note:
 #   trigger/pr are intentionally disabled. This pipeline does not run
@@ -34,7 +36,7 @@ parameters:
       - deploy
 
   - name: serviceConnection
-    displayName: Azure DevOps service connection (Contributor on the target subscription, plus Cost Management Reader at the configured management-group scope)
+    displayName: Azure DevOps service connection (Contributor on the target subscription; this pipeline only deploys the workbook resource — it does not query Cost Management or the Log Analytics workspace itself)
     type: string
     default: 'sc-lims-mgt'
 
