@@ -28,6 +28,9 @@ param workspaceResourceId string
 Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
 param subscriptionEnvironmentMappings array = []
 
+@description('''Optional allowlist of exact AddonAzureBackupPolicy PolicyName values to show in the Backup Policy Evidence grid (passed through to the module unchanged). Empty (default) applies no name filter. See modules/observability/backup-restore-workbook/main.bicep for the full rationale.''')
+param agreedPolicyNames array = []
+
 @description('Tags applied to the workbook resource.')
 param tags object = {}
 
@@ -42,6 +45,7 @@ module workbook '../../../modules/observability/backup-restore-workbook/main.bic
     location:                        location
     workspaceResourceId:             workspaceResourceId
     subscriptionEnvironmentMappings: subscriptionEnvironmentMappings
+    agreedPolicyNames:               agreedPolicyNames
     tags:                            tags
   }
 }

@@ -72,6 +72,25 @@ param subscriptionEnvironmentMappings = [
   }
 ]
 
+// Allowlist for the business-facing Backup Policy Evidence grid — hides
+// unrelated built-in/unused Azure Backup policies (DefaultPolicy,
+// EnhancedPolicy, HourlyLogBackup, etc.) that would otherwise clutter the
+// grid. This is presentation filtering only; it does not assert or imply
+// that any specific protected item/database uses a given policy.
+param agreedPolicyNames = [
+  'backuppolicy-vm-lims-mgmt-westeu-v2'
+  'backuppolicy-vm-lims-dev-westeu'
+  'backuppolicy-sql-lims-dev-westeu'
+  'backuppolicy-vm-lims-tst-westeu'
+  'backuppolicy-sql-lims-tst-westeu'
+  'backuppolicy-vm-lims-acc-westeu'
+  'backuppolicy-sql-lims-acc-westeu'
+  'backuppolicy-vm-lims-preprd-westeu'
+  'backuppolicy-sql-lims-preprd-westeu'
+  'backuppolicy-vm-lims-prd-westeu'
+  'backuppolicy-sql-lims-prd-westeu'
+]
+
 param tags = {
   environment: 'management'
   purpose: 'lims'
