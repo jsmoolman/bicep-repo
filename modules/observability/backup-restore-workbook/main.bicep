@@ -18,7 +18,7 @@ param location string = 'westeurope'
 @description('''Full ARM resource ID of the existing central Log Analytics workspace that already receives Azure Backup diagnostic telemetry (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) via existing Recovery Services Vault diagnostic settings. This workbook queries those three tables directly and exclusively — it creates no table, no Data Collection Rule, and no diagnostic setting; the diagnostic settings that populate these tables already exist and are entirely outside this workbook's authority.''')
 param workspaceResourceId string
 
-@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment strictly by matching each row''s own SubscriptionId (or, where a table''s SubscriptionId field is not populated, the subscription segment parsed out of its own ResourceId column — never a friendly/display name) against this configuration. A subscription/row that is not present in this array is excluded from every grid, never guessed from a vault, resource, or VM name.
+@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment strictly by matching each row''s own SubscriptionId (or, where a table''s SubscriptionId field is not populated, the subscription segment parsed out of its own ResourceId column — never a friendly/display name) against this configuration. For the raw job-telemetry grids (Execution, Failures, SQL Log Continuity, Restore/Recovery), a SubscriptionId not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present. Protection Inventory and Backup Policy Configuration are unchanged and continue to exclude an unmapped subscription''s rows, matching their existing, unmodified selection logic.
 Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
 param subscriptionEnvironmentMappings array = []
 
@@ -34,7 +34,6 @@ param tags object = {}
 
 var allEnvironmentValues = [for m in subscriptionEnvironmentMappings: m.environment]
 var configuredEnvironments = union([], allEnvironmentValues)
-var environmentDropdownValues = concat(['All'], configuredEnvironments)
 var configuredEnvironmentsKqlBody = join(map(configuredEnvironments, e => '"${e}"'), ', ')
 
 // Subscription -> Environment KQL mapping body: one "subscriptionId", "environment"
@@ -82,9 +81,20 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // sample queries.
 //
 // Environment is derived from SubscriptionId only (see subEnvMapKql above),
-// never from a resource/VM/vault name. An inner join means a job whose
-// SubscriptionId is not present in subscriptionEnvironmentMappings is silently
-// excluded from every grid — not misattributed to any configured environment.
+// never from a resource/VM/vault name. This is a LEFT OUTER join, deliberately:
+// a job whose SubscriptionId is not present in subscriptionEnvironmentMappings
+// is NEVER silently discarded here — it is retained with Environment coalesced
+// to the literal "Unmapped", so it stays visible under Environment = All (and
+// is itself individually selectable once the Environment parameter's own query
+// below detects it exists) rather than disappearing without a trace. A named,
+// configured Environment selection (e.g. "dev") still filters to exactly that
+// environment's own configured subscription IDs only — "Unmapped" rows never
+// leak into a named environment's results, because Environment is compared for
+// exact equality, and "Unmapped" is never itself added to
+// subscriptionEnvironmentMappings. (Protection Inventory and Backup Policy
+// Configuration are explicitly out of scope for this behavior and are
+// unchanged — they still use an inner join and still exclude an unmapped
+// subscription's rows, matching their existing, unmodified selection logic.)
 //
 // Backup classes (Class column) follow the exact canonical definitions supplied:
 //   VM Backup        = BackupManagementType == "IaaSVM" and JobOperation == "Backup"
@@ -106,28 +116,41 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // JobStartDateTime for gap analysis, not ingestion TimeGenerated" applied
 // uniformly, not only in the SQL Log continuity grid.
 //
-// TelemetryBounds/MinValidMonthKey compute, live from LAW (never hard-coded),
-// the earliest calendar month with any job telemetry at all. Any calendar month
-// before that month is "no telemetry collected yet" — every grid below renders
-// such a month as "-"/Unavailable, never as a fabricated zero. If
-// AddonAzureBackupJobs is ever completely empty, MinValidMonthKey falls back to
-// a sentinel ("9999-99") that lexicographically exceeds every real "yyyy-MM"
-// value, so every month fails closed to Unavailable rather than failing open to
-// a fabricated "valid" zero.
+// TelemetryPresence is the (Environment, MonthKey) pairs that have AT LEAST ONE
+// raw job row, of any class (even Class == ""), computed live from LAW every
+// render, never hard-coded and never a single global date bound. This is the
+// precise, per-environment/month presence check the six-month window fragment
+// below uses to decide IsValidMonth for whichever Environment is currently
+// selected — a month with genuinely zero telemetry for that environment/month
+// pair renders Unavailable, while a month WITH telemetry but a genuinely zero
+// metric (e.g. zero failures) renders as a real zero, never Unavailable.
 
-var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | join kind=inner (SubscriptionEnvironmentMap) on SubscriptionId\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryBounds = AddonAzureBackupJobs | summarize MinJobStartDateTime = min(JobStartDateTime), MaxJobStartDateTime = max(JobStartDateTime), MinTimeGenerated = min(TimeGenerated), MaxTimeGenerated = max(TimeGenerated);\nlet MinValidMonthKey = coalesce(toscalar(TelemetryBounds | project format_datetime(startofmonth(MinJobStartDateTime), "yyyy-MM")), "9999-99");\n'
+var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | join kind=leftouter (SubscriptionEnvironmentMap) on SubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
 
 // ─── KQL: shared six-month window fragment ────────────────────────────────────
 // Identical structure and rationale to modules/observability/cost-management-workbook/main.bicep:
 // Report Month + the five preceding calendar months, calendar-accurate
-// (datetime_add), never a 30/60-day approximation. A month is IsValidMonth only
-// when it is on/after MinValidMonthKey (i.e. LAW telemetry existed by then).
-// anyInvalidMonth is true whenever any of the six displayed months predates
-// available telemetry — every Total/aggregate column below renders "-" rather
-// than silently summing only the valid months and presenting an incomplete
-// total as complete.
+// (datetime_add), never a 30/60-day approximation.
+//
+// IsValidMonth is evaluated per (currently selected Environment, month) against
+// TelemetryPresence above, not against a single global earliest-telemetry date:
+// when a specific Environment is selected, a month is valid only if THAT
+// environment has at least one raw job row that month; when Environment = All
+// is selected, a month is valid if ANY environment (including "Unmapped") has
+// at least one raw job row that month. This means a month/environment
+// combination with genuinely no source telemetry always renders Unavailable
+// ("-"), never a fabricated zero — while a month/environment that DOES have
+// telemetry, but whose calculated metric is genuinely zero (e.g. zero failed
+// jobs), still renders that real zero, because zero-vs-Unavailable is decided
+// by presence-of-telemetry, never by the metric's own value. This automatically
+// still yields Unavailable for every calendar month before telemetry existed
+// for any environment (currently September 2026), with no hard-coded date.
+// anyInvalidMonth is true whenever any of the six displayed months lacks
+// telemetry for the selected Environment — every Total/aggregate column below
+// renders "-" rather than silently summing only the valid months and
+// presenting an incomplete total as complete.
 
-var monthWindowKql = 'let selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM")\n    | extend IsValidMonth = MonthKey >= MinValidMonthKey;\nlet anyInvalidMonth = toscalar(monthList | summarize InvalidMonths = countif(not(IsValidMonth))) > 0;\n'
+var monthWindowKql = 'let selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet isCurrentMonth = selectedMonth == startofmonth(now());\nlet telemetryMonthsForSelectedEnvironment =\n    TelemetryPresence\n    | where "{Environment}" == "All" or Environment == "{Environment}"\n    | summarize by MonthKey;\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM")\n    | extend IsValidMonth = MonthKey in (telemetryMonthsForSelectedEnvironment | project MonthKey);\nlet anyInvalidMonth = toscalar(monthList | summarize InvalidMonths = countif(not(IsValidMonth))) > 0;\n'
 
 // ─── KQL: Section B — Backup Execution six-month pivot (with Trend) ──────────
 // Rows: the four fixed backup classes (VM Backup, SQL Full, SQL Differential,
@@ -239,9 +262,11 @@ var kqlSqlLogContinuityGrid = '${normalizedJobsKql}let PolicyByPolicyId =\n    A
 // available LAW history." when zero rows are returned. This module never
 // synthesizes a "0 compliant restore tests" or "restore requirement met/failed"
 // message — restore-test compliance is a business/compliance assertion this
-// workbook does not make.
+// workbook does not make. Also a left outer join, for the same reason as
+// NormalizedJobs above: a restore/recovery job from an unmapped SubscriptionId
+// is retained and labelled "Unmapped", never silently discarded.
 
-var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = coalesce(SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId))\n| join kind=inner (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = SubscriptionId, Environment) on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
+var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = coalesce(SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId))\n| join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = SubscriptionId, Environment) on ResolvedSubscriptionId\n| extend Environment = coalesce(Environment, "Unmapped")\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
 
 // ─── KQL: Telemetry coverage (dynamic, Section A) ─────────────────────────────
 // Global fact query (not Environment-filtered — the "known telemetry facts"
@@ -252,6 +277,22 @@ var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation 
 // elsewhere is not silently hiding duplicate emissions).
 
 var kqlTelemetryCoverage = 'AddonAzureBackupJobs\n| summarize ["Earliest JobStartDateTime"] = min(JobStartDateTime), ["Latest JobStartDateTime"] = max(JobStartDateTime), ["Earliest TimeGenerated"] = min(TimeGenerated), ["Latest TimeGenerated"] = max(TimeGenerated), ["Total job rows"] = count(), ["Unique JobUniqueId values"] = dcount(JobUniqueId)'
+
+// ─── KQL: Environment parameter — dynamic, conditional "Unmapped" choice ──────
+// "All" and every configured environment (mgt/dev/tst/acc/preprd/prd for LIMS)
+// are always offered, exactly as before. "Unmapped" is a live, conditional
+// third category: it is added to the selector's own choices only when
+// AddonAzureBackupJobs actually contains at least one row whose SubscriptionId
+// is not present in subscriptionEnvironmentMappings — never unconditionally,
+// and never as a permanent configured environment. This is why this parameter
+// is now query-backed (queryType 0 against the same LAW workspace) rather than
+// a static jsonData list: the previous static list could not express "this
+// choice only exists if the underlying data actually exists". "All" remains
+// the default selection via the query's own `selected` column — the same
+// documented Azure Workbook dropdown-default mechanism the Report Month
+// parameter already uses, never a static `value:` override.
+
+var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | summarize by SubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap) on SubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| project value = EnvChoice, selected = (EnvChoice == "All")'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
@@ -301,8 +342,16 @@ var workbookContent = {
             }
           }
 
-          // Environment: choices derived from subscriptionEnvironmentMappings,
-          // never hard-coded and never inferred from a vault/resource/VM name.
+          // Environment: "All" + choices derived from
+          // subscriptionEnvironmentMappings, never hard-coded and never
+          // inferred from a vault/resource/VM name, PLUS a live, conditional
+          // "Unmapped" choice that only appears once AddonAzureBackupJobs
+          // actually contains telemetry from a subscription absent from
+          // subscriptionEnvironmentMappings (see kqlEnvironmentParameterQuery
+          // above) — query-backed so that condition can be evaluated live,
+          // never a static jsonData list. Default selection is "All" via the
+          // query's own `selected` column, matching the Report Month
+          // parameter's convention above.
           {
             id: guid(workloadName, 'p-environment-backup')
             version: 'KqlParameterItem/1.0'
@@ -310,8 +359,10 @@ var workbookContent = {
             label: 'Environment'
             type: 2
             isRequired: false
-            jsonData: string(environmentDropdownValues)
-            value: 'All'
+            query: kqlEnvironmentParameterQuery
+            queryType: 0
+            resourceType: 'microsoft.operationalinsights/workspaces'
+            crossComponentResources: [workspaceResourceId]
             typeSettings: {
               additionalResourceOptions: []
               showDefault: false
