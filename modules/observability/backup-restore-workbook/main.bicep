@@ -320,8 +320,18 @@ var kqlTelemetryCoverage = 'AddonAzureBackupJobs\n| summarize ["Earliest JobStar
 // Detecting "unmapped" against the raw (always-empty) SubscriptionId column
 // would have made every single job on this table appear unmapped regardless
 // of whether its subscription is actually configured.
+//
+// The Azure Workbook dropdown contract for a query-backed parameter requires
+// its result columns in this EXACT order: value, label, selected. EnvChoice is
+// carried through as an internal sort/identity column only and is explicitly
+// dropped before the final projection below — the query ends with
+// `| project value, label, selected` (bare column names, that exact order),
+// never a two-column projection: a query that emits only (value, selected)
+// with no label column shifts the "selected" boolean into the label
+// position, which is exactly the live-observed <unset>/true/false/false
+// dropdown corruption this fixes.
 
-var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId)) on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| project value = EnvChoice, selected = (EnvChoice == "All")'
+var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId)) on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| extend value = EnvChoice, label = EnvChoice, selected = (EnvChoice == "All")\n| project value, label, selected'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
