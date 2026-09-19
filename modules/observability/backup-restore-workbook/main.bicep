@@ -18,7 +18,7 @@ param location string = 'westeurope'
 @description('''Full ARM resource ID of the existing central Log Analytics workspace that already receives Azure Backup diagnostic telemetry (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) via existing Recovery Services Vault diagnostic settings. This workbook queries those three tables directly and exclusively — it creates no table, no Data Collection Rule, and no diagnostic setting; the diagnostic settings that populate these tables already exist and are entirely outside this workbook's authority.''')
 param workspaceResourceId string
 
-@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment by matching each row''s effective subscription ID against this configuration, tolower()-normalized so GUID casing can never affect the match. Per proven live schema, AddonAzureBackupJobs (Execution, Failures, SQL Log Continuity, Restore/Recovery) resolves that ID as ResolvedSubscriptionId = coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...), extract(..._ResourceId...)) — _SubscriptionId first, because AddonAzureBackupJobs''s own SubscriptionId column is observed 0% populated while _SubscriptionId is observed 100% populated. CoreAzureBackup and AddonAzureBackupPolicy (Protection Inventory, Backup Policy Configuration) are unchanged and continue to resolve via coalesce(SubscriptionId, extract(...ResourceId...)), matching their existing, unmodified selection logic — never a friendly/display name in any case. For the AddonAzureBackupJobs-driven grids, a resolved ID not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present; Protection Inventory and Backup Policy Configuration continue to exclude an unmapped subscription''s rows.
+@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment by matching each row''s effective subscription ID against this configuration. This resolution is standardized across all three tables (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) as ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...), extract(..._ResourceId...))), joined only to tolower(SubscriptionEnvironmentMap.SubscriptionId) — never a friendly/display name, and never dependent on GUID casing (ARM ResourceId values, and _SubscriptionId itself, may use uppercase subscription GUID text). _SubscriptionId is the primary source everywhere per proven live schema: AddonAzureBackupJobs''s own SubscriptionId column is observed 0% populated while _SubscriptionId is observed 100% populated (11,210/11,210 rows, 6 distinct values); the same 0%/populated pattern is proven for AddonAzureBackupPolicy''s PolicyAssociation rows. For the AddonAzureBackupJobs-driven grids (Execution, Failures, SQL Log Continuity, Restore/Recovery), a resolved ID not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present; Protection Inventory and Backup Policy Configuration continue to exclude an unmapped subscription''s rows via their existing, unmodified inner-join selection logic (only the subscription-resolution expression feeding that join was standardized).
 Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
 param subscriptionEnvironmentMappings array = []
 
@@ -55,28 +55,37 @@ var lawQueryTimeContext = {
 }
 
 // ─── KQL: shared Subscription -> Environment mapping fragment ────────────────
-// Prepended to every grid query below that reads a raw backup table. Every
-// fragment that consumes it resolves an effective "ResolvedSubscriptionId" via
-// a coalesce(...) chain (the same "split/parse a real ARM resource ID" pattern
-// already used by src/observability/cost-management-data-foundation/main.bicep
-// to derive a subscription ID from workspaceResourceId) — never a friendly
-// name — but the exact chain differs per table, driven by proven live schema:
-//   - AddonAzureBackupJobs (Execution, Failures, SQL Log Continuity,
-//     Restore/Recovery): SubscriptionId is observed 0% populated on this
+// Prepended to every grid query below that reads a raw backup table.
+//
+// resolvedSubscriptionIdExpr is the single, standardized subscription
+// resolution expression used by EVERY query below that consumes
+// AddonAzureBackupJobs, CoreAzureBackup, or AddonAzureBackupPolicy — one
+// definition, never a per-table variant, so the three tables can never drift
+// out of sync with each other again. It is a coalesce(...) chain (the same
+// "split/parse a real ARM resource ID" pattern already used by
+// src/observability/cost-management-data-foundation/main.bicep to derive a
+// subscription ID from workspaceResourceId) — never a friendly/display name —
+// wrapped in tolower() so GUID casing can never cause a missed match (ARM
+// ResourceId values, and _SubscriptionId itself, may use uppercase GUID
+// text). _SubscriptionId is deliberately first, per proven live schema:
+//   - AddonAzureBackupJobs: SubscriptionId is observed 0% populated on this
 //     table; _SubscriptionId is observed 100% populated (11,210/11,210 rows,
-//     6 distinct values). ResolvedSubscriptionId is therefore
-//     coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...),
-//     extract(..._ResourceId...)) — _SubscriptionId first, SubscriptionId
-//     only as a defensive fallback should it ever become populated, then the
-//     GUID parsed out of ResourceId/_ResourceId as a last resort.
-//   - CoreAzureBackup, AddonAzureBackupPolicy (Protection Inventory, Backup
-//     Policy Configuration): unchanged, still coalesce(SubscriptionId,
-//     extract(...ResourceId...)) — no live evidence has been gathered for
-//     these two tables' _SubscriptionId/_ResourceId population, so their
-//     existing, already-working resolution is left exactly as-is.
-// Every ResolvedSubscriptionId, and the SubscriptionId side of
-// SubscriptionEnvironmentMap it is joined against, is tolower()-normalized at
-// the join so GUID casing differences can never cause a missed match.
+//     6 distinct values).
+//   - AddonAzureBackupPolicy's PolicyAssociation rows: the same pattern is
+//     proven — _SubscriptionId populated, SubscriptionId empty (261/261 rows).
+// SubscriptionId (should it ever be populated for a given table/row) and the
+// GUID parsed out of ResourceId/_ResourceId are defensive fallbacks only,
+// evaluated in that order, never the primary source.
+//
+// subscriptionEnvironmentMapJoinKql is the single, standardized join
+// right-hand side every one of those queries joins ResolvedSubscriptionId
+// against — SubscriptionEnvironmentMap's own SubscriptionId column,
+// tolower()-normalized to match, aliased to ResolvedSubscriptionId. Reused
+// as-is for inner, leftouter, and leftanti joins alike (a leftanti join
+// simply ignores the extra Environment column on the right side).
+
+var resolvedSubscriptionIdExpr = 'tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))'
+var subscriptionEnvironmentMapJoinKql = '(SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment)'
 
 var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:string, Environment:string) [${subscriptionEnvironmentMapKqlBody}];\n'
 
@@ -93,12 +102,12 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // record per job, exactly as documented by Microsoft's own Backup Reports
 // sample queries.
 //
-// Environment is derived from ResolvedSubscriptionId (see subEnvMapKql above
-// for the exact AddonAzureBackupJobs coalesce chain: _SubscriptionId first,
-// proven 100% populated live, never the table's own SubscriptionId column,
-// which is proven 0% populated), never from a resource/VM/vault name, and
-// tolower()-normalized on both sides of the join so GUID casing can never
-// cause a missed match. This is a LEFT OUTER join, deliberately: a job whose
+// Environment is derived from ResolvedSubscriptionId (see the standardized
+// resolvedSubscriptionIdExpr above: _SubscriptionId first, proven 100%
+// populated live for this table, never the table's own SubscriptionId
+// column, which is proven 0% populated), never from a resource/VM/vault
+// name, and tolower()-normalized on both sides of the join so GUID casing
+// can never cause a missed match. This is a LEFT OUTER join, deliberately: a job whose
 // ResolvedSubscriptionId is not present in subscriptionEnvironmentMappings is
 // NEVER silently discarded here — it is retained with Environment coalesced
 // to the literal "Unmapped", so it stays visible under Environment = All (and
@@ -143,7 +152,7 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // pair renders Unavailable, while a month WITH telemetry but a genuinely zero
 // metric (e.g. zero failures) renders as a real zero, never Unavailable.
 
-var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment) on ResolvedSubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
+var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | join kind=leftouter ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
 
 // ─── KQL: shared six-month window fragment ────────────────────────────────────
 // Identical structure and rationale to modules/observability/cost-management-workbook/main.bicep:
@@ -244,8 +253,17 @@ var kqlFailuresGrid = '${normalizedJobsKql}let selectedMonthFailures =\n    Norm
 // duplicate that join-key column (same Kusto behavior noted above) — each is
 // explicitly projected away immediately after its own join, before the next
 // join runs, so no duplicate ever accumulates or cascades.
+//
+// Subscription resolution uses the standardized resolvedSubscriptionIdExpr /
+// subscriptionEnvironmentMapJoinKql (see subEnvMapKql above) — the same
+// _SubscriptionId-first, tolower()-normalized chain used for
+// AddonAzureBackupJobs, applied here to CoreAzureBackup for consistency
+// across all three Azure Backup tables. The inner join is unchanged: a
+// protected item on a subscription absent from subscriptionEnvironmentMappings
+// is still excluded from this grid, matching its existing, unmodified
+// selection logic — only the resolution expression feeding that join changed.
 
-var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(Environment:string) [${configuredEnvironmentsKqlBody}];\nlet CoreItemsLatest =\n    CoreAzureBackup\n    | where OperationName == "BackupItem"\n    | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId\n    | extend ResolvedSubscriptionId = coalesce(SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId))\n    | join kind=inner (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = SubscriptionId, Environment) on ResolvedSubscriptionId;\nlet ProtectedVMs = CoreItemsLatest | where BackupManagementType == "IaaSVM";\nlet ProtectedSqlDatabases = CoreItemsLatest | where BackupManagementType == "AzureWorkload";\nlet vmCounts = ProtectedVMs | summarize ProtectedVMs = dcount(BackupItemUniqueId) by Environment;\nlet sqlHostCounts = ProtectedSqlDatabases | summarize SqlHosts = dcount(ProtectedContainerUniqueId) by Environment;\nlet sqlDbCounts = ProtectedSqlDatabases | summarize ProtectedSqlDatabases = dcount(BackupItemUniqueId) by Environment;\nConfiguredEnvironments\n| join kind=leftouter vmCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlHostCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlDbCounts on Environment\n| project-away Environment1\n| extend ProtectedVMs = coalesce(ProtectedVMs, 0), SqlHosts = coalesce(SqlHosts, 0), ProtectedSqlDatabases = coalesce(ProtectedSqlDatabases, 0)\n| order by Environment asc'
+var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(Environment:string) [${configuredEnvironmentsKqlBody}];\nlet CoreItemsLatest =\n    CoreAzureBackup\n    | where OperationName == "BackupItem"\n    | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId;\nlet ProtectedVMs = CoreItemsLatest | where BackupManagementType == "IaaSVM";\nlet ProtectedSqlDatabases = CoreItemsLatest | where BackupManagementType == "AzureWorkload";\nlet vmCounts = ProtectedVMs | summarize ProtectedVMs = dcount(BackupItemUniqueId) by Environment;\nlet sqlHostCounts = ProtectedSqlDatabases | summarize SqlHosts = dcount(ProtectedContainerUniqueId) by Environment;\nlet sqlDbCounts = ProtectedSqlDatabases | summarize ProtectedSqlDatabases = dcount(BackupItemUniqueId) by Environment;\nConfiguredEnvironments\n| join kind=leftouter vmCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlHostCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlDbCounts on Environment\n| project-away Environment1\n| extend ProtectedVMs = coalesce(ProtectedVMs, 0), SqlHosts = coalesce(SqlHosts, 0), ProtectedSqlDatabases = coalesce(ProtectedSqlDatabases, 0)\n| order by Environment asc'
 
 // ─── KQL: Section E — Current backup policy configuration ────────────────────
 // Latest AddonAzureBackupPolicy "Policy" row per PolicyUniqueId (arg_max).
@@ -255,8 +273,17 @@ var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(En
 // exact discovered schema spelling "DiffBackupDaysofTheWeek" (lowercase "of"),
 // matching Microsoft's own published AddonAzureBackupPolicy column reference —
 // NOT "DiffBackupDaysOfTheWeek".
+//
+// Subscription resolution uses the standardized resolvedSubscriptionIdExpr /
+// subscriptionEnvironmentMapJoinKql (see subEnvMapKql above), same as
+// Protection Inventory — the inner join and every other selection rule below
+// are otherwise unchanged. LogBackupFrequency (included in the projection
+// below) is deliberately POLICY-level evidence only — this grid never states,
+// implies, or requires that any particular database uses this particular
+// policy (see Section F below for why no per-database policy assignment is
+// asserted anywhere in this module).
 
-var kqlPolicyGrid = '${subEnvMapKql}AddonAzureBackupPolicy\n| where OperationName == "Policy"\n| summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n| extend ResolvedSubscriptionId = coalesce(SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId))\n| join kind=inner (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = SubscriptionId, Environment) on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project Environment, PolicyName, BackupManagementType, PolicySubType, BackupFrequency, BackupDaysOfTheWeek, BackupTimes, DailyRetentionDuration, WeeklyRetentionDaysOfTheWeek, WeeklyRetentionDuration, MonthlyRetentionWeeksOfTheMonth, MonthlyRetentionDaysOfTheWeek, MonthlyRetentionDuration, YearlyRetentionMonthsOfTheYear, YearlyRetentionWeeksOfTheMonth, YearlyRetentionDaysOfTheWeek, YearlyRetentionDuration, DiffBackupDaysofTheWeek, DiffBackupTime, DiffBackupRetentionDuration, LogBackupFrequency, LogBackupRetentionDuration, State\n| order by Environment asc, PolicyName asc'
+var kqlPolicyGrid = '${subEnvMapKql}AddonAzureBackupPolicy\n| where OperationName == "Policy"\n| summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n| extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n| join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project Environment, PolicyName, BackupManagementType, PolicySubType, BackupFrequency, BackupDaysOfTheWeek, BackupTimes, DailyRetentionDuration, WeeklyRetentionDaysOfTheWeek, WeeklyRetentionDuration, MonthlyRetentionWeeksOfTheMonth, MonthlyRetentionDaysOfTheWeek, MonthlyRetentionDuration, YearlyRetentionMonthsOfTheYear, YearlyRetentionWeeksOfTheMonth, YearlyRetentionDaysOfTheWeek, YearlyRetentionDuration, DiffBackupDaysofTheWeek, DiffBackupTime, DiffBackupRetentionDuration, LogBackupFrequency, LogBackupRetentionDuration, State\n| order by Environment asc, PolicyName asc'
 
 // ─── KQL: Section F — SQL Log continuity / RPO observation ───────────────────
 // Purely observational, per explicit instruction: no invented grace threshold,
@@ -264,12 +291,26 @@ var kqlPolicyGrid = '${subEnvMapKql}AddonAzureBackupPolicy\n| where OperationNam
 // grouped per protected database (BackupItemUniqueId), gap-analysed using
 // JobStartDateTime (never TimeGenerated) via prev()-over-serialize, guarded so
 // a gap is only computed between two consecutive jobs for the SAME
-// BackupItemUniqueId (never bridging two different databases). Configured log
-// frequency is joined in "where available" (leftouter) from the protected
-// item's own PolicyUniqueId (CoreAzureBackup) -> AddonAzureBackupPolicy's
-// LogBackupFrequency — never fabricated when a policy link is absent.
+// BackupItemUniqueId (never bridging two different databases).
+//
+// Deliberately NO per-database "configured log frequency" column. An earlier
+// version joined CoreAzureBackup.BackupItem's own PolicyUniqueId to
+// AddonAzureBackupPolicy's "Policy" rows to surface one — that assumption is
+// removed here because live evidence proves AddonAzureBackupPolicy cannot
+// support a proven per-item/database identity correlation: its
+// PolicyAssociation rows (261/261 tested) populate PolicyUniqueId and
+// _SubscriptionId, but PolicyName, BackupManagementServerUniqueId,
+// DatasourceType, ExtendedProperties, and SubscriptionId are ALL 0 populated
+// — the schema exposes no usable item/container/friendly-name association
+// field. Absent a proven, populated field linking a specific database to a
+// specific policy, this module infers no database -> policy relationship
+// whatsoever — never from subscription, vault, policy count, naming
+// convention, or frequency. Policy-level LogBackupFrequency remains visible,
+// as policy-level evidence only, in the Backup Policy Configuration grid
+// (Section E above) — it does not claim any particular database uses that
+// policy.
 
-var kqlSqlLogContinuityGrid = '${normalizedJobsKql}let PolicyByPolicyId =\n    AddonAzureBackupPolicy\n    | where OperationName == "Policy"\n    | summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n    | project PolicyUniqueId, LogBackupFrequency;\nlet ItemPolicyMap =\n    CoreAzureBackup\n    | where OperationName == "BackupItem"\n    | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId\n    | where isnotempty(PolicyUniqueId)\n    | join kind=leftouter PolicyByPolicyId on PolicyUniqueId\n    | project BackupItemUniqueId, ConfiguredLogFrequencyMinutes = LogBackupFrequency;\nlet sqlLogJobs = NormalizedJobs | where Class == "SQL Log" | where "{Environment}" == "All" or Environment == "{Environment}";\nlet successfulLogJobs = sqlLogJobs | where IsSucceeded;\nlet gapAnalysis =\n    successfulLogJobs\n    | order by BackupItemUniqueId asc, JobStartDateTime asc\n    | serialize\n    | extend PrevJobStartDateTime = prev(JobStartDateTime, 1), PrevBackupItemUniqueId = prev(BackupItemUniqueId, 1)\n    | extend GapMinutes = iff(PrevBackupItemUniqueId == BackupItemUniqueId, datetime_diff("minute", JobStartDateTime, PrevJobStartDateTime), int(null))\n    | summarize FirstSuccessfulLogJob = min(JobStartDateTime), LastSuccessfulLogJob = max(JobStartDateTime), MaxObservedGapMinutes = max(GapMinutes) by Environment, BackupItemUniqueId, BackupItemFriendlyName;\nlet failedLogJobs = sqlLogJobs | where IsFailed | summarize FailedLogJobs = count(), ObservedFailureCodes = make_set(JobFailureCode, 20) by BackupItemUniqueId;\ngapAnalysis\n| join kind=leftouter failedLogJobs on BackupItemUniqueId\n| join kind=leftouter ItemPolicyMap on BackupItemUniqueId\n| extend FailedLogJobs = coalesce(FailedLogJobs, 0)\n| extend ObservedFailureCodes = tostring(ObservedFailureCodes)\n| project Environment, Database = BackupItemFriendlyName, ConfiguredLogFrequencyMinutes, FirstSuccessfulLogJob, LastSuccessfulLogJob, MaxObservedGapMinutes, FailedLogJobs, ObservedFailureCodes\n| order by Environment asc, Database asc'
+var kqlSqlLogContinuityGrid = '${normalizedJobsKql}let sqlLogJobs = NormalizedJobs | where Class == "SQL Log" | where "{Environment}" == "All" or Environment == "{Environment}";\nlet successfulLogJobs = sqlLogJobs | where IsSucceeded;\nlet gapAnalysis =\n    successfulLogJobs\n    | order by BackupItemUniqueId asc, JobStartDateTime asc\n    | serialize\n    | extend PrevJobStartDateTime = prev(JobStartDateTime, 1), PrevBackupItemUniqueId = prev(BackupItemUniqueId, 1)\n    | extend GapMinutes = iff(PrevBackupItemUniqueId == BackupItemUniqueId, datetime_diff("minute", JobStartDateTime, PrevJobStartDateTime), int(null))\n    | summarize FirstSuccessfulLogJob = min(JobStartDateTime), LastSuccessfulLogJob = max(JobStartDateTime), MaxObservedGapMinutes = max(GapMinutes) by Environment, BackupItemUniqueId, BackupItemFriendlyName;\nlet failedLogJobs = sqlLogJobs | where IsFailed | summarize FailedLogJobs = count(), ObservedFailureCodes = make_set(JobFailureCode, 20) by BackupItemUniqueId;\ngapAnalysis\n| join kind=leftouter failedLogJobs on BackupItemUniqueId\n| extend FailedLogJobs = coalesce(FailedLogJobs, 0)\n| extend ObservedFailureCodes = tostring(ObservedFailureCodes)\n| project Environment, Database = BackupItemFriendlyName, FirstSuccessfulLogJob, LastSuccessfulLogJob, MaxObservedGapMinutes, FailedLogJobs, ObservedFailureCodes\n| order by Environment asc, Database asc'
 
 // ─── KQL: Section G — Restore / Recovery evidence ─────────────────────────────
 // Searches raw AddonAzureBackupJobs directly (not through the Class/Success
@@ -284,11 +325,11 @@ var kqlSqlLogContinuityGrid = '${normalizedJobsKql}let PolicyByPolicyId =\n    A
 // workbook does not make. Also a left outer join, for the same reason as
 // NormalizedJobs above: a restore/recovery job from an unmapped
 // ResolvedSubscriptionId is retained and labelled "Unmapped", never silently
-// discarded. Uses the same AddonAzureBackupJobs ResolvedSubscriptionId chain
-// as NormalizedJobs (_SubscriptionId first — proven 100% populated on this
-// table, vs. SubscriptionId proven 0% populated), tolower()-normalized.
+// discarded. Uses the same standardized resolvedSubscriptionIdExpr /
+// subscriptionEnvironmentMapJoinKql as NormalizedJobs (see subEnvMapKql
+// above).
 
-var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n| join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment) on ResolvedSubscriptionId\n| extend Environment = coalesce(Environment, "Unmapped")\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
+var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n| join kind=leftouter ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n| extend Environment = coalesce(Environment, "Unmapped")\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
 
 // ─── KQL: Telemetry coverage (dynamic, Section A) ─────────────────────────────
 // Global fact query (not Environment-filtered — the "known telemetry facts"
@@ -314,12 +355,14 @@ var kqlTelemetryCoverage = 'AddonAzureBackupJobs\n| summarize ["Earliest JobStar
 // documented Azure Workbook dropdown-default mechanism the Report Month
 // parameter already uses, never a static `value:` override.
 //
-// HasUnmapped resolves ResolvedSubscriptionId the same way NormalizedJobs does
-// (_SubscriptionId first, tolower()-normalized) — critically, NOT the raw
-// SubscriptionId column, which is proven 0% populated on AddonAzureBackupJobs.
-// Detecting "unmapped" against the raw (always-empty) SubscriptionId column
-// would have made every single job on this table appear unmapped regardless
-// of whether its subscription is actually configured.
+// HasUnmapped resolves ResolvedSubscriptionId via the same standardized
+// resolvedSubscriptionIdExpr / subscriptionEnvironmentMapJoinKql as
+// NormalizedJobs (_SubscriptionId first, tolower()-normalized) — critically,
+// NOT the raw SubscriptionId column, which is proven 0% populated on
+// AddonAzureBackupJobs. Detecting "unmapped" against the raw (always-empty)
+// SubscriptionId column would have made every single job on this table
+// appear unmapped regardless of whether its subscription is actually
+// configured.
 //
 // The Azure Workbook dropdown contract for a query-backed parameter requires
 // its result columns in this EXACT order: value, label, selected. EnvChoice is
@@ -331,7 +374,7 @@ var kqlTelemetryCoverage = 'AddonAzureBackupJobs\n| summarize ["Earliest JobStar
 // position, which is exactly the live-observed <unset>/true/false/false
 // dropdown corruption this fixes.
 
-var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId)) on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| extend value = EnvChoice, label = EnvChoice, selected = (EnvChoice == "All")\n| project value, label, selected'
+var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| extend value = EnvChoice, label = EnvChoice, selected = (EnvChoice == "All")\n| project value, label, selected'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
