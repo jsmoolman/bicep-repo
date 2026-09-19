@@ -18,7 +18,7 @@ param location string = 'westeurope'
 @description('''Full ARM resource ID of the existing central Log Analytics workspace that already receives Azure Backup diagnostic telemetry (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) via existing Recovery Services Vault diagnostic settings. This workbook queries those three tables directly and exclusively — it creates no table, no Data Collection Rule, and no diagnostic setting; the diagnostic settings that populate these tables already exist and are entirely outside this workbook's authority.''')
 param workspaceResourceId string
 
-@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment strictly by matching each row''s own SubscriptionId (or, where a table''s SubscriptionId field is not populated, the subscription segment parsed out of its own ResourceId column — never a friendly/display name) against this configuration. For the raw job-telemetry grids (Execution, Failures, SQL Log Continuity, Restore/Recovery), a SubscriptionId not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present. Protection Inventory and Backup Policy Configuration are unchanged and continue to exclude an unmapped subscription''s rows, matching their existing, unmodified selection logic.
+@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment by matching each row''s effective subscription ID against this configuration, tolower()-normalized so GUID casing can never affect the match. Per proven live schema, AddonAzureBackupJobs (Execution, Failures, SQL Log Continuity, Restore/Recovery) resolves that ID as ResolvedSubscriptionId = coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...), extract(..._ResourceId...)) — _SubscriptionId first, because AddonAzureBackupJobs''s own SubscriptionId column is observed 0% populated while _SubscriptionId is observed 100% populated. CoreAzureBackup and AddonAzureBackupPolicy (Protection Inventory, Backup Policy Configuration) are unchanged and continue to resolve via coalesce(SubscriptionId, extract(...ResourceId...)), matching their existing, unmodified selection logic — never a friendly/display name in any case. For the AddonAzureBackupJobs-driven grids, a resolved ID not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present; Protection Inventory and Backup Policy Configuration continue to exclude an unmapped subscription''s rows.
 Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
 param subscriptionEnvironmentMappings array = []
 
@@ -55,15 +55,28 @@ var lawQueryTimeContext = {
 }
 
 // ─── KQL: shared Subscription -> Environment mapping fragment ────────────────
-// Prepended to every grid query below that reads a raw backup table. Also used,
-// via a `coalesce(SubscriptionId, extract(...))` pattern in the fragments that
-// consume it, as a defensive fallback for the two tables (CoreAzureBackup,
-// AddonAzureBackupPolicy) whose SubscriptionId column is documented as
-// Backup-vault-specific: if it is unpopulated for a Recovery Services vault row,
-// the subscription GUID is parsed out of that row's own ResourceId column
-// instead (the same "split/parse a real ARM resource ID" pattern already used by
-// src/observability/cost-management-data-foundation/main.bicep to derive a
-// subscription ID from workspaceResourceId) — never a friendly name.
+// Prepended to every grid query below that reads a raw backup table. Every
+// fragment that consumes it resolves an effective "ResolvedSubscriptionId" via
+// a coalesce(...) chain (the same "split/parse a real ARM resource ID" pattern
+// already used by src/observability/cost-management-data-foundation/main.bicep
+// to derive a subscription ID from workspaceResourceId) — never a friendly
+// name — but the exact chain differs per table, driven by proven live schema:
+//   - AddonAzureBackupJobs (Execution, Failures, SQL Log Continuity,
+//     Restore/Recovery): SubscriptionId is observed 0% populated on this
+//     table; _SubscriptionId is observed 100% populated (11,210/11,210 rows,
+//     6 distinct values). ResolvedSubscriptionId is therefore
+//     coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...),
+//     extract(..._ResourceId...)) — _SubscriptionId first, SubscriptionId
+//     only as a defensive fallback should it ever become populated, then the
+//     GUID parsed out of ResourceId/_ResourceId as a last resort.
+//   - CoreAzureBackup, AddonAzureBackupPolicy (Protection Inventory, Backup
+//     Policy Configuration): unchanged, still coalesce(SubscriptionId,
+//     extract(...ResourceId...)) — no live evidence has been gathered for
+//     these two tables' _SubscriptionId/_ResourceId population, so their
+//     existing, already-working resolution is left exactly as-is.
+// Every ResolvedSubscriptionId, and the SubscriptionId side of
+// SubscriptionEnvironmentMap it is joined against, is tolower()-normalized at
+// the join so GUID casing differences can never cause a missed match.
 
 var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:string, Environment:string) [${subscriptionEnvironmentMapKqlBody}];\n'
 
@@ -80,10 +93,14 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // record per job, exactly as documented by Microsoft's own Backup Reports
 // sample queries.
 //
-// Environment is derived from SubscriptionId only (see subEnvMapKql above),
-// never from a resource/VM/vault name. This is a LEFT OUTER join, deliberately:
-// a job whose SubscriptionId is not present in subscriptionEnvironmentMappings
-// is NEVER silently discarded here — it is retained with Environment coalesced
+// Environment is derived from ResolvedSubscriptionId (see subEnvMapKql above
+// for the exact AddonAzureBackupJobs coalesce chain: _SubscriptionId first,
+// proven 100% populated live, never the table's own SubscriptionId column,
+// which is proven 0% populated), never from a resource/VM/vault name, and
+// tolower()-normalized on both sides of the join so GUID casing can never
+// cause a missed match. This is a LEFT OUTER join, deliberately: a job whose
+// ResolvedSubscriptionId is not present in subscriptionEnvironmentMappings is
+// NEVER silently discarded here — it is retained with Environment coalesced
 // to the literal "Unmapped", so it stays visible under Environment = All (and
 // is itself individually selectable once the Environment parameter's own query
 // below detects it exists) rather than disappearing without a trace. A named,
@@ -93,8 +110,9 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // exact equality, and "Unmapped" is never itself added to
 // subscriptionEnvironmentMappings. (Protection Inventory and Backup Policy
 // Configuration are explicitly out of scope for this behavior and are
-// unchanged — they still use an inner join and still exclude an unmapped
-// subscription's rows, matching their existing, unmodified selection logic.)
+// unchanged — they still use an inner join on their own, unmodified
+// ResolvedSubscriptionId chain and still exclude an unmapped subscription's
+// rows, matching their existing, unmodified selection logic.)
 //
 // Backup classes (Class column) follow the exact canonical definitions supplied:
 //   VM Backup        = BackupManagementType == "IaaSVM" and JobOperation == "Backup"
@@ -125,7 +143,7 @@ var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:st
 // pair renders Unavailable, while a month WITH telemetry but a genuinely zero
 // metric (e.g. zero failures) renders as a real zero, never Unavailable.
 
-var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | join kind=leftouter (SubscriptionEnvironmentMap) on SubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
+var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment) on ResolvedSubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
 
 // ─── KQL: shared six-month window fragment ────────────────────────────────────
 // Identical structure and rationale to modules/observability/cost-management-workbook/main.bicep:
@@ -144,7 +162,8 @@ var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBack
 // jobs), still renders that real zero, because zero-vs-Unavailable is decided
 // by presence-of-telemetry, never by the metric's own value. This automatically
 // still yields Unavailable for every calendar month before telemetry existed
-// for any environment (currently September 2026), with no hard-coded date.
+// for any environment, whatever that earliest month actually is (see the
+// Telemetry Coverage grid), with no hard-coded date anywhere in this logic.
 // anyInvalidMonth is true whenever any of the six displayed months lacks
 // telemetry for the selected Environment — every Total/aggregate column below
 // renders "-" rather than silently summing only the valid months and
@@ -263,10 +282,13 @@ var kqlSqlLogContinuityGrid = '${normalizedJobsKql}let PolicyByPolicyId =\n    A
 // synthesizes a "0 compliant restore tests" or "restore requirement met/failed"
 // message — restore-test compliance is a business/compliance assertion this
 // workbook does not make. Also a left outer join, for the same reason as
-// NormalizedJobs above: a restore/recovery job from an unmapped SubscriptionId
-// is retained and labelled "Unmapped", never silently discarded.
+// NormalizedJobs above: a restore/recovery job from an unmapped
+// ResolvedSubscriptionId is retained and labelled "Unmapped", never silently
+// discarded. Uses the same AddonAzureBackupJobs ResolvedSubscriptionId chain
+// as NormalizedJobs (_SubscriptionId first — proven 100% populated on this
+// table, vs. SubscriptionId proven 0% populated), tolower()-normalized.
 
-var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = coalesce(SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId))\n| join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = SubscriptionId, Environment) on ResolvedSubscriptionId\n| extend Environment = coalesce(Environment, "Unmapped")\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
+var kqlRestoreGrid = '${subEnvMapKql}AddonAzureBackupJobs\n| where JobOperation in~ ("Restore", "Recovery")\n| extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n| join kind=leftouter (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment) on ResolvedSubscriptionId\n| extend Environment = coalesce(Environment, "Unmapped")\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| project JobStartDateTime, Environment, BackupManagementType, BackupItemFriendlyName, DatasourceFriendlyName, JobOperation, JobOperationSubType, JobStatus, JobFailureCode, RecoveryJobRPDateTime, RecoveryJobDestination, RecoveryJobRPLocation, JobUniqueId\n| order by JobStartDateTime desc'
 
 // ─── KQL: Telemetry coverage (dynamic, Section A) ─────────────────────────────
 // Global fact query (not Environment-filtered — the "known telemetry facts"
@@ -291,8 +313,15 @@ var kqlTelemetryCoverage = 'AddonAzureBackupJobs\n| summarize ["Earliest JobStar
 // the default selection via the query's own `selected` column — the same
 // documented Azure Workbook dropdown-default mechanism the Report Month
 // parameter already uses, never a static `value:` override.
+//
+// HasUnmapped resolves ResolvedSubscriptionId the same way NormalizedJobs does
+// (_SubscriptionId first, tolower()-normalized) — critically, NOT the raw
+// SubscriptionId column, which is proven 0% populated on AddonAzureBackupJobs.
+// Detecting "unmapped" against the raw (always-empty) SubscriptionId column
+// would have made every single job on this table appear unmapped regardless
+// of whether its subscription is actually configured.
 
-var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | summarize by SubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap) on SubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| project value = EnvChoice, selected = (EnvChoice == "All")'
+var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti (SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId)) on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| project value = EnvChoice, selected = (EnvChoice == "All")'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
@@ -378,7 +407,7 @@ var workbookContent = {
     {
       type: 1
       content: {
-        json: '# Backup & Restore Dashboard — {workloadName}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Environment** | {Environment} |\n| **Data source** | `AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy` (Log Analytics) — existing Azure Backup diagnostic telemetry only; no ARM, Azure Resource Graph, Cost Management, or Recovery Services API call is made by this workbook |\n| **Window** | Report Month and the five preceding calendar months (six columns) where the Execution grid applies a window; the Protection Inventory, Policy Configuration, SQL Log Continuity, and Restore/Recovery grids reflect current/observed state, not a six-month pivot |\n| **Telemetry coverage** | Earliest currently observed job telemetry starts **September 2026** (see the live query below) — calendar months before that have no collected telemetry yet |\n| **Success / failure definition** | Succeeded = `JobStatus =~ "Completed"` and `JobFailureCode =~ "Success"`. Failed = `JobStatus =~ "Failed"`. Any other status counts toward Executed but is neither Succeeded nor Failed — never silently treated as success |\n| **Current-month behaviour** | The current month shows partial, month-to-date data where available; it is always excluded from Trend, never from Executed/Succeeded/Failed totals |\n| **Unavailable vs zero** | A month before available telemetry (or, for a class, a valid month with zero executions) renders "-", never a fabricated "0%" |\n| **Restore/recovery evidence** | Absence of a restore/recovery job is reported as "no evidence in available LAW history" — never as a compliance pass/fail |\n| **Policy compliance** | Not evaluated by this workbook — pending an authoritative strategy document |\n| **Backup resources managed** | None — this workbook only reads existing diagnostic telemetry; it creates/modifies no Recovery Services Vault, backup policy, protected item, diagnostic setting, or RBAC/identity |\n\nLive telemetry coverage (computed fresh from LAW, never hard-coded) is shown in the grid immediately below.'
+        json: '# Backup & Restore Dashboard — {workloadName}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Environment** | {Environment} |\n| **Data source** | `AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy` (Log Analytics) — existing Azure Backup diagnostic telemetry only; no ARM, Azure Resource Graph, Cost Management, or Recovery Services API call is made by this workbook |\n| **Window** | Report Month and the five preceding calendar months (six columns) where the Execution grid applies a window; the Protection Inventory, Policy Configuration, SQL Log Continuity, and Restore/Recovery grids reflect current/observed state, not a six-month pivot |\n| **Telemetry coverage** | See the **Telemetry Coverage (live)** grid immediately below — it is calculated dynamically from LAW on every render, never hard-coded; calendar months before its reported earliest JobStartDateTime have no collected telemetry yet |\n| **Success / failure definition** | Succeeded = `JobStatus =~ "Completed"` and `JobFailureCode =~ "Success"`. Failed = `JobStatus =~ "Failed"`. Any other status counts toward Executed but is neither Succeeded nor Failed — never silently treated as success |\n| **Current-month behaviour** | The current month shows partial, month-to-date data where available; it is always excluded from Trend, never from Executed/Succeeded/Failed totals |\n| **Unavailable vs zero** | A month before available telemetry (or, for a class, a valid month with zero executions) renders "-", never a fabricated "0%" |\n| **Restore/recovery evidence** | Absence of a restore/recovery job is reported as "no evidence in available LAW history" — never as a compliance pass/fail |\n| **Policy compliance** | Not evaluated by this workbook — pending an authoritative strategy document |\n| **Backup resources managed** | None — this workbook only reads existing diagnostic telemetry; it creates/modifies no Recovery Services Vault, backup policy, protected item, diagnostic setting, or RBAC/identity |\n\nLive telemetry coverage (computed fresh from LAW, never hard-coded) is shown in the grid immediately below.'
       }
       name: 'text-overview'
     }
