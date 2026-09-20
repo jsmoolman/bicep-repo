@@ -99,7 +99,7 @@ Deploys a dedicated Data Collection Rule and the ChangeTracking solution against
 
 **Collection scope:** Windows only. Software, services, and inventory collection are enabled (Microsoft's default collection frequencies); files and registry collection are disabled, with no custom file paths or registry keys configured.
 
-**What this foundation does not do:** it creates no policy assignment, no DCR association, no VM extension, no managed identity, and no role assignment. Policy-driven onboarding of the preprod pilot (and any other scope) is a separate, later step performed through the Azure portal after this DCR is deployed and validated.
+**What this foundation does not do:** it creates no policy assignment, no DCR association, no VM extension, no managed identity, and no role assignment. Policy assignment, remediation, DCR association, identity, and VM onboarding are handled separately from this foundation.
 
 ## Continuous Integration
 

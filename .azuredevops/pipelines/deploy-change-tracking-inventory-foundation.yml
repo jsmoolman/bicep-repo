@@ -34,7 +34,7 @@ parameters:
       - deploy
 
   - name: serviceConnection
-    displayName: Azure DevOps service connection (Contributor on the resource group hosting the Log Analytics workspace) — no default; the real value is customer-specific configuration
+    displayName: Azure DevOps service connection with permission for the subscription deployment and target resource group — no default; the real value is customer-specific configuration
     type: string
 
   - name: parametersFile
