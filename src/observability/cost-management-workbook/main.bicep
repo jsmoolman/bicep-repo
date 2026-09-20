@@ -4,7 +4,7 @@ targetScope = 'subscription'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('Workload/project short code (e.g. "lims"). Drives parameter labelling, the deterministic workbook name, and the Project value this workbook filters CostManagementSnapshot_CL by. Must match the collector script\'s value.')
+@description('Workload/project short code (e.g. "contoso"). Drives parameter labelling, the deterministic workbook name, and the Project value this workbook filters CostManagementSnapshot_CL by. Must match the collector script\'s value.')
 @minLength(1)
 @maxLength(20)
 param workloadName string

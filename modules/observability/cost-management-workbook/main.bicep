@@ -4,7 +4,7 @@ targetScope = 'resourceGroup'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('Workload/project short code (e.g. "lims"). Used for parameter labelling, the deterministic workbook name, and as the Project value this workbook filters CostManagementSnapshot_CL by. Must match the value the collector script writes.')
+@description('Workload/project short code (e.g. "contoso"). Used for parameter labelling, the deterministic workbook name, and as the Project value this workbook filters CostManagementSnapshot_CL by. Must match the value the collector script writes.')
 @minLength(1)
 @maxLength(20)
 param workloadName string

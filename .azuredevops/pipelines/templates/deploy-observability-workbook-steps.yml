@@ -2,7 +2,7 @@
 # Shared steps template: deploy a subscription-scoped observability workbook
 # =============================================================================
 # Purpose:
-#   Extracted because two capability-specific commissioning pipelines
+#   Extracted because two capability-specific deployment pipelines
 #   (VM Availability SLA Dashboard v2, Cost Management Dashboard) need the
 #   exact same validate / what-if / deploy plumbing against a subscription-scope
 #   Bicep composition selected purely by a .bicepparam file's `using` declaration.
