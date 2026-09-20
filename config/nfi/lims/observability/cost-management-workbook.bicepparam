@@ -62,12 +62,15 @@ param managementGroupId = 'c7adbc6a-e0b3-4eb7-9403-ed7f7f48ec4b'
 
 param workspaceResourceId = '/subscriptions/cd9bed50-c972-49d0-83b0-b97bf801c804/resourcegroups/rg-lims-reports-mgmt-westeu/providers/microsoft.operationalinsights/workspaces/law-reports-mgmt-westeu'
 
+// Array order below is authoritative for the Cost per Environment grid's
+// business display order (dev, tst, acc, preprd, prd, mgt, then Total last)
+// — see modules/observability/cost-management-workbook/main.bicep's
+// EnvironmentSortOrder derivation. It has no effect on the collector's
+// SubscriptionId -> Environment resolution, which is key-based (by
+// subscriptionId) and therefore unaffected by array order. Subscription
+// IDs and environment names below are unchanged from before; only the
+// array's order has changed.
 param subscriptionEnvironmentMappings = [
-  {
-    _comment: 'AZ-NFI-lims-mgt — management / reporting subscription'
-    subscriptionId: 'cd9bed50-c972-49d0-83b0-b97bf801c804'
-    environment: 'mgt'
-  }
   {
     _comment: 'AZ-NFI-lims-dev — development subscription'
     subscriptionId: '8ebb26a1-674a-40d1-97f8-e0a237e288a6'
@@ -92,6 +95,11 @@ param subscriptionEnvironmentMappings = [
     _comment: 'AZ-NFI-lims-prd — production subscription'
     subscriptionId: '786de6c9-1dd2-48d4-8436-1a6565a61799'
     environment: 'prd'
+  }
+  {
+    _comment: 'AZ-NFI-lims-mgt — management / reporting subscription'
+    subscriptionId: 'cd9bed50-c972-49d0-83b0-b97bf801c804'
+    environment: 'mgt'
   }
 ]
 

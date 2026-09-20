@@ -40,6 +40,17 @@ var configuredEnvironments = union([], allEnvironmentValues)
 var environmentDropdownValues = concat(['All'], configuredEnvironments)
 var configuredEnvironmentsKqlBody = join(map(configuredEnvironments, e => '"${e}"'), ', ')
 
+// Business display order for the Cost per Environment grid's rows: the exact
+// order of subscriptionEnvironmentMappings (as de-duplicated into
+// configuredEnvironments above), never an alphabetical sort and never a
+// literal environment-name list hard-coded here. Each pair is
+// "<environment>", <its zero-based position> — fed into a small
+// Environment -> SortOrder lookup datatable inside kqlEnvironmentGrid below.
+// Changing the LIMS parameter file's array order is the only way to change
+// the rendered row order; this module has no opinion on what that order is.
+var environmentSortOrderPairs = [for (e, i) in configuredEnvironments: '"${e}", ${i}']
+var environmentSortOrderKqlBody = join(environmentSortOrderPairs, ', ')
+
 // ─── Explicit LAW query time context ──────────────────────────────────────────
 // CostManagementSnapshot_CL is provisioned with retentionInDays = 730 (see
 // modules/observability/cost-management-data-foundation/main.bicep). Both grid
@@ -128,11 +139,22 @@ var baseSnapshotKql = 'let ConfiguredEnvironments = datatable(Environment:string
 // with a numeric suffix even when the key name is identical on both sides
 // (e.g. "Environment" + "Environment" -> "Environment", "Environment1"), so
 // `envPivot | join kind=inner totals on Environment` always produces an
-// "Environment1" column in addition to the real "Environment" column. It is
-// explicitly projected away below so the only environment-identity column in
-// the final grid output is "Environment".
+// "Environment1" column, and the subsequent join against EnvironmentSortOrder
+// (also keyed on "Environment") produces "Environment2" next, since
+// "Environment1" is already taken by then. Both are explicitly projected
+// away below so the only environment-identity column in the final grid
+// output is "Environment".
+//
+// Row display order (business requirement): rows are ordered by
+// EnvironmentSortOrder — a small Environment -> SortOrder lookup built from
+// configuredEnvironments' own array order (ultimately the LIMS parameter
+// file's subscriptionEnvironmentMappings array order) — never alphabetically
+// and never from a literal environment list hard-coded in this module. The
+// "Total" row is always forced last regardless of its (unused) SortOrder
+// value via the same iff(Environment == "Total", 1, 0) primary sort key the
+// previous alphabetical ordering already used.
 
-var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let selectedEnvList = ConfiguredEnvironments | where "{Environment}" == "All" or Environment == "{Environment}";\nlet envMonthGrid = selectedEnvList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project Environment, MonthKey, IsValidMonth;\nlet envMonthActual =\n    envMonthGrid\n    | join kind=leftouter (base | summarize ActualCost = sum(Cost) by Environment, MonthKey) on Environment, MonthKey\n    | project Environment, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet totals =\n    envMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by Environment\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project Environment, Total;\nlet envPivotSrc = envMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project Environment, MonthKey, Display;\nlet envPivot = envPivotSrc | evaluate pivot(MonthKey, take_any(Display), Environment);\nlet grandRowSrc =\n    envMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend Environment = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal));\nlet envRows =\n    envPivot\n    | join kind=inner totals on Environment\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | project-away Total, Environment1;\nunion envRows, grandRow\n| order by iff(Environment == "Total", 1, 0) asc, Environment asc'
+var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let EnvironmentSortOrder = datatable(Environment:string, SortOrder:int) [${environmentSortOrderKqlBody}];\nlet selectedEnvList = ConfiguredEnvironments | where "{Environment}" == "All" or Environment == "{Environment}";\nlet envMonthGrid = selectedEnvList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project Environment, MonthKey, IsValidMonth;\nlet envMonthActual =\n    envMonthGrid\n    | join kind=leftouter (base | summarize ActualCost = sum(Cost) by Environment, MonthKey) on Environment, MonthKey\n    | project Environment, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet totals =\n    envMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by Environment\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project Environment, Total;\nlet envPivotSrc = envMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project Environment, MonthKey, Display;\nlet envPivot = envPivotSrc | evaluate pivot(MonthKey, take_any(Display), Environment);\nlet grandRowSrc =\n    envMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend Environment = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal)), SortOrder = 999999;\nlet envRows =\n    envPivot\n    | join kind=inner totals on Environment\n    | join kind=inner EnvironmentSortOrder on Environment\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | project-away Total, Environment1, Environment2;\nunion envRows, grandRow\n| order by iff(Environment == "Total", 1, 0) asc, SortOrder asc'
 
 // ─── KQL: Service pivot grid (with Trend) ─────────────────────────────────────
 // Rows: ServiceName values observed in the (environment-filtered) latest-run
@@ -153,6 +175,17 @@ var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let selectedEnvList
 // (the existing six-month window already always includes the month
 // immediately before the selected Report Month), so no separate/second month
 // window is introduced.
+//
+// Cent-normalisation before comparison (business requirement): the six
+// displayed monthly cells always show FormatMoney's 2-decimal-rounded value,
+// so Trend must compare those same 2-decimal values, not the full-precision
+// aggregated SelectedCost/PreviousCost — otherwise a service whose displayed
+// cells are visually identical (e.g. € 0,12 -> € 0,12) could still show a
+// non-zero percentage change driven purely by sub-cent noise invisible to the
+// viewer. Rounding happens strictly AFTER aggregating each month's raw
+// CostManagementSnapshot_CL rows (SelectedCost/PreviousCost below), never on
+// individual rows beforehand — SelectedCostForTrend/PreviousCostForTrend are
+// the only inputs FormatTrend() ever receives.
 //
 // Trend is available (a real ↑/↓/→ value) only when ALL of:
 //   1. the selected Report Month is not the current, still-incomplete
@@ -189,7 +222,7 @@ var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let selectedEnvList
 // projected away below so the only service-identity column in the final grid
 // output is "ServiceName" (displayed as "Service" via gridSettings below).
 
-var kqlServiceGrid = '${baseSnapshotKql}${formatMoneyKql}let filtered = base | where "{Environment}" == "All" or Environment == "{Environment}";\nlet serviceList = filtered | where MonthKey in (monthList | project MonthKey) | summarize by ServiceName;\nlet serviceMonthGrid = serviceList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project ServiceName, MonthKey, IsValidMonth;\nlet serviceMonthActual =\n    serviceMonthGrid\n    | join kind=leftouter (filtered | summarize ActualCost = sum(Cost) by ServiceName, MonthKey) on ServiceName, MonthKey\n    | project ServiceName, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet selectedMonthKey = "{ReportMonth}";\nlet previousMonthKey = toscalar(monthList | where MonthOffset == -1 | project MonthKey);\nlet selectedMonthValid = toscalar(monthList | where MonthOffset == 0 | project IsValidMonth);\nlet previousMonthValid = toscalar(monthList | where MonthOffset == -1 | project IsValidMonth);\nlet trendAvailable = not(isCurrentMonth) and selectedMonthValid and previousMonthValid;\nlet FormatTrendPct = (v:double) {\n    let r = round(v, 2);\n    let s = tostring(r);\n    let dotIdx = indexof(s, ".");\n    let wholePart = iff(dotIdx == -1, s, substring(s, 0, dotIdx));\n    let fracRaw = iff(dotIdx == -1, "", substring(s, dotIdx + 1));\n    let fracPadded = case(strlen(fracRaw) == 0, "00", strlen(fracRaw) == 1, strcat(fracRaw, "0"), substring(fracRaw, 0, 2));\n    strcat(wholePart, ".", fracPadded)\n};\nlet FormatTrend = (SelectedCost:double, PreviousCost:double) {\n    case(\n        PreviousCost == 0.0 and SelectedCost == 0.0, "→ 0.00%",\n        PreviousCost == 0.0, strcat(iff(SelectedCost > 0.0, "↑", "↓"), " New"),\n        SelectedCost == PreviousCost, "→ 0.00%",\n        SelectedCost > PreviousCost, strcat("↑ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%"),\n        strcat("↓ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%")\n    )\n};\nlet trendBase =\n    serviceMonthActual\n    | where MonthKey == selectedMonthKey or MonthKey == previousMonthKey\n    | summarize SelectedCost = sumif(coalesce(RawCost, 0.0), MonthKey == selectedMonthKey), PreviousCost = sumif(coalesce(RawCost, 0.0), MonthKey == previousMonthKey) by ServiceName\n    | extend Trend = iff(trendAvailable, FormatTrend(SelectedCost, PreviousCost), "-")\n    | project ServiceName, Trend;\nlet totals =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by ServiceName\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project ServiceName, Total;\nlet servicePivotSrc = serviceMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project ServiceName, MonthKey, Display;\nlet servicePivot = servicePivotSrc | evaluate pivot(MonthKey, take_any(Display), ServiceName);\nlet grandRowSrc =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend ServiceName = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal)), Trend = "";\nlet serviceRows =\n    servicePivot\n    | join kind=leftouter totals on ServiceName\n    | join kind=leftouter trendBase on ServiceName\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | extend Trend = coalesce(Trend, "-")\n    | project-away Total, ServiceName1, ServiceName2;\nunion serviceRows, grandRow\n| order by iff(ServiceName == "Total", 1, 0) asc, ServiceName asc'
+var kqlServiceGrid = '${baseSnapshotKql}${formatMoneyKql}let filtered = base | where "{Environment}" == "All" or Environment == "{Environment}";\nlet serviceList = filtered | where MonthKey in (monthList | project MonthKey) | summarize by ServiceName;\nlet serviceMonthGrid = serviceList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project ServiceName, MonthKey, IsValidMonth;\nlet serviceMonthActual =\n    serviceMonthGrid\n    | join kind=leftouter (filtered | summarize ActualCost = sum(Cost) by ServiceName, MonthKey) on ServiceName, MonthKey\n    | project ServiceName, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet selectedMonthKey = "{ReportMonth}";\nlet previousMonthKey = toscalar(monthList | where MonthOffset == -1 | project MonthKey);\nlet selectedMonthValid = toscalar(monthList | where MonthOffset == 0 | project IsValidMonth);\nlet previousMonthValid = toscalar(monthList | where MonthOffset == -1 | project IsValidMonth);\nlet trendAvailable = not(isCurrentMonth) and selectedMonthValid and previousMonthValid;\nlet FormatTrendPct = (v:double) {\n    let r = round(v, 2);\n    let s = tostring(r);\n    let dotIdx = indexof(s, ".");\n    let wholePart = iff(dotIdx == -1, s, substring(s, 0, dotIdx));\n    let fracRaw = iff(dotIdx == -1, "", substring(s, dotIdx + 1));\n    let fracPadded = case(strlen(fracRaw) == 0, "00", strlen(fracRaw) == 1, strcat(fracRaw, "0"), substring(fracRaw, 0, 2));\n    strcat(wholePart, ".", fracPadded)\n};\nlet FormatTrend = (SelectedCost:double, PreviousCost:double) {\n    case(\n        PreviousCost == 0.0 and SelectedCost == 0.0, "→ 0.00%",\n        PreviousCost == 0.0, strcat(iff(SelectedCost > 0.0, "↑", "↓"), " New"),\n        SelectedCost == PreviousCost, "→ 0.00%",\n        SelectedCost > PreviousCost, strcat("↑ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%"),\n        strcat("↓ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%")\n    )\n};\nlet trendBase =\n    serviceMonthActual\n    | where MonthKey == selectedMonthKey or MonthKey == previousMonthKey\n    | summarize SelectedCost = sumif(coalesce(RawCost, 0.0), MonthKey == selectedMonthKey), PreviousCost = sumif(coalesce(RawCost, 0.0), MonthKey == previousMonthKey) by ServiceName\n    | extend SelectedCostForTrend = round(SelectedCost, 2), PreviousCostForTrend = round(PreviousCost, 2)\n    | extend Trend = iff(trendAvailable, FormatTrend(SelectedCostForTrend, PreviousCostForTrend), "-")\n    | project ServiceName, Trend;\nlet totals =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by ServiceName\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project ServiceName, Total;\nlet servicePivotSrc = serviceMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project ServiceName, MonthKey, Display;\nlet servicePivot = servicePivotSrc | evaluate pivot(MonthKey, take_any(Display), ServiceName);\nlet grandRowSrc =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend ServiceName = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal)), Trend = "";\nlet serviceRows =\n    servicePivot\n    | join kind=leftouter totals on ServiceName\n    | join kind=leftouter trendBase on ServiceName\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | extend Trend = coalesce(Trend, "-")\n    | project-away Total, ServiceName1, ServiceName2;\nunion serviceRows, grandRow\n| order by iff(ServiceName == "Total", 1, 0) asc, ServiceName asc'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
@@ -307,7 +340,11 @@ var workbookContent = {
       content: {
         version: 'KqlItem/1.0'
         query: kqlServiceGrid
-        size: 0
+        // Medium (1), not Small (0): the live grid has ~11 service rows plus
+        // Total, which needs more vertical room than Small provides to
+        // render every row without an internal scrollbar, so the Customer
+        // Engagement Officer can screenshot the full grid in one shot.
+        size: 1
         title: 'Cost per Service'
         noDataMessage: 'No cost data returned for the selected Report Month and Environment.'
         showExportToExcel: true
