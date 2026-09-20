@@ -4,17 +4,9 @@
 
 This repository is a small, maintainable foundation for NFI Azure operational automation, observability, reporting, and approved maintenance-as-code — primarily supporting LIMS. See [`docs/scope.md`](scope.md) for the exact capability boundaries.
 
-## Why this replaced the previous design
+## Scope boundary
 
-An earlier version of this repository was designed as a full Azure Landing Zone (ALZ) tenant-provisioning framework: management group hierarchy, subscription vending, platform connectivity/identity subscriptions, tenant-wide policy and RBAC, and a layered platform → landing-zone → workload deployment model with approval-gated pipelines per layer.
-
-That design was replaced because:
-
-- The Azure DevOps service connection has no Entra ID permissions, so identity/RBAC-owning deployments could never actually run.
-- Tenant-wide infrastructure (management groups, subscription vending, hub networking) is outside this repository's authority and belongs to a separate, explicitly-approved decision if it is ever needed.
-- The layered ALZ model and its approval-gate machinery added significant complexity for a repository whose real job is LIMS operational automation and observability, not tenant provisioning.
-
-The old platform/landing-zone/subscription-vending/tenant-RBAC code and pipelines have been removed rather than kept for backward compatibility. They are not active capabilities of this repository.
+This repository does not manage management groups, subscription vending, tenant-wide policy, tenant-wide RBAC, or general landing-zone infrastructure. The Azure DevOps service connection has no Entra ID permissions, so identity/RBAC-owning deployments cannot run. See [`docs/scope.md`](scope.md) for the full boundary.
 
 ## Design principles
 
@@ -35,16 +27,23 @@ The old platform/landing-zone/subscription-vending/tenant-RBAC code and pipeline
 
 ## Current state
 
-Five real operational capabilities now exist, following the same reusable-module + configuration pattern (one is a script, not a Bicep module, but follows the same "one reusable implementation, configuration drives differences" discipline):
+Five real operational capabilities exist, following the same reusable-module + configuration pattern (one is a script, not a Bicep module, but follows the same "one reusable implementation, configuration drives differences" discipline):
 
-- The LIMS **VM Availability SLA Dashboard v2**, migrated losslessly from a prior, customer-approved implementation. It consists of a reusable module (`modules/observability/vm-availability-sla-dashboard-v2/`), a reusable subscription-scoped composition (`src/observability/vm-availability-sla-dashboard-v2/`), LIMS-specific configuration (`config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`), and a commissioning-safe deployment pipeline that does not trigger automatically and must be run manually.
-- A **Cost Management Dashboard** workbook, following the identical pattern (`modules/observability/cost-management-workbook/`, `src/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`), that reads exclusively from `CostManagementSnapshot_CL` (below) against the existing central Log Analytics workspace — it no longer calls the Azure Cost Management API itself; an earlier direct-Cost-API implementation was superseded by this LAW-backed refactor (preserved in git history). The workbook itself has not yet been live-validated/deployed from this repository.
-- A **Cost Management LAW Ingestion Foundation** — the persisted-reporting-data destination (a custom Log Analytics table, `CostManagementSnapshot_CL`, plus a Direct-ingestion Data Collection Rule) that the collector below writes normalized monthly cost snapshots into and the dashboard above reads from, again against the same existing central Log Analytics workspace (`modules/observability/cost-management-data-foundation/`, `src/observability/cost-management-data-foundation/`, `config/nfi/lims/observability/cost-management-data-foundation.bicepparam`). Deployed and proven live: ingestion, the required RBAC grant, and a March–August 2026 historical backfill have all succeeded.
-- A **Cost Management Snapshot Collector** (`scripts/observability/Invoke-CostManagementSnapshotCollector.ps1`) — the real collector: one management-group Cost Management query per run, normalized into the foundation's 9-column shape, with Environment mapped from the same repository configuration the workbook and foundation already use, written via one Logs Ingestion API POST. Proven end-to-end live, including a six-month historical backfill. Run manually via `.azuredevops/pipelines/collect-cost-management-snapshot.yml`; no schedule is enabled yet.
-- A **Backup & Restore Dashboard** workbook, following the identical pattern (`modules/observability/backup-restore-workbook/`, `src/observability/backup-restore-workbook/`, `config/nfi/lims/observability/backup-restore-workbook.bicepparam`), that reads exclusively from three existing Azure Backup Log Analytics tables (`AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy`) already populated by existing Recovery Services Vault diagnostic settings — it creates or modifies no vault, backup policy, protected item, diagnostic setting, or RBAC/identity resource, and makes no ARM/Azure Resource Graph/Recovery Services API call. The workbook itself has not yet been live-validated/deployed from this repository.
+- The LIMS **VM Availability SLA Dashboard v2** — reusable module (`modules/observability/vm-availability-sla-dashboard-v2/`), subscription-scoped composition (`src/observability/vm-availability-sla-dashboard-v2/`), LIMS configuration (`config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam`), and a commissioning-safe deployment pipeline run manually.
+- A **Cost Management Dashboard** workbook (`modules/observability/cost-management-workbook/`, `src/observability/cost-management-workbook/`, `config/nfi/lims/observability/cost-management-workbook.bicepparam`) that reads monthly cost snapshots from `CostManagementSnapshot_CL` (below).
+- A **Cost Management LAW Ingestion Foundation** — a custom Log Analytics table (`CostManagementSnapshot_CL`) plus a Direct-ingestion Data Collection Rule, against the existing central Log Analytics workspace (`modules/observability/cost-management-data-foundation/`, `src/observability/cost-management-data-foundation/`, `config/nfi/lims/observability/cost-management-data-foundation.bicepparam`).
+- A **Cost Management Snapshot Collector** (`scripts/observability/Invoke-CostManagementSnapshotCollector.ps1`) — one management-group Cost Management query per run, normalized into the foundation's 9-column shape, Environment mapped from repository configuration, written via one Logs Ingestion API POST. Run manually via `.azuredevops/pipelines/collect-cost-management-snapshot.yml`; no schedule is enabled yet.
+- A **Backup & Restore Dashboard** workbook (`modules/observability/backup-restore-workbook/`, `src/observability/backup-restore-workbook/`, `config/nfi/lims/observability/backup-restore-workbook.bicepparam`) that reads exclusively from existing Azure Backup Log Analytics tables (`AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy`) — it creates or modifies no vault, backup policy, protected item, diagnostic setting, or RBAC/identity resource.
 
-The VM Availability, Cost Management, and Backup & Restore workbooks' deployment pipelines share their full validate/what-if/deploy steps via one small template (`.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`) — extracted because there were multiple genuine consumers, not speculatively ahead of need. The LAW Ingestion Foundation's pipeline reuses that same template only for its `what-if` action, since the template's deploy-time output handling is workbook-specific. The Snapshot Collector's pipeline does not use this template at all — it deploys nothing; it wraps the collector script in a single step.
+Data flow (Cost Management):
 
-See [`docs/operations.md`](operations.md) for full operational detail on all five, including current live-validation status.
+```text
+Cost Management API -> Snapshot Collector -> Logs Ingestion API / DCR ->
+    CostManagementSnapshot_CL -> Cost Management Dashboard workbook
+```
 
-No other operational capability (alerts, Logic Apps, or operational scripts under `operations/`) exists yet. Further capabilities continue to be added only once specifically scoped and approved, avoiding speculative framework code for capabilities that do not exist yet.
+The workbook pipelines (VM Availability, Cost Management Dashboard, Backup & Restore) share their full validate/what-if/deploy steps via one template (`.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml`). The Cost Management LAW Ingestion Foundation's pipeline reuses that same template only for its `what-if` action. The Cost Management Snapshot Collector's pipeline deploys nothing; it wraps the collector script in a single step.
+
+See [`docs/operations.md`](operations.md) for full operational detail.
+
+No other operational capability (alerts, Logic Apps, or operational scripts under `operations/`) exists yet. Further capabilities are added only once specifically scoped and approved.

@@ -1,26 +1,15 @@
 # =============================================================================
-# Collect Cost Management Snapshot — MANUAL commissioning pipeline
+# Collect Cost Management Snapshot
 # =============================================================================
-# Purpose:
-#   Runs the real Cost Management -> LAW snapshot collector
-#   (scripts/observability/Invoke-CostManagementSnapshotCollector.ps1) for one
-#   billing month: one management-group Cost Management query, normalization,
-#   Environment mapping from the checked-in repo config, and one Logs
-#   Ingestion API POST into CostManagementSnapshot_CL.
+# Runs the Cost Management -> LAW snapshot collector
+# (scripts/observability/Invoke-CostManagementSnapshotCollector.ps1) for one
+# billing month: one management-group Cost Management query, normalization,
+# Environment mapping from repo config, and one Logs Ingestion API POST into
+# CostManagementSnapshot_CL. Thin wrapper only — all logic lives in the script.
 #
-#   This pipeline is a thin wrapper only — all collector logic lives in the
-#   PowerShell script above and is not duplicated here.
-#
-# Commissioning note:
-#   trigger/pr are intentionally disabled, and there is deliberately no
-#   `schedules:` block yet. This pipeline is run manually (Run pipeline) only.
-#   Scheduling is a separate, later, tiny follow-up change made only after one
-#   real month has been collected and verified in the Log Analytics workspace.
-#   See docs/operations.md for current commissioning state.
-#
-# This pipeline performs exactly the two API calls the collector script makes
-# (one Cost Management query, one Logs Ingestion write) and nothing else: no
-# deployment command, no RBAC/Entra change, no DCR/table/DCE mutation.
+# Manual only: trigger/pr are disabled and there is no `schedules:` block.
+# Performs exactly two API calls (one Cost Management query, one Logs
+# Ingestion write); no deployment or RBAC/Entra/DCR mutation.
 # =============================================================================
 
 trigger: none
