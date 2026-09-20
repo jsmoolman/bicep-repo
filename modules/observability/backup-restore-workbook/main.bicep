@@ -355,10 +355,20 @@ var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(En
 //     visible string.
 //   - BackupTimes/DiffBackupTime render in 12-hour clock text (observed:
 //     "10:00:00 PM") — FormatTime24() converts a recognized "H:MM:SS AM/PM"
-//     shape to 24-hour "HH:MM UTC" (e.g. "22:00 UTC"); anything not matching
-//     that exact recognized shape falls back to the cleaned raw text with
-//     " UTC" appended, per "fall back to readable raw content rather than
-//     dropping the row" — it is never dropped or left brace-wrapped.
+//     time-of-day to 24-hour "HH:MM UTC" (e.g. "22:00 UTC"). Live evidence
+//     proves DiffBackupTime specifically can also carry that same time
+//     component prefixed with unrelated date-shaped text (a plain string
+//     split on " " would then misparse the leading date token as the time
+//     itself, producing the observed live defect "Differential: Mon-Thu :
+//     UTC"). FormatTime24() therefore locates the "H(H):MM:SS AM/PM" time
+//     component via a regular expression match anywhere in the input —
+//     never a fixed-position string split — so a date prefix (or any other
+//     surrounding text) can never corrupt the extracted hour/minute/AM-PM.
+//     A raw value where no such time pattern is found anywhere falls back
+//     to the cleaned raw text with " UTC" appended, per "fall back to
+//     readable raw content rather than dropping the row" — it is never
+//     dropped, left brace-wrapped, or rendered as a malformed fragment like
+//     ": UTC".
 // FormatDays()/DayAbbrev() render a single configured day using its full
 // name (e.g. "Friday", matching the Agreed Backup Strategy's own wording)
 // and a multi-day list as an abbreviated First-Last range (e.g. the proven
@@ -388,7 +398,7 @@ var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(En
 // ever throwing or silently dropping the row — consistent with "fall back
 // to readable raw content rather than dropping the row".
 
-var kqlPolicyGrid = '${subEnvMapKql}let AgreedPolicyNames = dynamic([${agreedPolicyNamesKqlBody}]);\nlet CleanText = (v:string) {\n    let noBraces = replace_string(replace_string(v, "{", ""), "}", "");\n    iff(isempty(noBraces) or tolower(noBraces) == "null", "", noBraces)\n};\nlet FormatTime24 = (raw:string) {\n    let looksLikeSimpleTime = strlen(raw) > 0 and countof(raw, ":") == 2 and not(raw contains ",") and (raw endswith "AM" or raw endswith "PM");\n    let parts = split(raw, " ");\n    let timePart = tostring(parts[0]);\n    let ampmPart = toupper(tostring(parts[1]));\n    let timeParts = split(timePart, ":");\n    let hh = toint(tostring(timeParts[0]));\n    let mm = tostring(timeParts[1]);\n    let hh24 = case(ampmPart == "PM" and hh != 12, hh + 12, ampmPart == "AM" and hh == 12, 0, hh);\n    let hhStr = iff(hh24 < 10, strcat("0", tostring(hh24)), tostring(hh24));\n    let parsed = strcat(hhStr, ":", mm, " UTC");\n    case(isempty(raw), "", looksLikeSimpleTime, parsed, strcat(raw, " UTC"))\n};\nlet DayAbbrev = (day:string) { substring(day, 0, 3) };\nlet FormatDays = (cleanedDays:string) {\n    let dayList = split(cleanedDays, ", ");\n    let dayCount = array_length(dayList);\n    case(\n        isempty(cleanedDays), "",\n        dayCount == 1, cleanedDays,\n        strcat(DayAbbrev(tostring(dayList[0])), "-", DayAbbrev(tostring(dayList[dayCount - 1])))\n    )\n};\nlet FormatRetentionPart = (raw:string, label:string, unit:string) { iff(isempty(raw), "", strcat(iff(strlen(label) > 0, strcat(label, " "), ""), raw, " ", unit)) };\nAddonAzureBackupPolicy\n| where OperationName == "Policy"\n| summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n| extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n| join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| where array_length(AgreedPolicyNames) == 0 or PolicyName in (AgreedPolicyNames)\n| extend BackupType = case(BackupManagementType == "IaaSVM" and Environment == "mgt", "Management VM", BackupManagementType == "IaaSVM", "VM Backup", "SQL Backup")\n| extend CleanFrequency = CleanText(tostring(BackupFrequency))\n| extend CleanDays = FormatDays(CleanText(tostring(BackupDaysOfTheWeek)))\n| extend CleanTime = FormatTime24(CleanText(tostring(BackupTimes)))\n| extend CleanDiffDays = FormatDays(CleanText(tostring(DiffBackupDaysofTheWeek)))\n| extend CleanDiffTime = FormatTime24(CleanText(tostring(DiffBackupTime)))\n| extend CleanLogFreq = CleanText(tostring(LogBackupFrequency))\n| extend VmSchedule = case(\n    isempty(CleanFrequency), "-",\n    CleanFrequency =~ "Weekly" and isnotempty(CleanDays), strcat("Weekly ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")),\n    strcat(CleanFrequency, iff(isnotempty(CleanTime), strcat(" ", CleanTime), ""))\n  )\n| extend SqlFullSchedule = iff(isnotempty(CleanDays) or isnotempty(CleanTime), strcat("Full: ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")), "")\n| extend SqlDiffSchedule = iff(isnotempty(CleanDiffDays) or isnotempty(CleanDiffTime), strcat("Differential: ", CleanDiffDays, iff(isnotempty(CleanDiffTime), strcat(" ", CleanDiffTime), "")), "")\n| extend SqlLogSchedule = iff(isnotempty(CleanLogFreq), strcat("Log: every ", CleanLogFreq, " minutes"), "")\n| extend _sch0 = ""\n| extend _sch1 = iff(isnotempty(SqlFullSchedule), strcat(_sch0, iff(strlen(_sch0) > 0, "; ", ""), SqlFullSchedule), _sch0)\n| extend _sch2 = iff(isnotempty(SqlDiffSchedule), strcat(_sch1, iff(strlen(_sch1) > 0, "; ", ""), SqlDiffSchedule), _sch1)\n| extend _sch3 = iff(isnotempty(SqlLogSchedule), strcat(_sch2, iff(strlen(_sch2) > 0, "; ", ""), SqlLogSchedule), _sch2)\n| extend SqlScheduleCombined = iff(strlen(_sch3) > 0, _sch3, "-")\n| extend Schedule = iff(BackupType == "SQL Backup", SqlScheduleCombined, VmSchedule)\n| extend RetDaily = FormatRetentionPart(CleanText(tostring(DailyRetentionDuration)), "Daily", "days")\n| extend RetWeekly = FormatRetentionPart(CleanText(tostring(WeeklyRetentionDuration)), "Weekly", "weeks")\n| extend RetMonthly = FormatRetentionPart(CleanText(tostring(MonthlyRetentionDuration)), "Monthly", "months")\n| extend RetYearly = FormatRetentionPart(CleanText(tostring(YearlyRetentionDuration)), "Yearly", "years")\n| extend RetDiff = FormatRetentionPart(CleanText(tostring(DiffBackupRetentionDuration)), "", "days")\n| extend RetLog = FormatRetentionPart(CleanText(tostring(LogBackupRetentionDuration)), "", "days")\n| extend _rs0 = ""\n| extend _rs1 = iff(isnotempty(RetDaily), strcat(_rs0, iff(strlen(_rs0) > 0, "; ", ""), RetDaily), _rs0)\n| extend _rs2 = iff(isnotempty(RetWeekly), strcat(_rs1, iff(strlen(_rs1) > 0, "; ", ""), RetWeekly), _rs1)\n| extend _rs3 = iff(isnotempty(RetMonthly), strcat(_rs2, iff(strlen(_rs2) > 0, "; ", ""), RetMonthly), _rs2)\n| extend _rs4 = iff(isnotempty(RetYearly), strcat(_rs3, iff(strlen(_rs3) > 0, "; ", ""), RetYearly), _rs3)\n| extend RetentionSemi = _rs4\n| extend _rd0 = ""\n| extend _rd1 = iff(isnotempty(RetDaily), strcat(_rd0, iff(strlen(_rd0) > 0, " / ", ""), RetDaily), _rd0)\n| extend _rd2 = iff(isnotempty(RetWeekly), strcat(_rd1, iff(strlen(_rd1) > 0, " / ", ""), RetWeekly), _rd1)\n| extend _rd3 = iff(isnotempty(RetMonthly), strcat(_rd2, iff(strlen(_rd2) > 0, " / ", ""), RetMonthly), _rd2)\n| extend _rd4 = iff(isnotempty(RetYearly), strcat(_rd3, iff(strlen(_rd3) > 0, " / ", ""), RetYearly), _rd3)\n| extend RetentionSlash = _rd4\n| extend SqlFullRetentionSegment = iff(isnotempty(RetentionSlash), strcat("Full: ", RetentionSlash), "")\n| extend SqlDiffRetentionSegment = iff(isnotempty(RetDiff), strcat("Differential: ", RetDiff), "")\n| extend SqlLogRetentionSegment = iff(isnotempty(RetLog), strcat("Log: ", RetLog), "")\n| extend _rc0 = ""\n| extend _rc1 = iff(isnotempty(SqlFullRetentionSegment), strcat(_rc0, iff(strlen(_rc0) > 0, "; ", ""), SqlFullRetentionSegment), _rc0)\n| extend _rc2 = iff(isnotempty(SqlDiffRetentionSegment), strcat(_rc1, iff(strlen(_rc1) > 0, "; ", ""), SqlDiffRetentionSegment), _rc1)\n| extend _rc3 = iff(isnotempty(SqlLogRetentionSegment), strcat(_rc2, iff(strlen(_rc2) > 0, "; ", ""), SqlLogRetentionSegment), _rc2)\n| extend SqlRetentionCombined = iff(strlen(_rc3) > 0, _rc3, "-")\n| extend Retention = iff(BackupType == "SQL Backup", SqlRetentionCombined, iff(strlen(RetentionSemi) > 0, RetentionSemi, "-"))\n| order by Environment asc, PolicyName asc\n| project Environment, ["Backup Type"] = BackupType, Schedule, Retention, State'
+var kqlPolicyGrid = '${subEnvMapKql}let AgreedPolicyNames = dynamic([${agreedPolicyNamesKqlBody}]);\nlet CleanText = (v:string) {\n    let noBraces = replace_string(replace_string(v, "{", ""), "}", "");\n    iff(isempty(noBraces) or tolower(noBraces) == "null", "", noBraces)\n};\nlet FormatTime24 = (raw:string) {\n    let timePattern = @"([0-9]{1,2}):([0-9]{2}):[0-9]{2}[ ]*(AM|PM)";\n    let hhRaw = extract(timePattern, 1, raw);\n    let mm = extract(timePattern, 2, raw);\n    let ampmPart = toupper(tostring(extract(timePattern, 3, raw)));\n    let hh = toint(hhRaw);\n    let hh24 = case(ampmPart == "PM" and hh != 12, hh + 12, ampmPart == "AM" and hh == 12, 0, hh);\n    let hhStr = iff(hh24 < 10, strcat("0", tostring(hh24)), tostring(hh24));\n    let parsed = strcat(hhStr, ":", mm, " UTC");\n    case(isempty(raw), "", isnotempty(hhRaw) and isnotempty(mm) and isnotempty(ampmPart), parsed, strcat(raw, " UTC"))\n};\nlet DayAbbrev = (day:string) { substring(day, 0, 3) };\nlet FormatDays = (cleanedDays:string) {\n    let dayList = split(cleanedDays, ", ");\n    let dayCount = array_length(dayList);\n    case(\n        isempty(cleanedDays), "",\n        dayCount == 1, cleanedDays,\n        strcat(DayAbbrev(tostring(dayList[0])), "-", DayAbbrev(tostring(dayList[dayCount - 1])))\n    )\n};\nlet FormatRetentionPart = (raw:string, label:string, unit:string) { iff(isempty(raw), "", strcat(iff(strlen(label) > 0, strcat(label, " "), ""), raw, " ", unit)) };\nAddonAzureBackupPolicy\n| where OperationName == "Policy"\n| summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n| extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n| join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| where array_length(AgreedPolicyNames) == 0 or PolicyName in (AgreedPolicyNames)\n| extend BackupType = case(BackupManagementType == "IaaSVM" and Environment == "mgt", "Management VM", BackupManagementType == "IaaSVM", "VM Backup", "SQL Backup")\n| extend CleanFrequency = CleanText(tostring(BackupFrequency))\n| extend CleanDays = FormatDays(CleanText(tostring(BackupDaysOfTheWeek)))\n| extend CleanTime = FormatTime24(CleanText(tostring(BackupTimes)))\n| extend CleanDiffDays = FormatDays(CleanText(tostring(DiffBackupDaysofTheWeek)))\n| extend CleanDiffTime = FormatTime24(CleanText(tostring(DiffBackupTime)))\n| extend CleanLogFreq = CleanText(tostring(LogBackupFrequency))\n| extend VmSchedule = case(\n    isempty(CleanFrequency), "-",\n    CleanFrequency =~ "Weekly" and isnotempty(CleanDays), strcat("Weekly ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")),\n    strcat(CleanFrequency, iff(isnotempty(CleanTime), strcat(" ", CleanTime), ""))\n  )\n| extend SqlFullSchedule = iff(isnotempty(CleanDays) or isnotempty(CleanTime), strcat("Full: ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")), "")\n| extend SqlDiffSchedule = iff(isnotempty(CleanDiffDays) or isnotempty(CleanDiffTime), strcat("Differential: ", CleanDiffDays, iff(isnotempty(CleanDiffTime), strcat(" ", CleanDiffTime), "")), "")\n| extend SqlLogSchedule = iff(isnotempty(CleanLogFreq), strcat("Log: every ", CleanLogFreq, " minutes"), "")\n| extend _sch0 = ""\n| extend _sch1 = iff(isnotempty(SqlFullSchedule), strcat(_sch0, iff(strlen(_sch0) > 0, "; ", ""), SqlFullSchedule), _sch0)\n| extend _sch2 = iff(isnotempty(SqlDiffSchedule), strcat(_sch1, iff(strlen(_sch1) > 0, "; ", ""), SqlDiffSchedule), _sch1)\n| extend _sch3 = iff(isnotempty(SqlLogSchedule), strcat(_sch2, iff(strlen(_sch2) > 0, "; ", ""), SqlLogSchedule), _sch2)\n| extend SqlScheduleCombined = iff(strlen(_sch3) > 0, _sch3, "-")\n| extend Schedule = iff(BackupType == "SQL Backup", SqlScheduleCombined, VmSchedule)\n| extend RetDaily = FormatRetentionPart(CleanText(tostring(DailyRetentionDuration)), "Daily", "days")\n| extend RetWeekly = FormatRetentionPart(CleanText(tostring(WeeklyRetentionDuration)), "Weekly", "weeks")\n| extend RetMonthly = FormatRetentionPart(CleanText(tostring(MonthlyRetentionDuration)), "Monthly", "months")\n| extend RetYearly = FormatRetentionPart(CleanText(tostring(YearlyRetentionDuration)), "Yearly", "years")\n| extend RetDiff = FormatRetentionPart(CleanText(tostring(DiffBackupRetentionDuration)), "", "days")\n| extend RetLog = FormatRetentionPart(CleanText(tostring(LogBackupRetentionDuration)), "", "days")\n| extend _rs0 = ""\n| extend _rs1 = iff(isnotempty(RetDaily), strcat(_rs0, iff(strlen(_rs0) > 0, "; ", ""), RetDaily), _rs0)\n| extend _rs2 = iff(isnotempty(RetWeekly), strcat(_rs1, iff(strlen(_rs1) > 0, "; ", ""), RetWeekly), _rs1)\n| extend _rs3 = iff(isnotempty(RetMonthly), strcat(_rs2, iff(strlen(_rs2) > 0, "; ", ""), RetMonthly), _rs2)\n| extend _rs4 = iff(isnotempty(RetYearly), strcat(_rs3, iff(strlen(_rs3) > 0, "; ", ""), RetYearly), _rs3)\n| extend RetentionSemi = _rs4\n| extend _rd0 = ""\n| extend _rd1 = iff(isnotempty(RetDaily), strcat(_rd0, iff(strlen(_rd0) > 0, " / ", ""), RetDaily), _rd0)\n| extend _rd2 = iff(isnotempty(RetWeekly), strcat(_rd1, iff(strlen(_rd1) > 0, " / ", ""), RetWeekly), _rd1)\n| extend _rd3 = iff(isnotempty(RetMonthly), strcat(_rd2, iff(strlen(_rd2) > 0, " / ", ""), RetMonthly), _rd2)\n| extend _rd4 = iff(isnotempty(RetYearly), strcat(_rd3, iff(strlen(_rd3) > 0, " / ", ""), RetYearly), _rd3)\n| extend RetentionSlash = _rd4\n| extend SqlFullRetentionSegment = iff(isnotempty(RetentionSlash), strcat("Full: ", RetentionSlash), "")\n| extend SqlDiffRetentionSegment = iff(isnotempty(RetDiff), strcat("Differential: ", RetDiff), "")\n| extend SqlLogRetentionSegment = iff(isnotempty(RetLog), strcat("Log: ", RetLog), "")\n| extend _rc0 = ""\n| extend _rc1 = iff(isnotempty(SqlFullRetentionSegment), strcat(_rc0, iff(strlen(_rc0) > 0, "; ", ""), SqlFullRetentionSegment), _rc0)\n| extend _rc2 = iff(isnotempty(SqlDiffRetentionSegment), strcat(_rc1, iff(strlen(_rc1) > 0, "; ", ""), SqlDiffRetentionSegment), _rc1)\n| extend _rc3 = iff(isnotempty(SqlLogRetentionSegment), strcat(_rc2, iff(strlen(_rc2) > 0, "; ", ""), SqlLogRetentionSegment), _rc2)\n| extend SqlRetentionCombined = iff(strlen(_rc3) > 0, _rc3, "-")\n| extend Retention = iff(BackupType == "SQL Backup", SqlRetentionCombined, iff(strlen(RetentionSemi) > 0, RetentionSemi, "-"))\n| order by Environment asc, PolicyName asc\n| project Environment, ["Backup Type"] = BackupType, Schedule, Retention, State'
 
 // ─── KQL: shared restore/recovery jobs fragment ───────────────────────────────
 // Searches raw AddonAzureBackupJobs directly (not through the Class/Success
@@ -611,6 +621,20 @@ var workbookContent = {
     }
 
     // ── Backup Policy Evidence ───────────────────────────────────────────────
+    // Explicit per-column widths (documented, schema-supported
+    // gridSettings.formatters[].formatOptions.customColumnWidthSetting —
+    // https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/Documentation/Visualizations/Grid.md)
+    // so Schedule/Retention — the two free-text columns that carry the
+    // longest business-readable strings — render at a usable width by
+    // default, with no manual drag/expand required. Widths sum to 100% of
+    // the grid; formatter 0 ("automatic"/text, the same default rendering
+    // every other text column in this module already receives) is used
+    // explicitly on all five so only width is affected, never the value's
+    // own presentation. The five visible columns themselves are unchanged.
+    // size stays Small (0), same as before — this item carries the most rows
+    // on the page (~11) and is explicitly allowed to remain visually larger
+    // than the shorter grids below; a fixed-cardinality row count this size
+    // still renders in full with no clipping/scrolling at the Small preset.
     {
       type: 3
       content: {
@@ -625,12 +649,27 @@ var workbookContent = {
         resourceType: 'microsoft.operationalinsights/workspaces'
         crossComponentResources: [workspaceResourceId]
         timeContext: lawQueryTimeContext
+        gridSettings: {
+          formatters: [
+            { columnMatch: 'Environment',    formatter: 0, formatOptions: { customColumnWidthSetting: '8%' } }
+            { columnMatch: 'Backup Type',    formatter: 0, formatOptions: { customColumnWidthSetting: '12%' } }
+            { columnMatch: 'Schedule',       formatter: 0, formatOptions: { customColumnWidthSetting: '35%' } }
+            { columnMatch: 'Retention',      formatter: 0, formatOptions: { customColumnWidthSetting: '38%' } }
+            { columnMatch: 'State',          formatter: 0, formatOptions: { customColumnWidthSetting: '7%' } }
+          ]
+        }
       }
       styleSettings: compactItemSpacing
       name: 'query-policy-grid'
     }
 
     // ── Hero grid: Backup Activity for the selected Report Month ────────────
+    // size (documented, schema-supported KqlItem "vertical size of the
+    // control" — https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/Documentation/Visualizations/Grid.md,
+    // enum 0=Small, 1=Medium, 2=Large, 3=Full) is explicitly Small here — this
+    // grid always renders exactly 4 rows (Executed/Succeeded/Failed/Success %)
+    // regardless of Environment/Report Month selection, so Small comfortably
+    // shows every row with no clipping or internal scrolling.
     {
       type: 3
       content: {
@@ -651,12 +690,19 @@ var workbookContent = {
     }
 
     // ── Backup Failures — exception report ────────────────────────────────────
+    // size: Medium (1), not Small — this grid's row count is real failure
+    // data (observed around ~7 rows in a typical month), unlike the other
+    // short grids on this page whose row count is a fixed, known-small
+    // taxonomy (four backup classes, six months). Medium keeps a realistic
+    // failures list fully visible without clipping/scrolling while still
+    // being far more compact than Backup Policy Evidence's own sizing
+    // (~11 rows, left unchanged — see that item's own comment).
     {
       type: 3
       content: {
         version: 'KqlItem/1.0'
         query: kqlFailuresGrid
-        size: 0
+        size: 1
         title: 'Backup Failures — {ReportMonth}'
         noDataMessage: 'No failed backup jobs for the selected month and environment.'
         showExportToExcel: true
@@ -671,6 +717,8 @@ var workbookContent = {
     }
 
     // ── Six-Month Backup Performance ──────────────────────────────────────────
+    // size: Small (0) — always exactly 6 rows (one per calendar month in the
+    // fixed six-month window), never more.
     {
       type: 3
       content: {
@@ -696,6 +744,8 @@ var workbookContent = {
     }
 
     // ── Restore Activity — selected-month summary ─────────────────────────────
+    // size: Small (0) — a Metric x Category pivot summary, always a handful
+    // of rows (Executed/Succeeded/Failed) at most.
     {
       type: 3
       content: {
@@ -749,6 +799,8 @@ var workbookContent = {
     }
 
     // ── Protected Estate — moved to immediately before the footer ───────────
+    // size: Small (0) — one row per configured environment (six for LIMS),
+    // a small, fixed-cardinality row count.
     {
       type: 3
       content: {
