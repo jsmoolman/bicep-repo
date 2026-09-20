@@ -142,20 +142,44 @@ var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let selectedEnvList
 // displayed window (e.g. a month before/after the six shown) must not appear
 // as a row of six zero cells; it simply isn't part of this Report Month's
 // domain (+ final "Total" row). Columns: 6 calendar months (YYYY-MM) + Total +
-// Trend. Trend formula, thresholds, and noise floor are unchanged from the
-// direct-Cost-API implementation:
-//   - ordinary least-squares linear regression over the required trend months
-//     only (current partial month excluded when Report Month is the current
-//     month; all six months included when Report Month is historical);
-//   - an absolute €10/month noise floor is applied before the percentage bands;
-//   - Downward <= -3%, Stable -3%..+3%, Mild Upward +3%..+10%, Strong Upward >= +10%.
-// New in this refactor: if ANY month required for the trend calculation lacks a
-// valid snapshot, the trend is NOT computed by treating that month as zero —
-// it fails closed to "Unavailable", which (like any string other than the three
-// explicitly coloured values) renders with the grid formatter's neutral
-// Default (no colour) case below, never a misleading colour. A missing
-// current-month snapshot never triggers this, because the current month is
-// already excluded from the required trend months whenever it is selected.
+// Trend.
+//
+// Trend semantics (business requirement, NOT the six-month regression this
+// module previously used — see git history for the removed OLS
+// implementation): a simple percentage month-over-month comparison of the
+// selected Report Month against the immediately preceding calendar month
+// only. The four earlier displayed months are never part of the Trend
+// calculation. previousMonthKey is always MonthOffset -1 within monthList
+// (the existing six-month window already always includes the month
+// immediately before the selected Report Month), so no separate/second month
+// window is introduced.
+//
+// Trend is available (a real ↑/↓/→ value) only when ALL of:
+//   1. the selected Report Month is not the current, still-incomplete
+//      calendar month (isCurrentMonth, already computed by baseSnapshotKql);
+//   2. a valid snapshot exists for the selected month (selectedMonthValid);
+//   3. a valid snapshot exists for the immediately preceding month
+//      (previousMonthValid).
+// Otherwise Trend is "-" — a missing snapshot is never silently treated as a
+// zero cost for this comparison (unlike a service's OWN missing row within an
+// otherwise-valid month, which correctly remains a genuine zero — see
+// serviceMonthActual's RawCost derivation above, reused unchanged here).
+//
+// FormatTrend()'s cases, in the order Kusto's case() evaluates them:
+//   - Previous == 0 and Selected == 0            -> "→ 0.00%"
+//   - Previous == 0 (Selected != 0)               -> "↑ New" / "↓ New"
+//     (previous month had no cost for this service; there is no meaningful
+//     percentage base — "New" communicates that rather than an infinite/
+//     divide-by-zero percentage)
+//   - Selected == Previous (both != 0)            -> "→ 0.00%"
+//   - Selected > Previous                          -> "↑ xx.xx%"
+//   - Selected < Previous (including Selected == 0 with Previous > 0, which
+//     is simply the 100% case of this same branch — no separate special case
+//     is needed) -> "↓ xx.xx%"
+// FormatTrendPct() always renders exactly two decimal places (matching
+// FormatMoney's own cents-padding pattern above), never "20%"/"15.7%"/
+// "15.6900%". The percentage itself is always the positive magnitude of the
+// change — direction is communicated by the arrow alone, never a "-" sign.
 //
 // Two chained joins on "ServiceName" below (servicePivot x totals, then that
 // result x trendBase) each independently duplicate the join-key column with a
@@ -165,7 +189,7 @@ var kqlEnvironmentGrid = '${baseSnapshotKql}${formatMoneyKql}let selectedEnvList
 // projected away below so the only service-identity column in the final grid
 // output is "ServiceName" (displayed as "Service" via gridSettings below).
 
-var kqlServiceGrid = '${baseSnapshotKql}${formatMoneyKql}let filtered = base | where "{Environment}" == "All" or Environment == "{Environment}";\nlet serviceList = filtered | where MonthKey in (monthList | project MonthKey) | summarize by ServiceName;\nlet serviceMonthGrid = serviceList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project ServiceName, MonthKey, IsValidMonth;\nlet serviceMonthActual =\n    serviceMonthGrid\n    | join kind=leftouter (filtered | summarize ActualCost = sum(Cost) by ServiceName, MonthKey) on ServiceName, MonthKey\n    | project ServiceName, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet requiredTrendMonths = monthList | where MonthOffset <= iff(isCurrentMonth, -1, 0);\nlet trendMonthsValid = toscalar(requiredTrendMonths | summarize countif(not(IsValidMonth))) == 0;\nlet trendMonthList = requiredTrendMonths | order by MonthOffset asc | serialize | extend x = row_number() - 1;\nlet trendBase =\n    serviceMonthActual\n    | join kind=inner trendMonthList on MonthKey\n    | where trendMonthsValid\n    | summarize N = count(), SumX = sum(x*1.0), SumY = sum(coalesce(RawCost,0.0)), SumXY = sum(x*1.0*coalesce(RawCost,0.0)), SumX2 = sum(x*1.0*x) by ServiceName\n    | extend Denom = N*SumX2 - SumX*SumX\n    | extend Slope = iff(Denom == 0, 0.0, (N*SumXY - SumX*SumY) / Denom)\n    | extend MeanCost = iff(N == 0, 0.0, SumY / N)\n    | extend NormalizedPct = iff(MeanCost == 0, 0.0, (Slope / MeanCost) * 100)\n    | extend Trend = case(\n        abs(Slope) < 10, "Stable",\n        NormalizedPct <= -3, "Downward",\n        NormalizedPct <= 3, "Stable",\n        NormalizedPct < 10, "Mild Upward",\n        "Strong Upward"\n      )\n    | project ServiceName, Trend;\nlet totals =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by ServiceName\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project ServiceName, Total;\nlet servicePivotSrc = serviceMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project ServiceName, MonthKey, Display;\nlet servicePivot = servicePivotSrc | evaluate pivot(MonthKey, take_any(Display), ServiceName);\nlet grandRowSrc =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend ServiceName = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal)), Trend = "";\nlet serviceRows =\n    servicePivot\n    | join kind=leftouter totals on ServiceName\n    | join kind=leftouter trendBase on ServiceName\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | extend Trend = coalesce(Trend, iff(trendMonthsValid, "Stable", "Unavailable"))\n    | project-away Total, ServiceName1, ServiceName2;\nunion serviceRows, grandRow\n| order by iff(ServiceName == "Total", 1, 0) asc, ServiceName asc'
+var kqlServiceGrid = '${baseSnapshotKql}${formatMoneyKql}let filtered = base | where "{Environment}" == "All" or Environment == "{Environment}";\nlet serviceList = filtered | where MonthKey in (monthList | project MonthKey) | summarize by ServiceName;\nlet serviceMonthGrid = serviceList | extend _j=1 | join kind=inner (monthList | extend _j=1) on _j | project ServiceName, MonthKey, IsValidMonth;\nlet serviceMonthActual =\n    serviceMonthGrid\n    | join kind=leftouter (filtered | summarize ActualCost = sum(Cost) by ServiceName, MonthKey) on ServiceName, MonthKey\n    | project ServiceName, MonthKey, IsValidMonth, RawCost = iff(IsValidMonth, coalesce(ActualCost, 0.0), real(null));\nlet selectedMonthKey = "{ReportMonth}";\nlet previousMonthKey = toscalar(monthList | where MonthOffset == -1 | project MonthKey);\nlet selectedMonthValid = toscalar(monthList | where MonthOffset == 0 | project IsValidMonth);\nlet previousMonthValid = toscalar(monthList | where MonthOffset == -1 | project IsValidMonth);\nlet trendAvailable = not(isCurrentMonth) and selectedMonthValid and previousMonthValid;\nlet FormatTrendPct = (v:double) {\n    let r = round(v, 2);\n    let s = tostring(r);\n    let dotIdx = indexof(s, ".");\n    let wholePart = iff(dotIdx == -1, s, substring(s, 0, dotIdx));\n    let fracRaw = iff(dotIdx == -1, "", substring(s, dotIdx + 1));\n    let fracPadded = case(strlen(fracRaw) == 0, "00", strlen(fracRaw) == 1, strcat(fracRaw, "0"), substring(fracRaw, 0, 2));\n    strcat(wholePart, ".", fracPadded)\n};\nlet FormatTrend = (SelectedCost:double, PreviousCost:double) {\n    case(\n        PreviousCost == 0.0 and SelectedCost == 0.0, "→ 0.00%",\n        PreviousCost == 0.0, strcat(iff(SelectedCost > 0.0, "↑", "↓"), " New"),\n        SelectedCost == PreviousCost, "→ 0.00%",\n        SelectedCost > PreviousCost, strcat("↑ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%"),\n        strcat("↓ ", FormatTrendPct(abs(SelectedCost - PreviousCost) / abs(PreviousCost) * 100.0), "%")\n    )\n};\nlet trendBase =\n    serviceMonthActual\n    | where MonthKey == selectedMonthKey or MonthKey == previousMonthKey\n    | summarize SelectedCost = sumif(coalesce(RawCost, 0.0), MonthKey == selectedMonthKey), PreviousCost = sumif(coalesce(RawCost, 0.0), MonthKey == previousMonthKey) by ServiceName\n    | extend Trend = iff(trendAvailable, FormatTrend(SelectedCost, PreviousCost), "-")\n    | project ServiceName, Trend;\nlet totals =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by ServiceName\n    | extend Total = iff(anyInvalidMonth, real(null), SumCost)\n    | project ServiceName, Total;\nlet servicePivotSrc = serviceMonthActual | extend Display = iff(IsValidMonth, FormatMoney(RawCost), "-") | project ServiceName, MonthKey, Display;\nlet servicePivot = servicePivotSrc | evaluate pivot(MonthKey, take_any(Display), ServiceName);\nlet grandRowSrc =\n    serviceMonthActual\n    | summarize SumCost = sum(coalesce(RawCost, 0.0)) by MonthKey, IsValidMonth\n    | extend Display = iff(IsValidMonth, FormatMoney(SumCost), "-")\n    | project MonthKey, Display;\nlet grandPivot = grandRowSrc | evaluate pivot(MonthKey, take_any(Display));\nlet grandTotalVal = iff(anyInvalidMonth, real(null), toscalar(totals | summarize sum(Total)));\nlet grandRow = grandPivot | extend ServiceName = "Total", TotalDisplay = iff(isnull(grandTotalVal), "-", FormatMoney(grandTotalVal)), Trend = "";\nlet serviceRows =\n    servicePivot\n    | join kind=leftouter totals on ServiceName\n    | join kind=leftouter trendBase on ServiceName\n    | extend TotalDisplay = iff(isnull(Total), "-", FormatMoney(Total))\n    | extend Trend = coalesce(Trend, "-")\n    | project-away Total, ServiceName1, ServiceName2;\nunion serviceRows, grandRow\n| order by iff(ServiceName == "Total", 1, 0) asc, ServiceName asc'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
@@ -247,7 +271,7 @@ var workbookContent = {
     {
       type: 1
       content: {
-        json: '# Cost Management Dashboard — {workloadName}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Data source** | `CostManagementSnapshot_CL` (Log Analytics) — the newest complete collector snapshot for each month, not a live Cost Management API call |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Ordinary least-squares linear regression over completed months only — the current month-to-date is always excluded from trend |\n| **Trend bands** | ≤ -3% Downward · -3%..+3% Stable · +3%..+10% Mild Upward · ≥ +10% Strong Upward — absolute changes under €10/month are always Stable regardless of percentage |\n| **Zero vs. unavailable** | € 0,00 = a valid collected snapshot exists for that month with no cost for this row. "-" = no valid collector snapshot exists for that month yet |\n| **Trend unavailable** | Shown (no colour) instead of a coloured trend whenever any month required for the trend calculation has no valid snapshot |\n\nCost data is collected by a separate, manually-run process (see docs/operations.md) that writes normalized monthly snapshots into the existing central Log Analytics workspace. This workbook only reads the newest complete snapshot per month for **{workloadName}** — it never calls the Azure Cost Management API directly.'
+        json: '# Cost Management Dashboard — {workloadName}\n\n| | |\n|---|---|\n| **Report month** | {ReportMonth} |\n| **Data source** | `CostManagementSnapshot_CL` (Log Analytics) — the newest complete collector snapshot for each month, not a live Cost Management API call |\n| **Window** | Report Month and the five preceding calendar months (six columns) |\n| **Trend basis** | Percentage change between the selected completed month and the immediately preceding calendar month. Current month-to-date has no trend |\n| **Zero vs. unavailable** | € 0,00 = a valid collected snapshot exists for that month with no cost for this row. "-" = no valid collector snapshot exists for that month yet |\n| **Trend unavailable** | Trend is "-" when the selected month is the current incomplete month or when either the selected month or immediately preceding month has no valid snapshot |\n| **Trend symbols** | ↑ increase · ↓ decrease · → unchanged · ↑ New = previous month was €0 |\n\nCost data is collected by a separate, manually-run process (see docs/operations.md) that writes normalized monthly snapshots into the existing central Log Analytics workspace. This workbook only reads the newest complete snapshot per month for **{workloadName}** — it never calls the Azure Cost Management API directly.'
       }
       name: 'text-title'
     }
@@ -292,22 +316,12 @@ var workbookContent = {
         resourceType: 'microsoft.operationalinsights/workspaces'
         crossComponentResources: [workspaceResourceId]
         timeContext: lawQueryTimeContext
+        // No formatters here: Trend is deliberately rendered as plain text
+        // (the "↑ xx.xx%" / "↓ xx.xx%" / "→ 0.00%" / "↑ New" / "-" string
+        // FormatTrend() already produces above) — no colour/threshold
+        // formatter, matching the business requirement that direction is
+        // communicated by the Unicode arrow in the text alone.
         gridSettings: {
-          formatters: [
-            {
-              columnMatch: 'Trend'
-              formatter: 18
-              formatOptions: {
-                thresholdsOptions: 'colors'
-                thresholdsGrid: [
-                  { operator: '==', thresholdValue: 'Downward',      representation: 'green',     text: '{0}{1}' }
-                  { operator: '==', thresholdValue: 'Mild Upward',   representation: 'orange',    text: '{0}{1}' }
-                  { operator: '==', thresholdValue: 'Strong Upward', representation: 'redBright', text: '{0}{1}' }
-                  { operator: 'Default',                             representation: '',          text: '{0}{1}' }
-                ]
-              }
-            }
-          ]
           labelSettings: [
             { columnId: 'ServiceName',   label: 'Service' }
             { columnId: 'TotalDisplay',  label: 'Total' }
