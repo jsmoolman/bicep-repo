@@ -42,12 +42,11 @@ parameters:
     type: string
 
   # Sent as the ClientType request header on the Cost Management API call.
-  # Default is a compatibility-required identifier from an existing customer
-  # deployment; a new deployment may override it with its own value.
+  # Deployments may override this value.
   - name: clientType
     displayName: ClientType header value for the Cost Management API request
     type: string
-    default: 'NFI-LIMS-CostCollector'
+    default: 'CostManagementSnapshotCollector'
 
 pool:
   vmImage: ubuntu-latest

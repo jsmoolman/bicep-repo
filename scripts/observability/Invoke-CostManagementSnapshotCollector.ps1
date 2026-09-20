@@ -52,10 +52,9 @@ param(
     [string]$BillingMonth = 'current',
 
     # Sent as the ClientType request header on the Cost Management API call.
-    # Default is a compatibility-required identifier from an existing customer
-    # deployment; a new deployment may pass its own value.
+    # Deployments may override this value.
     [Parameter()]
-    [string]$ClientType = 'NFI-LIMS-CostCollector',
+    [string]$ClientType = 'CostManagementSnapshotCollector',
 
     [Parameter()]
     [switch]$ImportOnly
