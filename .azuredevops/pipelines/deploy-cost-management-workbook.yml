@@ -3,11 +3,12 @@
 # =============================================================================
 # Deploys the Cost Management Dashboard Workbook composition
 # (src/observability/cost-management-workbook/main.bicep) using a
-# project-specific parameter file. Defaults to the LIMS configuration; accepts
-# a different parameter-file path for reuse by another project.
+# project-specific parameter file. Defaults to this repository's example
+# configuration; accepts a different parameter-file path and service
+# connection for reuse by another project.
 #
-# Manual only: trigger/pr are disabled. Run via "Run pipeline" with an
-# explicit what-if (default) or deploy action.
+# Manual only by design: trigger/pr are disabled. Run via "Run pipeline" with
+# an explicit what-if (default) or deploy action.
 #
 # Deployment steps are shared with other workbook pipelines via
 # templates/deploy-observability-workbook-steps.yml.
@@ -27,14 +28,13 @@ parameters:
       - deploy
 
   - name: serviceConnection
-    displayName: Azure DevOps service connection (Contributor on the target subscription; this pipeline only deploys the workbook resource — it does not query Cost Management or the Log Analytics workspace itself)
+    displayName: Azure DevOps service connection (Contributor on the target subscription; this pipeline only deploys the workbook resource — it does not query Cost Management or the Log Analytics workspace itself) — no default; the real value is customer-specific configuration
     type: string
-    default: 'sc-az-devops-trustedcloud-mgmt'
 
   - name: parametersFile
     displayName: Path to the project-specific Bicep parameter file
     type: string
-    default: 'config/nfi/lims/observability/cost-management-workbook.bicepparam'
+    default: 'config/example/observability/cost-management-workbook.bicepparam'
 
   - name: location
     displayName: Deployment location (subscription-scope deployment metadata location)

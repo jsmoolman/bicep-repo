@@ -25,17 +25,28 @@ parameters:
   - name: project
     displayName: Project name written into the Project column
     type: string
-    default: lims
+    default: example
 
   - name: costParametersFile
     displayName: Path to the Cost Management workbook parameter file (authoritative for managementGroupId / subscriptionEnvironmentMappings)
     type: string
-    default: 'config/nfi/lims/observability/cost-management-workbook.bicepparam'
+    default: 'config/example/observability/cost-management-workbook.bicepparam'
 
   - name: foundationParametersFile
     displayName: Path to the LAW foundation parameter file (authoritative for workspaceResourceId / dataCollectionRuleName / tableName)
     type: string
-    default: 'config/nfi/lims/observability/cost-management-data-foundation.bicepparam'
+    default: 'config/example/observability/cost-management-data-foundation.bicepparam'
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (read access to Cost Management at managementGroupId scope; Monitoring Metrics Publisher at the DCR scope) — no default; the real value is customer-specific configuration
+    type: string
+
+  # Sent as the ClientType request header on the Cost Management API call.
+  # Deployments may override this value.
+  - name: clientType
+    displayName: ClientType header value for the Cost Management API request
+    type: string
+    default: 'CostManagementSnapshotCollector'
 
 pool:
   vmImage: ubuntu-latest
@@ -46,7 +57,7 @@ steps:
   - task: AzureCLI@2
     displayName: 'Run Cost Management snapshot collector'
     inputs:
-      azureSubscription: 'sc-az-devops-trustedcloud-mgmt'
+      azureSubscription: ${{ parameters.serviceConnection }}
       scriptType: pscore
       scriptLocation: scriptPath
       scriptPath: 'scripts/observability/Invoke-CostManagementSnapshotCollector.ps1'
@@ -55,4 +66,4 @@ steps:
         -FoundationParametersFile "${{ parameters.foundationParametersFile }}"
         -Project "${{ parameters.project }}"
         -BillingMonth "${{ parameters.billingMonth }}"
-        -ClientType "NFI-LIMS-CostCollector"
+        -ClientType "${{ parameters.clientType }}"

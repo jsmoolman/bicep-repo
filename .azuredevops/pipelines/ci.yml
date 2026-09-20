@@ -48,7 +48,7 @@ steps:
   - bash: |
       set -euo pipefail
       shopt -s globstar nullglob
-      # Guards the customer policy documented in docs/scope.md: no Entra/Graph
+      # Guards the identity boundary documented in docs/scope.md: no Entra/Graph
       # mutation, no tenant-wide RBAC, no management-group/subscription creation.
       pattern='Microsoft\.Graph/|Microsoft\.Management/managementGroups|Microsoft\.Subscription/|Microsoft\.Authorization/roleAssignments|Microsoft\.Authorization/roleDefinitions'
       matches=$(grep -RInE "$pattern" --include='*.bicep' --include='*.bicepparam' . || true)

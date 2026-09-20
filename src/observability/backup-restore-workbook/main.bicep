@@ -4,7 +4,7 @@ targetScope = 'subscription'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('Workload/project short code (e.g. "lims"). Drives parameter labelling and the deterministic workbook name/GUID seed (passed through to the module).')
+@description('Workload/project short code (e.g. "contoso"). Drives parameter labelling and the deterministic workbook name/GUID seed (passed through to the module).')
 @minLength(1)
 @maxLength(20)
 param workloadName string
@@ -24,8 +24,7 @@ param location string = 'westeurope'
 @description('''Full ARM resource ID of the existing central Log Analytics workspace that already receives Azure Backup diagnostic telemetry (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) via existing Recovery Services Vault diagnostic settings. This workbook queries those three tables directly and exclusively for all backup/restore reporting.''')
 param workspaceResourceId string
 
-@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. Used to derive Environment for every LAW row this workbook reads — the raw backup tables carry no Environment column of their own. Uses the same shape already used by the Cost Management workbook's subscriptionEnvironmentMappings.
-Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
+@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. Used to derive Environment for every LAW row this workbook reads — the raw backup tables carry no Environment column of their own. Uses the same shape already used by the Cost Management workbook's subscriptionEnvironmentMappings. See config/example/observability/backup-restore-workbook.bicepparam for the expected shape.''')
 param subscriptionEnvironmentMappings array = []
 
 @description('''Optional allowlist of exact AddonAzureBackupPolicy PolicyName values to show in the Backup Policy Evidence grid (passed through to the module unchanged). Empty (default) applies no name filter. See modules/observability/backup-restore-workbook/main.bicep for the full rationale.''')

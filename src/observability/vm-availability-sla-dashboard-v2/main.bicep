@@ -4,7 +4,7 @@ targetScope = 'subscription'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('Workload short code (e.g. "lims"). Drives the workbook display name and title.')
+@description('Workload short code (e.g. "contoso"). Drives the workbook display name and title.')
 @minLength(1)
 @maxLength(20)
 param workloadName string
@@ -17,8 +17,7 @@ param location string = 'westeurope'
 
 @description('''Subscription-to-environment mappings embedded in the workbook KQL datatable.
 Each element: { subscriptionId: string, environment: string }.
-Known LIMS values are pre-populated in config/nfi/lims/observability/vm-availability-sla-dashboard-v2.bicepparam.
-Replace REPLACE-WITH-* placeholders before first deployment.''')
+See config/example/observability/vm-availability-sla-dashboard-v2.bicepparam for the expected shape.''')
 param subscriptionEnvironmentMappings array = []
 
 @description('Tags applied to the workbook resource. Free-form for cross-workload reuse.')

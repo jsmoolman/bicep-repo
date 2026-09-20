@@ -7,13 +7,13 @@ alwaysApply: true
 
 ## Purpose
 
-This repository is a small, maintainable foundation for **NFI Azure operational automation, observability, reporting, and approved maintenance-as-code**, primarily supporting LIMS. It is **not** a general Azure Landing Zone / tenant-provisioning framework and must not be extended to manage the NFI tenant, landing zones, identity, networking, or general workload infrastructure by default.
+This repository is a small, maintainable foundation for **Azure operational automation, observability, reporting, and approved maintenance-as-code**, for one or more internal workloads. It is **not** a general Azure Landing Zone / tenant-provisioning framework and must not be extended to manage the wider tenant, landing zones, identity, networking, or general workload infrastructure by default.
 
 See `docs/scope.md` for the full allowed / explicit-decision-required / prohibited capability boundaries before adding any new resource type.
 
-## LIMS environments
+## Supported environments
 
-The supported LIMS environments are exactly: `dev`, `tst`, `acc`, `preprd`, `prd`. Do not use a different environment list.
+The supported environments are exactly: `dev`, `tst`, `acc`, `preprd`, `prd`. Do not use a different environment list.
 
 ## Core design rule
 
@@ -30,8 +30,7 @@ The supported LIMS environments are exactly: `dev`, `tst`, `acc`, `preprd`, `prd
 | `src/automation/` | Declarative operational automation (approved Logic Apps) |
 | `modules/` | Genuinely reusable, environment-neutral Bicep modules |
 | `operations/` | Imperative operational functions (e.g. VM start/stop/restart) |
-| `config/nfi/lims/` | LIMS-specific configuration per environment (dev/tst/acc/preprd/prd) |
-| `config/nfi/shared/` | Configuration for reusable services targeting other subscriptions/management groups |
+| `config/` | Private, environment-specific configuration per environment (dev/tst/acc/preprd/prd); see `config/example/` for the shape each capability's parameter file expects |
 | `.azuredevops/` | Pipeline definitions — no portal usage |
 | `docs/` | Purpose, scope, and architecture documentation |
 

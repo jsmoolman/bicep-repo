@@ -1,10 +1,10 @@
-metadata description = 'Azure Monitor Workbook — Backup & Restore dashboard for LIMS, reading exclusively from the three existing Azure Backup Log Analytics resource-specific tables (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy). This workbook makes no ARM/Azure Resource Graph/Cost Management/Recovery Services API calls, and creates/modifies no Recovery Services Vault, backup policy, protected item, diagnostic setting, or RBAC/identity resource — it only reads already-flowing diagnostic telemetry as KQL. Content is a concise, business-facing MVP intended for screenshot-driven monthly customer reporting; the underlying data model, subscription resolution, and validity rules are unchanged from the earlier technical revision.'
+metadata description = 'Azure Monitor Workbook — Backup & Restore dashboard, reading exclusively from three existing Azure Backup Log Analytics tables (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy). Creates or modifies no Recovery Services Vault, backup policy, protected item, diagnostic setting, or RBAC/identity resource, and makes no ARM/Resource Graph/Recovery Services API call.'
 
 targetScope = 'resourceGroup'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('''Workload/project short code (e.g. "lims"). Used for parameter labelling and as one of the deterministic workbook name/GUID seed inputs (see the resource below). This workbook does not filter any LAW table by a "Project" column — the backup tables have no such column — Environment is instead derived entirely from subscriptionEnvironmentMappings below.''')
+@description('Workload/project short code. Used for parameter labelling and as a deterministic workbook name/GUID seed input; not used to filter any LAW table.')
 @minLength(1)
 @maxLength(20)
 param workloadName string
@@ -15,76 +15,53 @@ param workbookDisplayName string
 @description('Azure region for the workbook resource.')
 param location string = 'westeurope'
 
-@description('''Full ARM resource ID of the existing central Log Analytics workspace that already receives Azure Backup diagnostic telemetry (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) via existing Recovery Services Vault diagnostic settings. This workbook queries those three tables directly and exclusively — it creates no table, no Data Collection Rule, and no diagnostic setting; the diagnostic settings that populate these tables already exist and are entirely outside this workbook's authority.''')
+@description('Full ARM resource ID of the existing Log Analytics workspace that already receives Azure Backup diagnostic telemetry. This module creates no table, Data Collection Rule, or diagnostic setting.')
 param workspaceResourceId string
 
-@description('''Array of subscription-to-environment mappings. Each element: { subscriptionId: string, environment: string }. The three Azure Backup LAW tables carry no Environment column of their own — every query in this module derives Environment by matching each row''s effective subscription ID against this configuration. This resolution is standardized across all three tables (AddonAzureBackupJobs, CoreAzureBackup, AddonAzureBackupPolicy) as ResolvedSubscriptionId = tolower(coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...), extract(..._ResourceId...))), joined only to tolower(SubscriptionEnvironmentMap.SubscriptionId) — never a friendly/display name, and never dependent on GUID casing (ARM ResourceId values, and _SubscriptionId itself, may use uppercase subscription GUID text). _SubscriptionId is the primary source everywhere per proven live schema: AddonAzureBackupJobs''s own SubscriptionId column is observed 0% populated while _SubscriptionId is observed 100% populated (11,210/11,210 rows, 6 distinct values); the same 0%/populated pattern is proven for AddonAzureBackupPolicy''s PolicyAssociation rows. For the AddonAzureBackupJobs-driven job/restore grids, a resolved ID not present in this array is never silently discarded: it is retained and labelled Environment = "Unmapped" so it remains visible under Environment = All, filterable on its own once actually present; Protected Estate and Backup Policy Evidence continue to exclude an unmapped subscription''s rows via their existing, unmodified inner-join selection logic (only the subscription-resolution expression feeding that join was standardized).
-Known LIMS values are pre-populated in config/nfi/lims/observability/backup-restore-workbook.bicepparam.''')
+@description('''Array of { subscriptionId, environment } mappings. The three Azure Backup LAW tables have no Environment column of their own; every query derives Environment by matching each row against tolower(coalesce(_SubscriptionId, SubscriptionId, extract(...ResourceId...))). A resolved ID not present here is retained and labelled Unmapped for job/restore telemetry, but excluded from Protected Estate and Backup Policy Evidence.''')
 param subscriptionEnvironmentMappings array = []
 
-@description('''Optional allowlist of exact AddonAzureBackupPolicy PolicyName values to show in the Backup Policy Evidence grid. When empty (the default), no name filter is applied. This parameter exists so the module itself stays environment/workload-neutral (per repository rule: modules must not contain hardcoded environment or workload names) while still allowing a caller — e.g. the LIMS bicepparam file — to restrict the grid to its own agreed policy set and hide unrelated built-in/unused policies (e.g. DefaultPolicy, EnhancedPolicy, HourlyLogBackup) that would otherwise clutter a business-facing view. This is presentation filtering only — it never implies or asserts per-item/database policy assignment (see the Backup Policy Evidence query comment below).''')
+@description('Optional allowlist of AddonAzureBackupPolicy PolicyName values shown in Backup Policy Evidence. Empty (default) applies no filter. Presentation filtering only — never asserts per-item/database policy assignment.')
 param agreedPolicyNames array = []
 
 @description('Tags applied to the workbook resource.')
 param tags object = {}
 
 // ─── Derived configuration (no hard-coded environment names) ─────────────────
-// Identical mechanism to modules/observability/cost-management-workbook/main.bicep:
-// the set of Environment values shown/zero-filled in grids, and offered in the
-// Environment selector, comes only from the caller's subscriptionEnvironmentMappings
-// configuration — never a literal list — so this module stays reusable for a
-// different project with a different environment set.
+// Environment values shown/zero-filled in grids and offered in the Environment
+// selector come only from subscriptionEnvironmentMappings, never a literal list.
 
 var allEnvironmentValues = [for m in subscriptionEnvironmentMappings: m.environment]
 var configuredEnvironments = union([], allEnvironmentValues)
 var configuredEnvironmentsKqlBody = join(map(configuredEnvironments, e => '"${e}"'), ', ')
 
-// Subscription -> Environment KQL mapping body: one "subscriptionId", "environment"
-// pair per configured mapping entry, consumed by every grid below via a shared
-// `datatable(SubscriptionId:string, Environment:string) [...]` — the single place
-// this repository's SubscriptionId -> Environment configuration is translated into
-// KQL.
+// Subscription -> Environment KQL mapping body, consumed by every grid below via
+// a shared datatable(SubscriptionId:string, Environment:string).
 var subscriptionEnvironmentMapKqlBody = join(map(subscriptionEnvironmentMappings, m => '"${m.subscriptionId}", "${m.environment}"'), ', ')
 
-// Agreed Backup Policy Evidence allowlist -> KQL `dynamic([...])` array body.
-// Empty when agreedPolicyNames is empty, which the query below treats as
-// "no filter applied" (see kqlPolicyGrid).
+// Agreed Backup Policy Evidence allowlist -> KQL dynamic([...]) array body.
+// Empty means no filter is applied (see kqlPolicyGrid).
 var agreedPolicyNamesKqlBody = join(map(agreedPolicyNames, n => '"${n}"'), ', ')
 
 // ─── Explicit LAW query time context ──────────────────────────────────────────
-// Every LAW-backed query item below sets this exact 730-day window explicitly via
-// `timeContext` rather than relying on any workbook-level default time-range
-// control, so the Azure portal time picker can never silently truncate backup
-// history — identical rationale and value to the Cost Management workbook.
+// Explicit 730-day window on every query item so the Azure portal time picker
+// can never silently truncate backup history.
 
 var lawQueryTimeContext = {
   durationMs: 63072000000
 }
 
 // ─── KQL: shared Subscription -> Environment mapping fragment ────────────────
-// Prepended to every grid query below that reads a raw backup table.
+// resolvedSubscriptionIdExpr is the single subscription-resolution expression
+// used by every query below against AddonAzureBackupJobs, CoreAzureBackup, or
+// AddonAzureBackupPolicy. tolower(coalesce(...)) so GUID casing never causes a
+// missed match; _SubscriptionId is checked first since it is the populated
+// field on these tables, with SubscriptionId and a ResourceId-parsed GUID as
+// fallbacks only.
 //
-// resolvedSubscriptionIdExpr is the single, standardized subscription
-// resolution expression used by EVERY query below that consumes
-// AddonAzureBackupJobs, CoreAzureBackup, or AddonAzureBackupPolicy — one
-// definition, never a per-table variant. It is a coalesce(...) chain wrapped
-// in tolower() so GUID casing can never cause a missed match (ARM ResourceId
-// values, and _SubscriptionId itself, may use uppercase GUID text).
-// _SubscriptionId is deliberately first, per proven live schema:
-//   - AddonAzureBackupJobs: SubscriptionId is observed 0% populated on this
-//     table; _SubscriptionId is observed 100% populated (11,210/11,210 rows,
-//     6 distinct values).
-//   - AddonAzureBackupPolicy's PolicyAssociation rows: the same pattern is
-//     proven — _SubscriptionId populated, SubscriptionId empty (261/261 rows).
-// SubscriptionId (should it ever be populated for a given table/row) and the
-// GUID parsed out of ResourceId/_ResourceId are defensive fallbacks only,
-// evaluated in that order, never the primary source.
-//
-// subscriptionEnvironmentMapJoinKql is the single, standardized join
-// right-hand side every one of those queries joins ResolvedSubscriptionId
-// against — SubscriptionEnvironmentMap's own SubscriptionId column,
-// tolower()-normalized to match, aliased to ResolvedSubscriptionId. Reused
-// as-is for inner and leftouter joins alike.
+// subscriptionEnvironmentMapJoinKql is the shared join target: SubscriptionId
+// from SubscriptionEnvironmentMap, tolower()-normalized, aliased to
+// ResolvedSubscriptionId.
 
 var resolvedSubscriptionIdExpr = 'tolower(coalesce(_SubscriptionId, SubscriptionId, extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, ResourceId), extract(@"/subscriptions/([0-9a-fA-F-]{36})/", 1, _ResourceId)))'
 var subscriptionEnvironmentMapJoinKql = '(SubscriptionEnvironmentMap | project ResolvedSubscriptionId = tolower(SubscriptionId), Environment)'
@@ -92,433 +69,187 @@ var subscriptionEnvironmentMapJoinKql = '(SubscriptionEnvironmentMap | project R
 var subEnvMapKql = 'let SubscriptionEnvironmentMap = datatable(SubscriptionId:string, Environment:string) [${subscriptionEnvironmentMapKqlBody}];\n'
 
 // ─── KQL: shared normalized-jobs fragment (AddonAzureBackupJobs) ─────────────
-//
-// This is the sole data-access path into AddonAzureBackupJobs for the hero,
-// six-month, and failures grids. There is no ARM/Azure Resource Graph/Cost
-// Management/Recovery Services API call anywhere in this module.
-//
-// JobUniqueId defensive normalization (per known telemetry facts, there are
-// currently zero duplicate JobUniqueId emissions, but this is applied
-// unconditionally): `summarize arg_max(TimeGenerated, *) by JobUniqueId`
-// keeps only the newest ingested record per job, exactly as documented by
-// Microsoft's own Backup Reports sample queries.
-//
-// Environment is derived from ResolvedSubscriptionId, tolower()-normalized on
-// both sides of the join. This is a LEFT OUTER join, deliberately: a job
-// whose ResolvedSubscriptionId is not present in subscriptionEnvironmentMappings
-// is retained with Environment coalesced to "Unmapped" rather than silently
-// discarded — it stays visible under Environment = All (and is itself
-// individually selectable once the Environment parameter's own query below
-// detects it exists). A named, configured Environment selection (e.g. "dev")
-// still filters to exactly that environment's own configured subscription IDs
-// only.
-//
-// Backup classes (Class column) follow the exact canonical definitions:
-//   VM Backup        = BackupManagementType == "IaaSVM" and JobOperation == "Backup"
-//   SQL Full         = BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full"
-//   SQL Differential = BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential"
-//   SQL Log          = BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log"
-// Any job matching none of these (ConfigureBackup and other administrative
-// operations) gets Class == "" and is excluded from every grid below that
-// groups by Class. IsSucceeded/IsFailed use the exact canonical
-// case-insensitive (=~) definitions: Succeeded requires BOTH
-// JobStatus =~ "Completed" AND JobFailureCode =~ "Success"; Failed requires
-// only JobStatus =~ "Failed". Any other status counts toward Executed but is
-// neither Succeeded nor Failed.
-//
-// MonthKey buckets every job by JobStartDateTime (business event time), never
-// TimeGenerated (ingestion time).
-//
-// TelemetryPresence is the (Environment, MonthKey) pairs that have AT LEAST
-// ONE raw job row, of any class, computed live from LAW every render — the
-// precise, per-environment/month presence check the six-month window
-// fragment below uses to decide IsValidMonth: a month with genuinely zero
-// telemetry for that environment/month pair renders Unavailable ("-"), while
-// a month WITH telemetry but a genuinely zero metric renders as a real zero.
+// Sole data-access path into AddonAzureBackupJobs for the hero, six-month, and
+// failures grids. arg_max(TimeGenerated, *) by JobUniqueId keeps the newest
+// record per job. LEFT OUTER join to Environment: a job whose subscription is
+// not configured is retained as "Unmapped" rather than dropped, visible under
+// Environment = All. Backup classes: VM Backup = IaaSVM+Backup; SQL Full /
+// Differential / Log = AzureWorkload+Backup with matching JobOperationSubType;
+// anything else gets Class = "" and is excluded from grids grouped by Class.
+// Succeeded requires JobStatus =~ "Completed" AND JobFailureCode =~ "Success";
+// Failed requires JobStatus =~ "Failed" only. MonthKey buckets by
+// JobStartDateTime (business time), not ingestion time. TelemetryPresence
+// records which (Environment, MonthKey) pairs have at least one row, used to
+// distinguish a genuinely empty month (Unavailable) from a real zero.
 
 var normalizedJobsKql = '${subEnvMapKql}let NormalizedJobs =\n    AddonAzureBackupJobs\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | join kind=leftouter ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend Class = case(\n        BackupManagementType == "IaaSVM" and JobOperation == "Backup", "VM Backup",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Full", "SQL Full",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Differential", "SQL Differential",\n        BackupManagementType == "AzureWorkload" and JobOperation == "Backup" and JobOperationSubType == "Log", "SQL Log",\n        "")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM");\nlet TelemetryPresence = NormalizedJobs | summarize by Environment, MonthKey;\n'
 
 // ─── KQL: shared six-month window fragment ────────────────────────────────────
-// Report Month + the five preceding calendar months, calendar-accurate
-// (datetime_add), never a 30/60-day approximation.
-//
-// IsValidMonth is evaluated per (currently selected Environment, month)
-// against TelemetryPresence above: when a specific Environment is selected, a
-// month is valid only if THAT environment has at least one raw job row that
-// month; when Environment = All is selected, a month is valid if ANY
-// environment (including "Unmapped") has at least one raw job row that
-// month. A month/environment combination with genuinely no source telemetry
-// always renders Unavailable ("-"), never a fabricated zero.
-// anyInvalidMonth is true whenever any of the six displayed months lacks
-// telemetry for the selected Environment.
+// Report Month + five preceding calendar months (datetime_add, calendar-
+// accurate). IsValidMonth is evaluated per (selected Environment, month)
+// against TelemetryPresence: a month with no source telemetry for the
+// selection renders Unavailable ("-"), never a fabricated zero.
 
 var monthWindowKql = 'let selectedMonth = startofmonth(todatetime(strcat("{ReportMonth}", "-01")));\nlet telemetryMonthsForSelectedEnvironment =\n    TelemetryPresence\n    | where "{Environment}" == "All" or Environment == "{Environment}"\n    | summarize by MonthKey;\nlet monthList =\n    range MonthOffset from -5 to 0 step 1\n    | extend MonthStart = datetime_add("month", MonthOffset, selectedMonth)\n    | extend MonthKey = format_datetime(MonthStart, "yyyy-MM")\n    | extend IsValidMonth = MonthKey in (telemetryMonthsForSelectedEnvironment | project MonthKey);\nlet anyInvalidMonth = toscalar(monthList | summarize InvalidMonths = countif(not(IsValidMonth))) > 0;\n'
 
 // ─── KQL: shared "current job base" fragment ──────────────────────────────────
-// execBase is the single filtered view of NormalizedJobs — tracked classes
-// only (Class != ""), selected-Environment only — that both the Hero grid,
-// the Six-Month grid, and the Backup Failures grid build on. Using one shared
-// base for all three is what guarantees the Backup Failures row count always
-// reconciles with the Hero grid's own Failed values: both are derived from
-// identical filtering with no divergent dedup/selection logic.
-// BackupClasses is the fixed four-class reporting taxonomy — always shown,
-// even at zero, because these four classes ARE the reporting taxonomy, not
-// observed data.
+// execBase (tracked classes only, selected Environment only) is shared by the
+// Hero, Six-Month, and Failures grids, so Failures always reconciles with the
+// Hero grid's own Failed values. BackupClasses is the fixed four-class
+// reporting taxonomy, always shown even at zero.
 
 var execCommonKql = '${normalizedJobsKql}${monthWindowKql}let execBase = NormalizedJobs | where Class != "" | where "{Environment}" == "All" or Environment == "{Environment}";\nlet BackupClasses = datatable(Class:string) ["VM Backup", "SQL Full", "SQL Differential", "SQL Log"];\n'
 
 // ─── KQL: shared Success % formatting helper (Hero + Six-Month grids) ────────
-// Exact "100%" (no decimals) is returned ONLY when SucceededCount ==
-// ExecutedCount (and the caller has already guaranteed ExecutedCount > 0 —
-// this function is never invoked otherwise, exactly like FormatMoney in the
-// Cost Management workbook, which likewise renders "-" upstream rather than
-// inside the helper). Every other case is rounded to exactly 2 decimal
-// places and always padded to 2 digits (e.g. "95.00%", never "95.0%" or a
-// bare "95%").
-//
-// The explicit `capped` guard exists because standard round(x, 2) can round
-// a value that is genuinely below 100 UP TO 100.00 — e.g. 99.995 rounds to
-// 100.00 — which would silently reintroduce the exact live defect this
-// change fixes (a class with real failures/non-successful executions
-// displaying "100%"). Whenever rounding would produce >= 100.00 for a
-// non-exact match, the displayed value is capped at "99.99%" instead, so
-// "100%" can only ever appear when Succeeded literally equals Executed.
-// Known live example: SQL Log with 10810 succeeded / 10817 executed must
-// display "99.94%", never "100%" (see the fixture-level regression
-// assertions recorded in the commit message / operations log for this
-// change).
+// Exact "100%" only when SucceededCount == ExecutedCount (caller guarantees
+// ExecutedCount > 0). Otherwise rounds to 2 decimals, always padded (e.g.
+// "95.00%"). The `capped` guard prevents standard rounding from promoting a
+// value genuinely below 100 up to "100.00%" (e.g. 99.995 -> 100.00): a
+// non-exact match is capped at "99.99%" instead, so "100%" can only appear
+// when Succeeded literally equals Executed.
 
 var formatSuccessPctKql = 'let FormatSuccessPct = (SucceededCount:long, ExecutedCount:long) {\n    let isExactMatch = SucceededCount == ExecutedCount;\n    let pct = 100.0 * SucceededCount / ExecutedCount;\n    let rounded = round(pct, 2);\n    let capped = iff(not(isExactMatch) and rounded >= 100.0, 99.99, rounded);\n    let s = tostring(capped);\n    let dotIdx = indexof(s, ".");\n    let wholePart = iff(dotIdx == -1, s, substring(s, 0, dotIdx));\n    let fracRaw = iff(dotIdx == -1, "", substring(s, dotIdx + 1));\n    let fracPadded = case(strlen(fracRaw) == 0, "00", strlen(fracRaw) == 1, strcat(fracRaw, "0"), substring(fracRaw, 0, 2));\n    iff(isExactMatch, "100%", strcat(wholePart, ".", fracPadded, "%"))\n};\n'
 
 // ─── KQL: Hero grid — Backup Activity for the selected Report Month only ─────
-//
-// Business orientation required: Metric as rows (Executed/Succeeded/Failed/
-// Success %), backup classes as columns (VM Backup/SQL Full/SQL
-// Differential/SQL Log) — the opposite orientation from the six-month grid
-// below. Built by first computing one row per Class (heroRows), then
-// "melting" that wide shape into a long (Class, Metric, Value) shape, then
-// pivoting Class back out into columns grouped by Metric — the standard KQL
-// transpose pattern.
-//
-// isValidSelectedMonth reuses monthList's own MonthOffset == 0 row (the
-// selected Report Month is always monthList's last element) rather than a
-// second, independently-computed validity check, so the Hero grid's
-// zero-vs-Unavailable decision can never drift out of sync with the
-// Six-Month grid's own per-cell validity check.
-//
-// Zero-vs-Unavailable, exactly as required:
-//   - Selected Environment/month has NO telemetry at all (isValidSelectedMonth
-//     false): Executed/Succeeded/Failed/Success % all render "-".
-//   - Selected Environment/month HAS telemetry but a class had zero executions
-//     that month: Executed/Succeeded/Failed render the real "0"; Success %
-//     alone renders "-" (0/0 is not a meaningful percentage — never fabricated
-//     as "100%", which was the live-observed defect this corrects).
-//   - Selected Environment/month HAS telemetry and Executed > 0: all four
-//     render real computed values — Success % via FormatSuccessPct (see
-//     above), which itself guarantees "100%" can only appear when Succeeded
-//     literally equals Executed, never merely due to 2-decimal rounding.
-// All four Display fields are derived from the exact same Executed value and
-// the exact same isValidSelectedMonth flag in one place, so Success % can
-// never show a percentage while the count columns show "-", or vice versa.
-//
-// No Trend row (business-presentation MVP decision): the Six-Month Backup
-// Performance grid immediately below now provides the historical context
-// this grid previously carried via an OLS-regression Trend row. That
-// regression computation (requiredTrendMonths/trendMonthList/execMonthActual/
-// trendBase and the join that produced TrendDisplay) has been removed
-// entirely from this query, not merely hidden from the rendered grid, since
-// it became fully unused dead KQL once the Trend row was dropped.
-//
-// The final explicit `project` enforces the required visible column order —
-// VM Backup, SQL Full, SQL Differential, SQL Log — matching the Agreed
-// Backup Strategy table above, regardless of the alphabetical/first-seen
-// order `evaluate pivot()` would otherwise produce. BackupClasses always
-// contributes all four classes into heroRows/heroLong, so all four pivot
-// columns are always present for this projection to select.
+// Metric rows (Executed/Succeeded/Failed/Success %) x Class columns (VM
+// Backup/SQL Full/SQL Differential/SQL Log) — melt-then-pivot pattern.
+// isValidSelectedMonth reuses monthList's own MonthOffset == 0 row so this
+// grid's validity decision can never drift from the Six-Month grid's own.
+// No telemetry for the month -> all four fields render "-"; telemetry with
+// zero executions of a class -> real "0" counts and "-" Success % (never a
+// fabricated "100%"); otherwise all four render real computed values. No
+// Trend row. The final project enforces column order VM Backup / SQL Full /
+// SQL Differential / SQL Log, matching Agreed Backup Strategy above.
 
 var kqlHeroGrid = '${execCommonKql}${formatSuccessPctKql}let selectedMonthCounts = execBase | where MonthKey == "{ReportMonth}" | summarize Executed = count(), Succeeded = countif(IsSucceeded), Failed = countif(IsFailed) by Class;\nlet isValidSelectedMonth = toscalar(monthList | where MonthOffset == 0 | project IsValidMonth);\nlet heroRows =\n    BackupClasses\n    | join kind=leftouter selectedMonthCounts on Class\n    | extend Executed = coalesce(Executed, 0), Succeeded = coalesce(Succeeded, 0), Failed = coalesce(Failed, 0)\n    | extend ExecutedDisplay = iff(not(isValidSelectedMonth), "-", tostring(Executed))\n    | extend SucceededDisplay = iff(not(isValidSelectedMonth), "-", tostring(Succeeded))\n    | extend FailedDisplay = iff(not(isValidSelectedMonth), "-", tostring(Failed))\n    | extend SuccessPctDisplay = iff(not(isValidSelectedMonth) or Executed == 0, "-", FormatSuccessPct(Succeeded, Executed))\n    | project Class, ExecutedDisplay, SucceededDisplay, FailedDisplay, SuccessPctDisplay;\nlet heroLong =\n    heroRows | project Class, Metric = "Executed", Value = ExecutedDisplay, MetricOrder = 1\n    | union (heroRows | project Class, Metric = "Succeeded", Value = SucceededDisplay, MetricOrder = 2)\n    | union (heroRows | project Class, Metric = "Failed", Value = FailedDisplay, MetricOrder = 3)\n    | union (heroRows | project Class, Metric = "Success %", Value = SuccessPctDisplay, MetricOrder = 4);\nheroLong\n| evaluate pivot(Class, take_any(Value), Metric, MetricOrder)\n| order by MetricOrder asc\n| project-away MetricOrder\n| project Metric, ["VM Backup"], ["SQL Full"], ["SQL Differential"], ["SQL Log"]'
 
 // ─── KQL: Six-Month Backup Performance ────────────────────────────────────────
-//
-// Business orientation required: Month as rows, backup classes as columns —
-// each cell is that class's Success % for that calendar month (never
-// Executed/Succeeded/Failed totals, which are available by selecting an
-// older Report Month on the Hero grid instead). "-" for a month outside
-// available telemetry for the selected Environment, or a valid month with
-// zero executions of that class — a 0/0 percentage is not a meaningful
-// number. Built with the same melt-then-pivot pattern as the Hero grid,
-// pivoting on MonthKey (grouped by Class) instead of Class (grouped by
-// Metric).
-//
-// The final explicit `project` enforces the same required visible column
-// order as the Hero grid — VM Backup, SQL Full, SQL Differential, SQL Log —
-// for the same reason (BackupClasses always contributes all four classes,
-// so all four pivot columns are always present to select).
+// Month rows x Class columns; each cell is that class's Success % for the
+// month ("-" when unavailable or zero executions that month). Same
+// melt-then-pivot pattern and column order (VM Backup / SQL Full / SQL
+// Differential / SQL Log) as the Hero grid.
 
 var kqlSixMonthGrid = '${execCommonKql}${formatSuccessPctKql}let sixMonthActual =\n    BackupClasses\n    | extend _j = 1\n    | join kind=inner (monthList | extend _j = 1) on _j\n    | project Class, MonthKey, IsValidMonth\n    | join kind=leftouter (execBase | summarize Executed = count(), Succeeded = countif(IsSucceeded) by Class, MonthKey) on Class, MonthKey\n    | project Class, MonthKey, IsValidMonth, Executed = coalesce(Executed, 0), Succeeded = coalesce(Succeeded, 0);\nlet sixMonthDisplay =\n    sixMonthActual\n    | extend Display = iff(not(IsValidMonth), "-", iff(Executed == 0, "-", FormatSuccessPct(Succeeded, Executed)))\n    | project Class, MonthKey, Display;\nsixMonthDisplay\n| evaluate pivot(Class, take_any(Display), MonthKey)\n| order by MonthKey asc\n| project MonthKey, ["VM Backup"], ["SQL Full"], ["SQL Differential"], ["SQL Log"]'
 
 // ─── KQL: Backup Failures — selected-month exception report ──────────────────
-//
-// One row per individually FAILED job (canonical Failed definition only),
-// built from the exact same execBase used by the Hero grid — the same
-// Class != "" / selected-Environment filtering, no divergent dedup — so the
-// row count here is guaranteed to equal the sum of the Hero grid's own
-// "Failed" values for the same Report Month/Environment selection. Concise,
-// business-relevant columns only: Time, Environment, Backup Class, Failure
-// Reason. "Backup Item / Datasource" has been removed from this business
-// presentation — it added no reconciliation value versus the Hero grid and
-// was frequently "-" in practice; technical identifiers (JobUniqueId,
-// AdHocOrScheduledJob, JobOperationSubType — already encoded in Class — and
-// the always-"Failed" JobStatus) remain dropped as before.
-//
-// FormatFailureReason humanizes the two JobFailureCode values proven live to
-// date; any other/future code is displayed as its own raw JobFailureCode
-// text — never hidden — per "do not hide unknown errors".
+// One row per Failed job, built from the same execBase as the Hero grid, so
+// the row count always equals the sum of the Hero grid's own Failed values.
+// Columns: Time, Environment, Backup Class, Failure Reason only.
+// FormatFailureReason humanizes known JobFailureCode values; any other code
+// displays its own raw text rather than being hidden.
 
 var formatFailureReasonKql = 'let FormatFailureReason = (code:string) {\n    case(\n        code =~ "UserErrorOpeningSQLConnection", "Unable to open SQL connection",\n        code =~ "UserErrorOperationFailedTargetSQLServerInSingleUserMode", "SQL Server was in single-user mode",\n        code\n    )\n};\n'
 
 var kqlFailuresGrid = '${execCommonKql}${formatFailureReasonKql}let selectedMonthFailures =\n    execBase\n    | where MonthKey == "{ReportMonth}"\n    | where IsFailed\n    | project Time = JobStartDateTime, Environment, ["Backup Class"] = Class, ["Failure Reason"] = FormatFailureReason(JobFailureCode)\n    | order by Time desc;\nselectedMonthFailures'
 
 // ─── KQL: Protected Estate (current, by Environment) ──────────────────────────
-// Uses CoreAzureBackup's "BackupItem" operation only, latest record per
-// BackupItemUniqueId via arg_max(TimeGenerated, *) — the canonical current-item
-// selection.
-//
-// SQL host identification uses ProtectedContainerUniqueId — the actual
-// protected-item container identity already present in LAW for AzureWorkload
-// items (the SQL Server host machine's container record) — never a guess
-// parsed out of a database's display name. Protected VMs and protected SQL
-// databases are both counted via dcount(BackupItemUniqueId) (the actual
-// protected-item identity), scoped by BackupManagementType (IaaSVM vs
-// AzureWorkload). None of these three counts are hard-coded; they are computed
-// fresh from CoreAzureBackup every time this query runs.
-//
-// Three independent leftouter joins on "Environment" each independently
-// duplicate that join-key column (Kusto behavior) — each is explicitly
-// projected away immediately after its own join, before the next join runs,
-// so no duplicate ever accumulates or cascades.
-//
-// Subscription resolution uses the standardized resolvedSubscriptionIdExpr /
-// subscriptionEnvironmentMapJoinKql — the inner join is unchanged: a
-// protected item on a subscription absent from subscriptionEnvironmentMappings
-// is still excluded from this grid.
-//
-// Environment filtering (Environment = All -> every configured environment;
-// a named Environment -> that one row only) is applied as the final step,
-// after the zero-fill against every configured environment, so a specific
-// Environment selection still shows "0" (not an absent row) when it happens
-// to have no protected items.
+// Latest CoreAzureBackup "BackupItem" record per BackupItemUniqueId
+// (arg_max). SQL host count uses ProtectedContainerUniqueId; VM and SQL
+// database counts use dcount(BackupItemUniqueId), scoped by
+// BackupManagementType. A protected item on an unconfigured subscription is
+// excluded (inner join). Zero-filled per configured Environment before the
+// Environment selector filters the final rows, so a selection with no
+// protected items still shows "0" rather than an absent row.
 
 var kqlInventoryGrid = '${subEnvMapKql}let ConfiguredEnvironments = datatable(Environment:string) [${configuredEnvironmentsKqlBody}];\nlet CoreItemsLatest =\n    CoreAzureBackup\n    | where OperationName == "BackupItem"\n    | summarize arg_max(TimeGenerated, *) by BackupItemUniqueId\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId;\nlet ProtectedVMs = CoreItemsLatest | where BackupManagementType == "IaaSVM";\nlet ProtectedSqlDatabases = CoreItemsLatest | where BackupManagementType == "AzureWorkload";\nlet vmCounts = ProtectedVMs | summarize ProtectedVMs = dcount(BackupItemUniqueId) by Environment;\nlet sqlHostCounts = ProtectedSqlDatabases | summarize SqlHosts = dcount(ProtectedContainerUniqueId) by Environment;\nlet sqlDbCounts = ProtectedSqlDatabases | summarize ProtectedSqlDatabases = dcount(BackupItemUniqueId) by Environment;\nConfiguredEnvironments\n| join kind=leftouter vmCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlHostCounts on Environment\n| project-away Environment1\n| join kind=leftouter sqlDbCounts on Environment\n| project-away Environment1\n| extend ProtectedVMs = coalesce(ProtectedVMs, 0), SqlHosts = coalesce(SqlHosts, 0), ProtectedSqlDatabases = coalesce(ProtectedSqlDatabases, 0)\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| order by Environment asc'
 
 // ─── KQL: Backup Policy Evidence (simplified, filtered to agreed policies) ────
+// Policy-LEVEL evidence only — never a per-item/database policy assignment
+// claim, since AddonAzureBackupPolicy carries no usable item/database
+// identity field. Filtered to agreedPolicyNames when non-empty, so unrelated
+// built-in/unused policies never clutter this business-facing grid; empty
+// allowlist applies no filter.
 //
-// Purpose: show that the expected policy definitions actually exist in Azure
-// Backup telemetry — policy-LEVEL evidence only. Never a per-item/database
-// policy assignment claim (see the SQL Log discussion removed from this
-// module: live evidence proved AddonAzureBackupPolicy's PolicyAssociation
-// rows carry no usable item/database identity field, so no such correlation
-// is attempted anywhere in this module).
+// Schedule/Retention are normalized from raw AddonAzureBackupPolicy text.
+// CleanText() takes a string parameter — every call site wraps its source
+// column in tostring() first, since several source fields are integer-typed.
+// CleanText() strips brace-wrapped array text (e.g. "{Friday}") and
+// normalizes the literal "null" text to empty. FormatTime24() converts
+// recognized 12-hour clock text to 24-hour "HH:MM UTC" by locating the time
+// pattern via regex anywhere in the input (so a date-shaped prefix can't
+// corrupt the result), falling back to cleaned raw text + " UTC" when no
+// time pattern matches. FormatDays()/DayAbbrev() render a single day by its
+// full name and a multi-day list as an abbreviated First-Last range.
+// FormatRetentionPart() attaches the correct unit word to each retention
+// count.
 //
-// Filtered to AgreedPolicyNames (the agreedPolicyNames parameter) when
-// non-empty, so unrelated built-in/unused policies (DefaultPolicy,
-// EnhancedPolicy, HourlyLogBackup, etc.) never clutter this business-facing
-// grid. When agreedPolicyNames is empty (a caller that has not configured an
-// allowlist), no name filter is applied — see the parameter's own
-// description for why this filtering lives here as a parameter rather than a
-// hard-coded LIMS policy-name list inside this reusable module.
-//
-// Schedule/Retention are normalized into business-readable text from
-// whichever of the raw AddonAzureBackupPolicy fields are actually populated
-// on a given policy row (a single AzureWorkload/SQL policy row typically
-// carries Full + Differential + Log schedule/retention fields together, a
-// single IaaSVM/VM policy row typically carries only the Full-equivalent
-// fields). CleanText() takes a `string` parameter, never `dynamic` — the
-// live schema proves several of these fields (the six retention-duration
-// fields and LogBackupFrequency) are integer-typed, and Kusto's dynamic
-// cast operator rejects an integer value passed into a `dynamic`-typed
-// function parameter ("Cast operator: dynamic casting expects string type
-// values"), which is exactly the error observed live. Every call site below
-// therefore explicitly wraps its source column in tostring() before calling
-// CleanText(...), rather than relying on any implicit argument casting.
-// Three proven live raw-data quirks are corrected here, not merely
-// passed through:
-//   - Array-shaped fields (BackupDaysOfTheWeek, DiffBackupDaysofTheWeek,
-//     BackupTimes, DiffBackupTime) render via tostring() as brace-wrapped
-//     text, e.g. a single day as "{Friday}" and multiple days as
-//     "{Monday}, {Tuesday}, {Wednesday}, {Thursday}" — CleanText() strips
-//     every "{"/"}" character rather than assuming array vs. scalar shape.
-//   - An unpopulated field (e.g. BackupDaysOfTheWeek on a Daily-frequency
-//     policy) is observed to contain the literal four-character text "null",
-//     not a true empty value — CleanText() also normalizes that literal
-//     text (case-insensitively) to "", so it is never concatenated into the
-//     visible string.
-//   - BackupTimes/DiffBackupTime render in 12-hour clock text (observed:
-//     "10:00:00 PM") — FormatTime24() converts a recognized "H:MM:SS AM/PM"
-//     time-of-day to 24-hour "HH:MM UTC" (e.g. "22:00 UTC"). Live evidence
-//     proves DiffBackupTime specifically can also carry that same time
-//     component prefixed with unrelated date-shaped text (a plain string
-//     split on " " would then misparse the leading date token as the time
-//     itself, producing the observed live defect "Differential: Mon-Thu :
-//     UTC"). FormatTime24() therefore locates the "H(H):MM:SS AM/PM" time
-//     component via a regular expression match anywhere in the input —
-//     never a fixed-position string split — so a date prefix (or any other
-//     surrounding text) can never corrupt the extracted hour/minute/AM-PM.
-//     A raw value where no such time pattern is found anywhere falls back
-//     to the cleaned raw text with " UTC" appended, per "fall back to
-//     readable raw content rather than dropping the row" — it is never
-//     dropped, left brace-wrapped, or rendered as a malformed fragment like
-//     ": UTC".
-// FormatDays()/DayAbbrev() render a single configured day using its full
-// name (e.g. "Friday", matching the Agreed Backup Strategy's own wording)
-// and a multi-day list as an abbreviated First-Last range (e.g. the proven
-// live four-day Monday-Thursday differential list becomes "Mon-Thu") —
-// abbreviation via substring(day, 0, 3), which is correct for all seven
-// English weekday names. FormatRetentionPart() attaches the correct unit
-// word (days/weeks/months/years) to each raw retention count, which is
-// proven to be a plain number with no unit of its own.
-//
-// Backup Type is "SQL Backup" for any AzureWorkload policy, "Management VM"
-// specifically for an IaaSVM policy resolved to the "mgt" Environment (the
-// only environment whose Agreed Backup Strategy VM schedule differs — weekly
-// vs. daily — from every other environment's VM policy), and "VM Backup" for
-// every other IaaSVM policy. The long Azure PolicyName is never included in
-// the visible output — see the parameter's own description for why it
-// remains available for internal allowlist filtering/sort order only.
-//
-// Uses the exact discovered schema spelling "DiffBackupDaysofTheWeek"
-// (lowercase "of"), matching Microsoft's own published AddonAzureBackupPolicy
-// column reference — NOT "DiffBackupDaysOfTheWeek". Subscription resolution
-// uses the standardized resolvedSubscriptionIdExpr /
-// subscriptionEnvironmentMapJoinKql, same as Protected Estate.
-//
-// If a policy's raw values do not match any of the shapes above (e.g. an
-// unrecognized future field format), the incremental string-building below
-// degrades to whatever cleaned/partial text it can assemble rather than
-// ever throwing or silently dropping the row — consistent with "fall back
-// to readable raw content rather than dropping the row".
+// Backup Type is "SQL Backup" for AzureWorkload, "Management VM" for an
+// IaaSVM policy resolved to Environment "mgt", "VM Backup" otherwise. The
+// long Azure PolicyName is never shown. Column spelling
+// "DiffBackupDaysofTheWeek" (lowercase "of") matches the live schema exactly.
+// Subscription resolution is the same standardized expression used by
+// Protected Estate.
 
 var kqlPolicyGrid = '${subEnvMapKql}let AgreedPolicyNames = dynamic([${agreedPolicyNamesKqlBody}]);\nlet CleanText = (v:string) {\n    let noBraces = replace_string(replace_string(v, "{", ""), "}", "");\n    iff(isempty(noBraces) or tolower(noBraces) == "null", "", noBraces)\n};\nlet FormatTime24 = (raw:string) {\n    let timePattern = @"([0-9]{1,2}):([0-9]{2}):[0-9]{2}[ ]*(AM|PM)";\n    let hhRaw = extract(timePattern, 1, raw);\n    let mm = extract(timePattern, 2, raw);\n    let ampmPart = toupper(tostring(extract(timePattern, 3, raw)));\n    let hh = toint(hhRaw);\n    let hh24 = case(ampmPart == "PM" and hh != 12, hh + 12, ampmPart == "AM" and hh == 12, 0, hh);\n    let hhStr = iff(hh24 < 10, strcat("0", tostring(hh24)), tostring(hh24));\n    let parsed = strcat(hhStr, ":", mm, " UTC");\n    case(isempty(raw), "", isnotempty(hhRaw) and isnotempty(mm) and isnotempty(ampmPart), parsed, strcat(raw, " UTC"))\n};\nlet DayAbbrev = (day:string) { substring(day, 0, 3) };\nlet FormatDays = (cleanedDays:string) {\n    let dayList = split(cleanedDays, ", ");\n    let dayCount = array_length(dayList);\n    case(\n        isempty(cleanedDays), "",\n        dayCount == 1, cleanedDays,\n        strcat(DayAbbrev(tostring(dayList[0])), "-", DayAbbrev(tostring(dayList[dayCount - 1])))\n    )\n};\nlet FormatRetentionPart = (raw:string, label:string, unit:string) { iff(isempty(raw), "", strcat(iff(strlen(label) > 0, strcat(label, " "), ""), raw, " ", unit)) };\nAddonAzureBackupPolicy\n| where OperationName == "Policy"\n| summarize arg_max(TimeGenerated, *) by PolicyUniqueId\n| extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n| join kind=inner ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| where array_length(AgreedPolicyNames) == 0 or PolicyName in (AgreedPolicyNames)\n| extend BackupType = case(BackupManagementType == "IaaSVM" and Environment == "mgt", "Management VM", BackupManagementType == "IaaSVM", "VM Backup", "SQL Backup")\n| extend CleanFrequency = CleanText(tostring(BackupFrequency))\n| extend CleanDays = FormatDays(CleanText(tostring(BackupDaysOfTheWeek)))\n| extend CleanTime = FormatTime24(CleanText(tostring(BackupTimes)))\n| extend CleanDiffDays = FormatDays(CleanText(tostring(DiffBackupDaysofTheWeek)))\n| extend CleanDiffTime = FormatTime24(CleanText(tostring(DiffBackupTime)))\n| extend CleanLogFreq = CleanText(tostring(LogBackupFrequency))\n| extend VmSchedule = case(\n    isempty(CleanFrequency), "-",\n    CleanFrequency =~ "Weekly" and isnotempty(CleanDays), strcat("Weekly ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")),\n    strcat(CleanFrequency, iff(isnotempty(CleanTime), strcat(" ", CleanTime), ""))\n  )\n| extend SqlFullSchedule = iff(isnotempty(CleanDays) or isnotempty(CleanTime), strcat("Full: ", CleanDays, iff(isnotempty(CleanTime), strcat(" ", CleanTime), "")), "")\n| extend SqlDiffSchedule = iff(isnotempty(CleanDiffDays) or isnotempty(CleanDiffTime), strcat("Differential: ", CleanDiffDays, iff(isnotempty(CleanDiffTime), strcat(" ", CleanDiffTime), "")), "")\n| extend SqlLogSchedule = iff(isnotempty(CleanLogFreq), strcat("Log: every ", CleanLogFreq, " minutes"), "")\n| extend _sch0 = ""\n| extend _sch1 = iff(isnotempty(SqlFullSchedule), strcat(_sch0, iff(strlen(_sch0) > 0, "; ", ""), SqlFullSchedule), _sch0)\n| extend _sch2 = iff(isnotempty(SqlDiffSchedule), strcat(_sch1, iff(strlen(_sch1) > 0, "; ", ""), SqlDiffSchedule), _sch1)\n| extend _sch3 = iff(isnotempty(SqlLogSchedule), strcat(_sch2, iff(strlen(_sch2) > 0, "; ", ""), SqlLogSchedule), _sch2)\n| extend SqlScheduleCombined = iff(strlen(_sch3) > 0, _sch3, "-")\n| extend Schedule = iff(BackupType == "SQL Backup", SqlScheduleCombined, VmSchedule)\n| extend RetDaily = FormatRetentionPart(CleanText(tostring(DailyRetentionDuration)), "Daily", "days")\n| extend RetWeekly = FormatRetentionPart(CleanText(tostring(WeeklyRetentionDuration)), "Weekly", "weeks")\n| extend RetMonthly = FormatRetentionPart(CleanText(tostring(MonthlyRetentionDuration)), "Monthly", "months")\n| extend RetYearly = FormatRetentionPart(CleanText(tostring(YearlyRetentionDuration)), "Yearly", "years")\n| extend RetDiff = FormatRetentionPart(CleanText(tostring(DiffBackupRetentionDuration)), "", "days")\n| extend RetLog = FormatRetentionPart(CleanText(tostring(LogBackupRetentionDuration)), "", "days")\n| extend _rs0 = ""\n| extend _rs1 = iff(isnotempty(RetDaily), strcat(_rs0, iff(strlen(_rs0) > 0, "; ", ""), RetDaily), _rs0)\n| extend _rs2 = iff(isnotempty(RetWeekly), strcat(_rs1, iff(strlen(_rs1) > 0, "; ", ""), RetWeekly), _rs1)\n| extend _rs3 = iff(isnotempty(RetMonthly), strcat(_rs2, iff(strlen(_rs2) > 0, "; ", ""), RetMonthly), _rs2)\n| extend _rs4 = iff(isnotempty(RetYearly), strcat(_rs3, iff(strlen(_rs3) > 0, "; ", ""), RetYearly), _rs3)\n| extend RetentionSemi = _rs4\n| extend _rd0 = ""\n| extend _rd1 = iff(isnotempty(RetDaily), strcat(_rd0, iff(strlen(_rd0) > 0, " / ", ""), RetDaily), _rd0)\n| extend _rd2 = iff(isnotempty(RetWeekly), strcat(_rd1, iff(strlen(_rd1) > 0, " / ", ""), RetWeekly), _rd1)\n| extend _rd3 = iff(isnotempty(RetMonthly), strcat(_rd2, iff(strlen(_rd2) > 0, " / ", ""), RetMonthly), _rd2)\n| extend _rd4 = iff(isnotempty(RetYearly), strcat(_rd3, iff(strlen(_rd3) > 0, " / ", ""), RetYearly), _rd3)\n| extend RetentionSlash = _rd4\n| extend SqlFullRetentionSegment = iff(isnotempty(RetentionSlash), strcat("Full: ", RetentionSlash), "")\n| extend SqlDiffRetentionSegment = iff(isnotempty(RetDiff), strcat("Differential: ", RetDiff), "")\n| extend SqlLogRetentionSegment = iff(isnotempty(RetLog), strcat("Log: ", RetLog), "")\n| extend _rc0 = ""\n| extend _rc1 = iff(isnotempty(SqlFullRetentionSegment), strcat(_rc0, iff(strlen(_rc0) > 0, "; ", ""), SqlFullRetentionSegment), _rc0)\n| extend _rc2 = iff(isnotempty(SqlDiffRetentionSegment), strcat(_rc1, iff(strlen(_rc1) > 0, "; ", ""), SqlDiffRetentionSegment), _rc1)\n| extend _rc3 = iff(isnotempty(SqlLogRetentionSegment), strcat(_rc2, iff(strlen(_rc2) > 0, "; ", ""), SqlLogRetentionSegment), _rc2)\n| extend SqlRetentionCombined = iff(strlen(_rc3) > 0, _rc3, "-")\n| extend Retention = iff(BackupType == "SQL Backup", SqlRetentionCombined, iff(strlen(RetentionSemi) > 0, RetentionSemi, "-"))\n| order by Environment asc, PolicyName asc\n| project Environment, ["Backup Type"] = BackupType, Schedule, Retention, State'
 
 // ─── KQL: shared restore/recovery jobs fragment ───────────────────────────────
-// Searches raw AddonAzureBackupJobs directly (not through the Class/Success
-// taxonomy above, which is Backup-operation-specific) for
-// JobOperation in~ ("Restore", "Recovery") — the already-existing detection
-// logic, unchanged. JobUniqueId defensive normalization (arg_max by
-// JobUniqueId) is applied here too, for the same reason it is applied to
-// NormalizedJobs above — these are rows from the same AddonAzureBackupJobs
-// table, so the same defensive, always-applied dedup principle extends
-// naturally to restore/recovery rows. Same standardized subscription
-// resolution and "Unmapped" retention (left outer join) as NormalizedJobs —
-// a restore/recovery job from an unmapped ResolvedSubscriptionId is retained
-// and labelled "Unmapped", never silently discarded.
+// AddonAzureBackupJobs rows where JobOperation in ("Restore", "Recovery"),
+// deduplicated by JobUniqueId (arg_max). Same standardized subscription
+// resolution and "Unmapped" retention (left outer join) as NormalizedJobs.
 
 var restoreJobsKql = '${subEnvMapKql}let RestoreJobs =\n    AddonAzureBackupJobs\n    | where JobOperation in~ ("Restore", "Recovery")\n    | summarize arg_max(TimeGenerated, *) by JobUniqueId\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | join kind=leftouter ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n    | extend Environment = coalesce(Environment, "Unmapped")\n    | extend MonthKey = format_datetime(startofmonth(JobStartDateTime), "yyyy-MM")\n    | extend IsSucceeded = (JobStatus =~ "Completed" and JobFailureCode =~ "Success")\n    | extend IsFailed = (JobStatus =~ "Failed");\n'
 
 // ─── KQL: Restore Activity — selected-month summary ───────────────────────────
-//
-// Same business pattern as the Hero grid (Metric rows: Executed/Succeeded/
-// Failed), but restore CATEGORY columns are derived only from JobOperation
-// values that actually occurred in the selected month/Environment — never a
-// fixed/fabricated taxonomy, per "only classify restore types that existing
-// telemetry can support without guessing". When there is no restore/recovery
-// evidence for the selected month/Environment, selectedMonthRestoreJobs (and
-// therefore every downstream step) is empty, so this query legitimately
-// returns zero rows — the workbook's own noDataMessage (set on the item
-// below) renders instead of a fabricated all-zero row; absence of restore
-// activity is never treated as a compliance failure.
+// Metric rows (Executed/Succeeded/Failed) x restore-category columns, where
+// categories are derived only from JobOperation values that actually
+// occurred that month — never a fixed taxonomy. No restore/recovery evidence
+// for the selection means zero rows returned; the item's own noDataMessage
+// renders instead of a fabricated all-zero row.
 
 var kqlRestoreActivityGrid = '${restoreJobsKql}let selectedMonthRestoreJobs = RestoreJobs | where "{Environment}" == "All" or Environment == "{Environment}" | where MonthKey == "{ReportMonth}";\nlet restoreCounts = selectedMonthRestoreJobs | summarize Executed = count(), Succeeded = countif(IsSucceeded), Failed = countif(IsFailed) by Category = JobOperation;\nlet restoreLong =\n    restoreCounts | project Category, Metric = "Executed", Value = tostring(Executed), MetricOrder = 1\n    | union (restoreCounts | project Category, Metric = "Succeeded", Value = tostring(Succeeded), MetricOrder = 2)\n    | union (restoreCounts | project Category, Metric = "Failed", Value = tostring(Failed), MetricOrder = 3);\nrestoreLong\n| evaluate pivot(Category, take_any(Value), Metric, MetricOrder)\n| order by MetricOrder asc\n| project-away MetricOrder'
 
 // ─── KQL: Restore Details ──────────────────────────────────────────────────────
-// One row per observed restore/recovery job for the selected month/
-// Environment — the exact same RestoreJobs base and filters as the Restore
-// Activity summary above, so this grid's row count always reconciles with
-// the sum of that summary's own "Executed" values. GUIDs and
-// implementation-only fields are dropped; Item/Destination falls back
-// through BackupItemFriendlyName -> DatasourceFriendlyName ->
-// RecoveryJobDestination -> "-", the same isnotempty()-based fallback
-// pattern used by the Backup Failures grid.
+// One row per restore/recovery job for the selected month/Environment, same
+// RestoreJobs base and filters as Restore Activity, so row count reconciles
+// with that summary's Executed total. Item/Destination falls back through
+// BackupItemFriendlyName -> DatasourceFriendlyName -> RecoveryJobDestination
+// -> "-".
 
 var kqlRestoreDetailsGrid = '${restoreJobsKql}let selectedMonthRestoreDetails =\n    RestoreJobs\n    | where "{Environment}" == "All" or Environment == "{Environment}"\n    | where MonthKey == "{ReportMonth}"\n    | extend Item = case(isnotempty(BackupItemFriendlyName), BackupItemFriendlyName, isnotempty(DatasourceFriendlyName), DatasourceFriendlyName, isnotempty(RecoveryJobDestination), RecoveryJobDestination, "-")\n    | extend FailureReason = iff(IsFailed, JobFailureCode, "-")\n    | project Time = JobStartDateTime, Environment, ["Restore Type"] = JobOperation, ["Item / Destination"] = Item, Status = JobStatus, ["Failure Reason"] = FailureReason\n    | order by Time desc;\nselectedMonthRestoreDetails'
 
 // ─── KQL: hidden "restore data present" parameter query ──────────────────────
-// Drives the Restore Details item's conditionalVisibility below, so a
-// selected month/Environment with no restore/recovery evidence shows the
-// Restore Activity summary's single no-data message only — Restore Details
-// is hidden entirely (its own query never runs — see Azure Workbooks
-// conditional-visibility semantics) rather than also rendering a second,
-// duplicate no-data message. This is the same RestoreJobs base and the same
-// month/Environment filter as both restore grids above, so visibility can
-// never disagree with what Restore Activity/Restore Details would otherwise
-// show. No new data source: still AddonAzureBackupJobs only.
-//
-// This parameter is intentionally NOT part of the visible parameter bar —
-// it is declared inside the same top parameters item as workloadName/
-// ReportMonth/Environment, marked isHiddenWhenLocked so it is invisible in
-// normal (locked/reading) mode, the mode this workbook is always viewed in
-// once deployed.
+// Drives Restore Details' conditionalVisibility below, so a month/Environment
+// with no restore/recovery evidence shows only Restore Activity's own
+// no-data message, with Restore Details hidden entirely rather than showing
+// a second, duplicate message. Same RestoreJobs base and filter as both
+// restore grids. Not part of the visible parameter bar (isHiddenWhenLocked).
 
 var kqlRestoreDataPresentQuery = '${restoreJobsKql}RestoreJobs\n| where "{Environment}" == "All" or Environment == "{Environment}"\n| where MonthKey == "{ReportMonth}"\n| count\n| project Value = iff(Count > 0, "Yes", "No")'
 
 // ─── KQL: Environment parameter — dynamic, conditional "Unmapped" choice ──────
-// "All" and every configured environment (mgt/dev/tst/acc/preprd/prd for LIMS)
-// are always offered. "Unmapped" is a live, conditional third category: it is
-// added to the selector's own choices only when AddonAzureBackupJobs actually
-// contains at least one row whose resolved subscription is not present in
-// subscriptionEnvironmentMappings — never unconditionally, and never as a
-// permanent configured environment. This parameter is query-backed (queryType
-// 0 against the same LAW workspace) rather than a static jsonData list,
-// because a static list cannot express "this choice only exists if the
-// underlying data actually exists". "All" remains the default selection via
-// the query's own `selected` column.
-//
-// HasUnmapped resolves ResolvedSubscriptionId via the same standardized
-// resolvedSubscriptionIdExpr / subscriptionEnvironmentMapJoinKql as
-// NormalizedJobs (_SubscriptionId first, tolower()-normalized) — critically,
-// NOT the raw SubscriptionId column, which is proven 0% populated on
-// AddonAzureBackupJobs.
+// "All" and every configured environment are always offered. "Unmapped" is
+// added only when AddonAzureBackupJobs actually contains at least one row
+// whose resolved subscription is not configured — never unconditionally.
+// Query-backed (not a static list) so this conditional choice can exist only
+// when the underlying data exists. "All" is the default via the query's own
+// `selected` column.
 //
 // The Azure Workbook dropdown contract for a query-backed parameter requires
-// its result columns in this EXACT order: value, label, selected. EnvChoice is
-// carried through as an internal sort/identity column only and is explicitly
-// dropped before the final projection below — the query ends with
-// `| project value, label, selected` (bare column names, that exact order).
+// result columns in exactly this order: value, label, selected — enforced by
+// the final `project value, label, selected`.
 
 var kqlEnvironmentParameterQuery = '${subEnvMapKql}let ConfiguredEnvironmentChoices = datatable(EnvChoice:string) [${configuredEnvironmentsKqlBody}];\nlet HasUnmapped = toscalar(\n    AddonAzureBackupJobs\n    | extend ResolvedSubscriptionId = ${resolvedSubscriptionIdExpr}\n    | summarize by ResolvedSubscriptionId\n    | join kind=leftanti ${subscriptionEnvironmentMapJoinKql} on ResolvedSubscriptionId\n    | count\n) > 0;\nunion (print EnvChoice = "All"), (ConfiguredEnvironmentChoices), (print EnvChoice = "Unmapped" | where HasUnmapped)\n| extend value = EnvChoice, label = EnvChoice, selected = (EnvChoice == "All")\n| project value, label, selected'
 
 // ─── Workbook content ─────────────────────────────────────────────────────────
 
-// Uniform, tight inter-item spacing for this screenshot-driven MVP — every
-// visible item below sets the same small explicit margin via the
-// documented, schema-supported per-item `styleSettings.margin` property
-// (https://github.com/Microsoft/Application-Insights-Workbooks schema
-// `definitions/styleSettings`), so sections visually follow each other
-// compactly without clipping any grid row or introducing scrolling. No
-// unsupported/invented workbook JSON property is used.
+// Uniform compact margin applied to every visible item via the documented,
+// schema-supported per-item styleSettings.margin property.
 var compactItemSpacing = {
   margin: '0px 0px 8px 0px'
 }
 
-// ─── Workbook content ─────────────────────────────────────────────────────────
-//
-// Visible section order (business narrative, per this revision): Parameters
-// -> Agreed Backup Strategy -> Backup Policy Evidence -> Backup Activity ->
-// Backup Failures -> Six-Month Backup Performance -> Restore Activity ->
-// Restore Details -> Protected Estate -> footer. Protected Estate has moved
-// to immediately before the footer (previously right after Policy
-// Evidence); every other item's own query/logic is unchanged — only order,
-// spacing, and the items documented above (Policy Evidence, Hero, Failures,
-// Restore Details visibility) changed in this revision.
+// Visible section order: Parameters -> Agreed Backup Strategy -> Backup
+// Policy Evidence -> Backup Activity -> Backup Failures -> Six-Month Backup
+// Performance -> Restore Activity -> Restore Details -> Protected Estate ->
+// footer.
 
 var workbookContent = {
   version: 'Notebook/1.0'
   items: [
 
     // ── Visible parameters bar: Workload -> Report Month -> Environment ─────
-    // Standardized pattern (shared with the Cost Management workbook). Also
-    // carries one hidden, non-visible parameter (RestoreDataPresent) used
-    // only to drive Restore Details' conditionalVisibility below.
+    // Also carries one hidden parameter (RestoreDataPresent) used only to
+    // drive Restore Details' conditionalVisibility below.
     {
       type: 9
       content: {
@@ -535,11 +266,9 @@ var workbookContent = {
             value: workloadName
           }
 
-          // Report Month: current month + previous 12 completed calendar months.
-          // Calendar-month arithmetic (datetime_add) — never 30d/60d approximation.
-          // Default selection uses the query's own `selected` column (true only
-          // for MonthOffset == 0, the current month) — never a static
-          // `value: 'value::0'` override.
+          // Report Month: current month + previous 12 completed calendar months
+          // (calendar-accurate datetime_add). Default = current month via the
+          // query's own `selected` column.
           {
             id: guid(workloadName, 'p-reportMonth-backup')
             version: 'KqlParameterItem/1.0'
@@ -557,10 +286,9 @@ var workbookContent = {
             }
           }
 
-          // Environment: "All" + choices derived from
-          // subscriptionEnvironmentMappings, plus a live, conditional
+          // Environment: "All" + configured environments, plus a conditional
           // "Unmapped" choice (see kqlEnvironmentParameterQuery above).
-          // Default selection is "All" via the query's own `selected` column.
+          // Default = "All" via the query's own `selected` column.
           {
             id: guid(workloadName, 'p-environment-backup')
             version: 'KqlParameterItem/1.0'
@@ -578,11 +306,8 @@ var workbookContent = {
             }
           }
 
-          // Hidden (isHiddenWhenLocked): "Yes"/"No" text parameter, never
-          // shown in the visible parameter bar in normal reading mode, used
-          // only by Restore Details' conditionalVisibility below — see
-          // kqlRestoreDataPresentQuery's own comment for why this is the
-          // preferred mechanism over a duplicate no-data message.
+          // Hidden (isHiddenWhenLocked) "Yes"/"No" parameter used only by
+          // Restore Details' conditionalVisibility below.
           {
             id: guid(workloadName, 'p-restoreDataPresent-backup')
             version: 'KqlParameterItem/1.0'
@@ -604,13 +329,9 @@ var workbookContent = {
     }
 
     // ── Agreed Backup Strategy (hard-coded, accepted for this MVP) ──────────
-    // The agreed strategy is intentionally hard-coded business configuration,
-    // not derived from LAW — it represents what has been agreed with the
-    // customer, not what is technically observed (see Backup Policy Evidence
-    // immediately below for the technical observation). The workbook's own
-    // display name already identifies it as "Backup & Restore" (shown above
-    // the parameter bar), so this text starts directly at "## Agreed Backup
-    // Strategy" rather than repeating a large redundant title heading.
+    // Hard-coded business configuration, not derived from LAW — represents
+    // the agreed strategy; Backup Policy Evidence below shows what is
+    // technically configured.
     {
       type: 1
       content: {
@@ -621,20 +342,8 @@ var workbookContent = {
     }
 
     // ── Backup Policy Evidence ───────────────────────────────────────────────
-    // Explicit per-column widths (documented, schema-supported
-    // gridSettings.formatters[].formatOptions.customColumnWidthSetting —
-    // https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/Documentation/Visualizations/Grid.md)
-    // so Schedule/Retention — the two free-text columns that carry the
-    // longest business-readable strings — render at a usable width by
-    // default, with no manual drag/expand required. Widths sum to 100% of
-    // the grid; formatter 0 ("automatic"/text, the same default rendering
-    // every other text column in this module already receives) is used
-    // explicitly on all five so only width is affected, never the value's
-    // own presentation. The five visible columns themselves are unchanged.
-    // size stays Small (0), same as before — this item carries the most rows
-    // on the page (~11) and is explicitly allowed to remain visually larger
-    // than the shorter grids below; a fixed-cardinality row count this size
-    // still renders in full with no clipping/scrolling at the Small preset.
+    // Explicit per-column widths so Schedule/Retention render at a usable
+    // width by default.
     {
       type: 3
       content: {
@@ -664,12 +373,7 @@ var workbookContent = {
     }
 
     // ── Hero grid: Backup Activity for the selected Report Month ────────────
-    // size (documented, schema-supported KqlItem "vertical size of the
-    // control" — https://github.com/Microsoft/Application-Insights-Workbooks/blob/master/Documentation/Visualizations/Grid.md,
-    // enum 0=Small, 1=Medium, 2=Large, 3=Full) is explicitly Small here — this
-    // grid always renders exactly 4 rows (Executed/Succeeded/Failed/Success %)
-    // regardless of Environment/Report Month selection, so Small comfortably
-    // shows every row with no clipping or internal scrolling.
+    // Always exactly 4 rows, so Small size is sufficient.
     {
       type: 3
       content: {
@@ -690,13 +394,7 @@ var workbookContent = {
     }
 
     // ── Backup Failures — exception report ────────────────────────────────────
-    // size: Medium (1), not Small — this grid's row count is real failure
-    // data (observed around ~7 rows in a typical month), unlike the other
-    // short grids on this page whose row count is a fixed, known-small
-    // taxonomy (four backup classes, six months). Medium keeps a realistic
-    // failures list fully visible without clipping/scrolling while still
-    // being far more compact than Backup Policy Evidence's own sizing
-    // (~11 rows, left unchanged — see that item's own comment).
+    // Medium size: row count is real failure data, not a fixed small taxonomy.
     {
       type: 3
       content: {
@@ -717,8 +415,7 @@ var workbookContent = {
     }
 
     // ── Six-Month Backup Performance ──────────────────────────────────────────
-    // size: Small (0) — always exactly 6 rows (one per calendar month in the
-    // fixed six-month window), never more.
+    // Always exactly 6 rows (one per calendar month in the window).
     {
       type: 3
       content: {
@@ -744,8 +441,6 @@ var workbookContent = {
     }
 
     // ── Restore Activity — selected-month summary ─────────────────────────────
-    // size: Small (0) — a Metric x Category pivot summary, always a handful
-    // of rows (Executed/Succeeded/Failed) at most.
     {
       type: 3
       content: {
@@ -766,15 +461,8 @@ var workbookContent = {
     }
 
     // ── Restore Details — only rendered when restore rows actually exist ────
-    // conditionalVisibility (documented Azure Workbooks item property) hides
-    // this item — and skips running its query entirely — whenever the hidden
-    // RestoreDataPresent parameter above resolves to "No" for the selected
-    // Report Month/Environment, so a month with no restore/recovery evidence
-    // shows the Restore Activity summary's single no-data message only, with
-    // no second, duplicate message and no space consumed by this item at all.
-    // When restore data DOES exist, this item renders normally and its row
-    // count reconciles with Restore Activity's own Executed total (same
-    // RestoreJobs base and filters).
+    // Rendered only when RestoreDataPresent = Yes (conditionalVisibility);
+    // otherwise Restore Activity's own no-data message is sufficient.
     {
       type: 3
       content: {
@@ -798,9 +486,8 @@ var workbookContent = {
       name: 'query-restore-details-grid'
     }
 
-    // ── Protected Estate — moved to immediately before the footer ───────────
-    // size: Small (0) — one row per configured environment (six for LIMS),
-    // a small, fixed-cardinality row count.
+    // ── Protected Estate ──────────────────────────────────────────────────────
+    // One row per configured environment.
     {
       type: 3
       content: {
@@ -841,10 +528,9 @@ var workbookContent = {
 }
 
 // ─── Resource ─────────────────────────────────────────────────────────────────
-// Deterministic name derived from stable configuration inputs only — never from
-// workbookDisplayName, so renaming the customer-facing title never changes the
-// underlying resource identity. Unchanged from the prior revision — this
-// presentation refactor does not touch resource identity.
+// Deterministic name derived from stable configuration inputs only — never
+// from workbookDisplayName — so renaming the title never changes resource
+// identity.
 
 resource workbook 'microsoft.insights/workbooks@2023-06-01' = {
   name: guid(workloadName, workspaceResourceId, 'backup-restore-workbook')

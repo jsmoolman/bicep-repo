@@ -22,7 +22,7 @@ param retentionInDays int = 730
 @description('Total retention in days for the custom table (4-4383).')
 param totalRetentionInDays int = 730
 
-@description('Optional: full ARM resource ID of an existing Data Collection Endpoint. Empty string (current LIMS state) means no DCE is configured and the DCR uses its own Direct logs-ingestion endpoint.')
+@description('Optional: full ARM resource ID of an existing Data Collection Endpoint. Empty string (no DCE configured) means the DCR uses its own Direct logs-ingestion endpoint.')
 param dataCollectionEndpointResourceId string = ''
 
 @description('Tags applied to the Data Collection Rule.')
@@ -76,7 +76,7 @@ output dataCollectionRuleResourceId string = foundation.outputs.dataCollectionRu
 @description('Immutable ID of the deployed Data Collection Rule, required by the Logs Ingestion API.')
 output dataCollectionRuleImmutableId string = foundation.outputs.dataCollectionRuleImmutableId
 
-@description('''The Direct DCR logs-ingestion endpoint (properties.endpoints.logsIngestion) of the deployed Data Collection Rule — the endpoint this DCR exposes on its own. This is the value the future collector configures as its logsIngestionEndpoint today (no Data Collection Endpoint, DCE, exists for LIMS). It does not automatically change if a DCE is associated with this DCR in the future: a Direct DCR may retain its own endpoint even once associated with a DCE, and the caller chooses which endpoint to send data to. See the reusable module output of the same name for the two separate changes required to adopt DCE-routed ingestion later.''')
+@description('''The Direct DCR logs-ingestion endpoint (properties.endpoints.logsIngestion) of the deployed Data Collection Rule — the endpoint this DCR exposes on its own. This is the value the collector configures as its logsIngestionEndpoint when no Data Collection Endpoint (DCE) is in use. It does not automatically change if a DCE is associated with this DCR in the future: a Direct DCR may retain its own endpoint even once associated with a DCE, and the caller chooses which endpoint to send data to. See the reusable module output of the same name for the two separate changes required to adopt DCE-routed ingestion later.''')
 output directLogsIngestionEndpoint string = foundation.outputs.directLogsIngestionEndpoint
 
 @description('Resource group hosting the workspace, table, and DCR (derived from workspaceResourceId).')

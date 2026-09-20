@@ -4,7 +4,7 @@ targetScope = 'resourceGroup'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
-@description('Workload short code (e.g. "lims"). Used in the workbook display name and title.')
+@description('Workload short code (e.g. "contoso"). Used in the workbook display name and title.')
 @minLength(1)
 @maxLength(20)
 param workloadName string

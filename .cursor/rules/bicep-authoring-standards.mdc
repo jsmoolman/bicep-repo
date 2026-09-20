@@ -29,4 +29,4 @@ Follow the naming convention required by the target customer, subscription, or r
 
 Include only the parameters a composition or module actually uses. Do not require every parameter file to declare `environment`, `location`, `purpose`, and `tags` by default — add each one only when the deployment genuinely needs it.
 
-Do not hardcode or assume a specific workload (e.g. `purpose = 'lims'`) in reusable modules or shared compositions. LIMS is the primary but not the only consumer of this repository's reusable capabilities — workload/project identifiers are supplied by the caller through `config/`, so the same composition stays usable for other projects, subscriptions, or management-group scopes.
+Do not hardcode or assume a specific workload (e.g. `purpose = 'example'`) in reusable modules or shared compositions. One workload is the primary but not the only consumer of this repository's reusable capabilities — workload/project identifiers are supplied by the caller through `config/`, so the same composition stays usable for other projects, subscriptions, or management-group scopes.

@@ -1,7 +1,7 @@
 <#
 .SYNOPSIS
   Collects one calendar month of Azure Cost Management data for the configured
-  LIMS subscriptions and writes normalized snapshot rows into the
+  subscriptions and writes normalized snapshot rows into the
   CostManagementSnapshot_CL Log Analytics table via the Logs Ingestion API.
 
 .DESCRIPTION
@@ -28,38 +28,33 @@
   endpoint are never hard-coded here — they are read live from the deployed
   DCR via an authenticated, read-only ARM GET at run time.
 
-  This script is intended to be invoked from
-  .azuredevops/pipelines/collect-cost-management-snapshot.yml, inside an
+  Intended to be invoked from
+  .azuredevops/pipelines/collect-cost-management-snapshot.yml inside an
   AzureCLI@2 task (so `az` is already logged in with the pipeline's service
-  connection). AzureCLI@2 with scriptType: pscore / scriptLocation: scriptPath
-  dot-sources the target script rather than executing it as a child process,
-  so this script cannot rely on "was I dot-sourced?" (e.g.
-  $MyInvocation.InvocationName -ne '.') to decide whether to run — that would
-  incorrectly suppress Main in the real pipeline. Instead, -ImportOnly is the
-  explicit switch that local, offline testing passes to load only the pure
-  functions (column resolution, environment mapping, month-window arithmetic,
-  normalization) without executing Main and without making any Azure or
-  network call — see the guard at the bottom of this file. Any normal
-  invocation (with or without dot-sourcing, as long as -ImportOnly is not
-  passed) runs Main.
+  connection). -ImportOnly loads only the pure functions (column resolution,
+  environment mapping, month-window arithmetic, normalization) without
+  executing Main and without any Azure/network call — see the guard at the
+  bottom of this file. Any other invocation runs Main.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter()]
-    [string]$CostParametersFile = 'config/nfi/lims/observability/cost-management-workbook.bicepparam',
+    [string]$CostParametersFile = 'config/example/observability/cost-management-workbook.bicepparam',
 
     [Parameter()]
-    [string]$FoundationParametersFile = 'config/nfi/lims/observability/cost-management-data-foundation.bicepparam',
+    [string]$FoundationParametersFile = 'config/example/observability/cost-management-data-foundation.bicepparam',
 
     [Parameter()]
-    [string]$Project = 'lims',
+    [string]$Project = 'example',
 
     [Parameter()]
     [string]$BillingMonth = 'current',
 
+    # Sent as the ClientType request header on the Cost Management API call.
+    # Deployments may override this value.
     [Parameter()]
-    [string]$ClientType = 'NFI-LIMS-CostCollector',
+    [string]$ClientType = 'CostManagementSnapshotCollector',
 
     [Parameter()]
     [switch]$ImportOnly
@@ -67,10 +62,8 @@ param(
 
 $ErrorActionPreference = 'Stop'
 
-# Pinned API versions. Cost Management matches the proven live request shape
-# (see docs/operations.md). DCR matches the API version already used by
-# modules/observability/cost-management-data-foundation/main.bicep. Logs
-# Ingestion matches the already-proven synthetic-ingestion probe pipeline.
+# Pinned API versions (see docs/operations.md). DCR matches the API version
+# used by modules/observability/cost-management-data-foundation/main.bicep.
 $script:CostManagementApiVersion = '2026-06-01'
 $script:DataCollectionRuleApiVersion = '2024-03-11'
 $script:LogsIngestionApiVersion = '2023-01-01'
@@ -190,8 +183,7 @@ function Get-BillingMonthWindow {
 
 function New-CostManagementRequestBody {
     <#
-      Builds the same proven request shape used by the Cost Management
-      workbook and the earlier throttling diagnostic: ActualCost, Monthly
+      Builds the Cost Management request body: ActualCost, Monthly
       granularity, SubscriptionId + ServiceName grouping, explicit
       SubscriptionId "In" filter. Subscriptions are never dynamically
       enumerated from the management group — only the configured IDs are
@@ -409,15 +401,9 @@ function ConvertTo-NormalizedCostRecords {
     $timeGeneratedText = $CollectionTimestampUtc.ToString('yyyy-MM-ddTHH:mm:ss.fffZ')
     $dateTimeStyles = [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal
 
-    # A [System.Collections.Generic.List[object]] is used instead of the more
-    # obvious "$records = foreach (...) { [ordered]@{...} }; return @($records)"
-    # pattern deliberately: when exactly one row is returned (a real, expected
-    # case — Cost Management responses are not guaranteed to have more than one
-    # row), that pattern's single [ordered] hashtable result gets enumerated by
-    # PowerShell's @() operator into its individual dictionary entries instead
-    # of staying a one-element array containing the hashtable. A generic List
-    # has no such collection/enumeration ambiguity for any row count (0, 1, or
-    # many), so this could never silently corrupt exactly the single-row case.
+    # A generic List (not "$records = foreach (...) {...}; return @($records)")
+    # avoids PowerShell enumerating a single-row [ordered] hashtable result
+    # into its individual dictionary entries instead of a one-element array.
     $records = [System.Collections.Generic.List[object]]::new()
     foreach ($row in $Rows) {
         $subscriptionId = [string]$row[$ColumnIndexes.SubscriptionId]
@@ -437,15 +423,10 @@ function ConvertTo-NormalizedCostRecords {
             })
     }
 
-    # "return $records" streams each normalized record object to the pipeline
-    # individually (not the List container itself) — this is deliberate: the
-    # caller always wraps this call in @() (see Invoke-CostManagementSnapshot-
-    # CollectorMain below), which guarantees a flat, one-element-per-row array
-    # regardless of row count (0, 1, or many). Do not switch this back to
-    # "Write-Output -NoEnumerate $records": that would make the caller receive
-    # the List container as a single object instead of one array element per
-    # Cost row, which is not the record shape the Logs Ingestion API or the
-    # LAW table schema expects.
+    # "return $records" streams each record individually; the caller wraps
+    # this call in @() for a flat, one-element-per-row array regardless of row
+    # count. Do not use "Write-Output -NoEnumerate $records" — that would
+    # return the List container as a single object instead.
     return $records
 }
 
@@ -614,11 +595,9 @@ function Invoke-CostManagementSnapshotCollectorMain {
             'Authorization' = "Bearer $monitorToken"
             'Content-Type'  = 'application/json'
         }
-        # -InputObject (not piping $normalizedRecords into ConvertTo-Json) is
-        # required here for the same single-item reason as above: piping a
-        # one-element collection into ConvertTo-Json serializes it as a bare
-        # JSON object, not a one-element JSON array — but the Logs Ingestion
-        # API always requires a JSON array of records, even for exactly one.
+        # -InputObject (not piping into ConvertTo-Json) is required: piping a
+        # one-element collection serializes as a bare JSON object, not the
+        # one-element JSON array the Logs Ingestion API always requires.
         $ingestionBody = ConvertTo-Json -InputObject $normalizedRecords -Depth 5
 
         # =========================================================================
@@ -643,19 +622,12 @@ function Invoke-CostManagementSnapshotCollectorMain {
     }
 }
 
-# =============================================================================
-# Entry point guard — only run Main when -ImportOnly was not passed.
-#
-# This deliberately does NOT check $MyInvocation.InvocationName (e.g.
-# "-ne '.'" to detect dot-sourcing): AzureCLI@2 with scriptType: pscore and
-# scriptLocation: scriptPath dot-sources the target script to run it, so an
+# Entry point guard — runs Main unless -ImportOnly was passed. Does NOT check
+# $MyInvocation.InvocationName: AzureCLI@2 (scriptType: pscore,
+# scriptLocation: scriptPath) dot-sources this script to run it, so an
 # InvocationName-based guard would incorrectly suppress Main in the real
-# collect-cost-management-snapshot.yml pipeline. -ImportOnly is the explicit,
-# unambiguous switch that only local/offline testing passes — dot-sourcing
-# this file with ". ./Invoke-CostManagementSnapshotCollector.ps1 -ImportOnly"
-# loads only the functions above, with no Azure/network call. Any other
-# invocation (dot-sourced by AzureCLI@2, or run directly) executes Main.
-# =============================================================================
+# pipeline. -ImportOnly is the explicit switch offline tests pass to load only
+# the functions above with no Azure/network call.
 
 if (-not $ImportOnly) {
     Invoke-CostManagementSnapshotCollectorMain -CostParametersFile $CostParametersFile -FoundationParametersFile $FoundationParametersFile -Project $Project -BillingMonth $BillingMonth -ClientType $ClientType
