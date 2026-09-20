@@ -36,8 +36,9 @@ Real, deployable configuration (real subscription/environment mappings, workspac
 - **Cost Management LAW Ingestion Foundation** (`src/observability/cost-management-data-foundation/`, `modules/observability/cost-management-data-foundation/`) — the `CostManagementSnapshot_CL` table and Data Collection Rule that the collector below writes to and the dashboard above reads from.
 - **Cost Management Snapshot Collector** (`scripts/observability/Invoke-CostManagementSnapshotCollector.ps1`, run manually via `.azuredevops/pipelines/collect-cost-management-snapshot.yml`) — queries Azure Cost Management once per run and writes a normalized monthly snapshot; manual-only, no schedule enabled.
 - **Backup & Restore Dashboard** (`src/observability/backup-restore-workbook/`, `modules/observability/backup-restore-workbook/`) — reads exclusively from three existing Azure Backup Log Analytics tables (`AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy`); creates/modifies no Recovery Services Vault, backup policy, protected item, diagnostic setting, or RBAC/identity, and calls no ARM/Resource Graph/Recovery Services API.
+- **Change Tracking & Inventory (CTI) Foundation** (`src/observability/change-tracking-inventory-foundation/`, `modules/observability/change-tracking-inventory-foundation/`) — a dedicated Data Collection Rule and the ChangeTracking solution against an existing Log Analytics workspace (Windows software/services/inventory only); creates no policy assignment, DCR association, VM extension, managed identity, or role assignment.
 
-See [`docs/operations.md`](docs/operations.md) for full operational detail on all five.
+See [`docs/operations.md`](docs/operations.md) for full operational detail on all six.
 
 There are three kinds of pipeline in `.azuredevops/pipelines/`:
 

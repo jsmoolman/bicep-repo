@@ -88,6 +88,19 @@ Reports backup execution, failures, policy evidence, and restore/recovery activi
 - No per-item/database policy-assignment correlation is asserted — Backup Policy Evidence reports only the actual current policy configuration, filtered to an agreed allowlist.
 - Restore-test/business-continuity compliance is not asserted — absence of restore/recovery evidence is reported as exactly that, never as a pass/fail result.
 
+### Change Tracking & Inventory (CTI) Foundation
+
+Deploys a dedicated Data Collection Rule and the ChangeTracking solution against an existing Log Analytics workspace, using the Azure Monitor Agent Change Tracking & Inventory model.
+
+- **Reusable module:** [`modules/observability/change-tracking-inventory-foundation/main.bicep`](../modules/observability/change-tracking-inventory-foundation/main.bicep) — deploys into the same resource group as the referenced workspace (a Change Tracking DCR requirement).
+- **Reusable entrypoint:** [`src/observability/change-tracking-inventory-foundation/main.bicep`](../src/observability/change-tracking-inventory-foundation/main.bicep) — subscription-scoped; derives the target resource group from `workspaceSubscriptionId`/`workspaceResourceGroupName`.
+- **Configuration:** see [`config/example/observability/change-tracking-inventory-foundation.bicepparam`](../config/example/observability/change-tracking-inventory-foundation.bicepparam) for the parameter shape.
+- **Deployment pipeline:** [`deploy-change-tracking-inventory-foundation.yml`](../.azuredevops/pipelines/deploy-change-tracking-inventory-foundation.yml) — manual-only, default `what-if`, reusing the shared `templates/deploy-observability-workbook-steps.yml` for its `what-if` action.
+
+**Collection scope:** Windows only. Software, services, and inventory collection are enabled (Microsoft's default collection frequencies); files and registry collection are disabled, with no custom file paths or registry keys configured.
+
+**What this foundation does not do:** it creates no policy assignment, no DCR association, no VM extension, no managed identity, and no role assignment. Policy-driven onboarding of the preprod pilot (and any other scope) is a separate, later step performed through the Azure portal after this DCR is deployed and validated.
+
 ## Continuous Integration
 
 [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml) is the only *automatically triggered* pipeline in this repository. It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger.
@@ -96,7 +109,7 @@ Reports backup execution, failures, policy evidence, and restore/recovery activi
 2. **Bicep parameter file validation** — every `*.bicepparam` file is built to confirm it resolves against its composition.
 3. **Prohibited resource type guard** — a static search blocks any checked-in Bicep or parameter file that references Microsoft Graph, management-group creation, subscription creation, or role assignment/definition resource types, enforcing the boundaries in [`docs/scope.md`](scope.md).
 
-Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the LAW Ingestion Foundation pipeline reuses that same template only for its `what-if` action.
+Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard, Change Tracking & Inventory Foundation) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the two foundation pipelines (Cost Management LAW Ingestion, Change Tracking & Inventory) reuse that same template only for their `what-if` action.
 
 One further manual, non-deployment pipeline exists: [`collect-cost-management-snapshot.yml`](../.azuredevops/pipelines/collect-cost-management-snapshot.yml) (the collector, no `schedules:` block). It wraps a script rather than performing a Bicep deployment, and is kept out of `ci.yml`'s automatic trigger for the same reason as the deployment pipelines — it must never run unattended before its output is reviewed.
 

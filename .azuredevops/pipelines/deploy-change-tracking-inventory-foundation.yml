@@ -1,0 +1,114 @@
+# =============================================================================
+# Deploy Change Tracking & Inventory (CTI) Foundation
+# =============================================================================
+# Purpose:
+#   Deploys the reusable Change Tracking & Inventory foundation composition
+#   (src/observability/change-tracking-inventory-foundation/main.bicep) using
+#   a project-specific parameter file. Creates only the CTI Data Collection
+#   Rule and the ChangeTracking solution against an existing Log Analytics
+#   workspace. Defaults to this repository's example configuration; accepts a
+#   different parameter-file path and service connection for reuse by another
+#   project.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action.
+#
+# The `what-if` action reuses templates/deploy-observability-workbook-steps.yml
+# (generic subscription-scope Bicep-parameter-file logic). The `deploy` action
+# is not routed through that template, since its post-deploy step expects
+# workbook-specific outputs this composition does not produce; `deploy` below
+# duplicates only the differing post-deploy output summary.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (Contributor on the resource group hosting the Log Analytics workspace) — no default; the real value is customer-specific configuration
+    type: string
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/example/observability/change-tracking-inventory-foundation.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - template: templates/deploy-observability-workbook-steps.yml
+        parameters:
+          templateFile: 'src/observability/change-tracking-inventory-foundation/main.bicep'
+          deploymentNamePrefix: 'change-tracking-inventory-foundation'
+          action: what-if
+          serviceConnection: ${{ parameters.serviceConnection }}
+          parametersFile: ${{ parameters.parametersFile }}
+          location: ${{ parameters.location }}
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - checkout: self
+
+      - task: AzureCLI@2
+        displayName: 'Bicep build and lint validation'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            echo "== bicep build: src/observability/change-tracking-inventory-foundation/main.bicep =="
+            az bicep build --file "src/observability/change-tracking-inventory-foundation/main.bicep" --stdout > /dev/null
+            echo "== bicep lint: src/observability/change-tracking-inventory-foundation/main.bicep =="
+            az bicep lint --file "src/observability/change-tracking-inventory-foundation/main.bicep"
+            echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+            az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+
+      - task: AzureCLI@2
+        name: deployFoundation
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "change-tracking-inventory-foundation-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            dcrResourceId=$(echo "$outputs"          | jq -r '.dataCollectionRuleResourceId.value')
+            dcrImmutableId=$(echo "$outputs"         | jq -r '.dataCollectionRuleImmutableId.value')
+            solutionResourceId=$(echo "$outputs"     | jq -r '.changeTrackingSolutionResourceId.value')
+
+            echo "##vso[task.setvariable variable=dataCollectionRuleResourceId;isOutput=true]$dcrResourceId"
+
+            echo "========================================="
+            echo "Change Tracking & Inventory foundation deployed successfully"
+            echo "========================================="
+            echo "  DCR resource ID       : $dcrResourceId"
+            echo "  DCR immutable ID      : $dcrImmutableId"
+            echo "  ChangeTracking solution: $solutionResourceId"
+            echo ""
+            echo "Reminder: policy assignment, DCR association, and VM"
+            echo "onboarding are not performed by this pipeline or this"
+            echo "repository — see docs/operations.md."

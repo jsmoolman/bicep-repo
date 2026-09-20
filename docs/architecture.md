@@ -27,13 +27,14 @@ This repository does not manage management groups, subscription vending, tenant-
 
 ## Current state
 
-Five real operational capabilities exist, following the same reusable-module + configuration pattern (one is a script, not a Bicep module, but follows the same "one reusable implementation, configuration drives differences" discipline):
+Six real operational capabilities exist, following the same reusable-module + configuration pattern (one is a script, not a Bicep module, but follows the same "one reusable implementation, configuration drives differences" discipline):
 
 - **VM Availability SLA Dashboard** — reusable module (`modules/observability/vm-availability-sla-dashboard-v2/`), subscription-scoped composition (`src/observability/vm-availability-sla-dashboard-v2/`), a manual-only deployment pipeline.
 - **Cost Management Dashboard** workbook (`modules/observability/cost-management-workbook/`, `src/observability/cost-management-workbook/`) that reads monthly cost snapshots from `CostManagementSnapshot_CL` (below).
 - **Cost Management LAW Ingestion Foundation** — a custom Log Analytics table (`CostManagementSnapshot_CL`) plus a Direct-ingestion Data Collection Rule, against an existing central Log Analytics workspace (`modules/observability/cost-management-data-foundation/`, `src/observability/cost-management-data-foundation/`).
 - **Cost Management Snapshot Collector** (`scripts/observability/Invoke-CostManagementSnapshotCollector.ps1`) — one management-group Cost Management query per run, normalized into the foundation's 9-column shape, Environment mapped from repository configuration, written via one Logs Ingestion API POST. Run manually via `.azuredevops/pipelines/collect-cost-management-snapshot.yml`; no schedule is enabled yet.
 - **Backup & Restore Dashboard** workbook (`modules/observability/backup-restore-workbook/`, `src/observability/backup-restore-workbook/`) that reads exclusively from existing Azure Backup Log Analytics tables (`AddonAzureBackupJobs`, `CoreAzureBackup`, `AddonAzureBackupPolicy`) — it creates or modifies no vault, backup policy, protected item, diagnostic setting, or RBAC/identity resource.
+- **Change Tracking & Inventory (CTI) Foundation** — a dedicated Data Collection Rule (Windows extension, software/services/inventory only) plus the ChangeTracking solution, against an existing Log Analytics workspace (`modules/observability/change-tracking-inventory-foundation/`, `src/observability/change-tracking-inventory-foundation/`). Policy assignment, DCR association, and VM onboarding are separate, later concerns.
 
 Data flow (Cost Management):
 
