@@ -1,25 +1,16 @@
 # =============================================================================
 # Deploy Cost Management Dashboard
 # =============================================================================
-# Purpose:
-#   Deploys the reusable Cost Management Dashboard Workbook composition
-#   (src/observability/cost-management-workbook/main.bicep) using a
-#   project-specific parameter file. Defaults to the LIMS configuration but
-#   accepts a different parameter-file path so the same reusable module and
-#   entrypoint can later be reused for another NFI project. The workbook reads
-#   exclusively from the CostManagementSnapshot_CL Log Analytics table — it
-#   does not call the Azure Cost Management API itself.
+# Deploys the Cost Management Dashboard Workbook composition
+# (src/observability/cost-management-workbook/main.bicep) using a
+# project-specific parameter file. Defaults to the LIMS configuration; accepts
+# a different parameter-file path for reuse by another project.
 #
-# Commissioning note:
-#   trigger/pr are intentionally disabled. This pipeline does not run
-#   automatically on push or merge. It is run manually (Run pipeline) only
-#   after a reviewed, explicit decision to validate or deploy. This capability
-#   has not yet been validated against a live Cost Management/Log Analytics
-#   endpoint — see docs/operations.md for outstanding runtime validation.
+# Manual only: trigger/pr are disabled. Run via "Run pipeline" with an
+# explicit what-if (default) or deploy action.
 #
-# Deployment steps are shared with the VM Availability SLA Dashboard v2
-# pipeline via templates/deploy-observability-workbook-steps.yml — this file
-# supplies only this capability's own defaults.
+# Deployment steps are shared with other workbook pipelines via
+# templates/deploy-observability-workbook-steps.yml.
 # =============================================================================
 
 trigger: none
