@@ -27,6 +27,35 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2025-07-01' existin
   name: workspaceName
 }
 
+// ─── ChangeTracking solution ────────────────────────────────────────────────
+// Microsoft.OperationsManagement/solutions, ChangeTracking(<workspaceName>)
+// plan, gallery product OMSGallery/ChangeTracking — the current Microsoft
+// Change Tracking solution registration against the same existing workspace.
+// Declared before the DCR below because the DCR depends on it (see that
+// resource's dependsOn): on a clean workspace, this solution is what
+// registers the ConfigurationChange/ConfigurationData tables the DCR's
+// streams write into. Without an explicit dependency, ARM may deploy these
+// two sibling resources in parallel and validate the DCR before those tables
+// exist, failing with "Table for output stream '...' is not available for
+// destination '...'".
+
+var changeTrackingSolutionName = 'ChangeTracking(${workspaceName})'
+
+resource changeTrackingSolution 'Microsoft.OperationsManagement/solutions@2015-11-01-preview' = {
+  name: changeTrackingSolutionName
+  location: location
+  tags: tags
+  plan: {
+    name: changeTrackingSolutionName
+    product: 'OMSGallery/ChangeTracking'
+    promotionCode: ''
+    publisher: 'Microsoft'
+  }
+  properties: {
+    workspaceResourceId: workspace.id
+  }
+}
+
 // ─── Data Collection Rule ──────────────────────────────────────────────────────
 // Shape follows Microsoft's current Change Tracking & Inventory AMA DCR sample
 // (CtDcrCreation.json): one Windows extension data source
@@ -92,28 +121,12 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
       }
     ]
   }
-}
-
-// ─── ChangeTracking solution ────────────────────────────────────────────────
-// Microsoft.OperationsManagement/solutions, ChangeTracking(<workspaceName>)
-// plan, gallery product OMSGallery/ChangeTracking — the current Microsoft
-// Change Tracking solution registration against the same existing workspace.
-
-var changeTrackingSolutionName = 'ChangeTracking(${workspaceName})'
-
-resource changeTrackingSolution 'Microsoft.OperationsManagement/solutions@2015-11-01-preview' = {
-  name: changeTrackingSolutionName
-  location: location
-  tags: tags
-  plan: {
-    name: changeTrackingSolutionName
-    product: 'OMSGallery/ChangeTracking'
-    promotionCode: ''
-    publisher: 'Microsoft'
-  }
-  properties: {
-    workspaceResourceId: workspace.id
-  }
+  // Explicit, smallest-justified dependency: the ChangeTracking solution
+  // registers the CTI tables this DCR's streams require. Textual order alone
+  // does not create an ARM dependency — this dependsOn is the functional fix.
+  dependsOn: [
+    changeTrackingSolution
+  ]
 }
 
 // ─── Outputs ────────────────────────────────────────────────────────────────
