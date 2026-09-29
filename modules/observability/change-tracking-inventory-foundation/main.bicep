@@ -31,13 +31,9 @@ resource workspace 'Microsoft.OperationalInsights/workspaces@2025-07-01' existin
 // Microsoft.OperationsManagement/solutions, ChangeTracking(<workspaceName>)
 // plan, gallery product OMSGallery/ChangeTracking — the current Microsoft
 // Change Tracking solution registration against the same existing workspace.
-// Declared before the DCR below because the DCR depends on it (see that
-// resource's dependsOn): on a clean workspace, this solution is what
-// registers the ConfigurationChange/ConfigurationData tables the DCR's
-// streams write into. Without an explicit dependency, ARM may deploy these
-// two sibling resources in parallel and validate the DCR before those tables
-// exist, failing with "Table for output stream '...' is not available for
-// destination '...'".
+// Registers the ConfigurationChange and ConfigurationData tables required by
+// the CTI streams. Declared before the DCR below, which explicitly depends
+// on it (see that resource's dependsOn).
 
 var changeTrackingSolutionName = 'ChangeTracking(${workspaceName})'
 
@@ -121,9 +117,10 @@ resource dcr 'Microsoft.Insights/dataCollectionRules@2024-03-11' = {
       }
     ]
   }
-  // Explicit, smallest-justified dependency: the ChangeTracking solution
-  // registers the CTI tables this DCR's streams require. Textual order alone
-  // does not create an ARM dependency — this dependsOn is the functional fix.
+  // The ChangeTracking solution registers the ConfigurationChange and
+  // ConfigurationData tables required by the CTI streams. Keep the DCR
+  // explicitly dependent on the solution so ARM does not validate them
+  // concurrently on a pristine workspace.
   dependsOn: [
     changeTrackingSolution
   ]
