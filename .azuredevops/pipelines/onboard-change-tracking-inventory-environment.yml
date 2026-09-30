@@ -1,0 +1,250 @@
+# =============================================================================
+# Onboard Change Tracking & Inventory (CTI) — environment
+# =============================================================================
+# Purpose:
+#   Orchestrates the proven CTI onboarding sequence for a single workload
+#   environment (first target: ACC), across two subscriptions:
+#     1. CTI foundation (DCR + ChangeTracking solution) in the management
+#        subscription — deploy-change-tracking-inventory-foundation.yml is
+#        not replaced or altered by this pipeline.
+#     2. Microsoft's built-in "Enable ChangeTracking and Inventory for
+#        virtual machines" initiative, assigned to the workload subscription.
+#     3. Remediation of existing Windows VMs in the workload subscription,
+#        using the same three policy definition reference IDs observed in
+#        the proven preprd pilot.
+#
+#   Management-subscription steps use managementServiceConnection; workload
+#   subscription (policy assignment + remediation) steps use
+#   workloadServiceConnection. No single service connection is assumed to
+#   have rights to both subscriptions.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action. what-if never creates
+# remediation tasks.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: environment
+    displayName: Target workload environment
+    type: string
+    default: acc
+    values:
+      - dev
+      - tst
+      - acc
+      - preprd
+      - prd
+
+  - name: managementServiceConnection
+    displayName: Azure DevOps service connection with permission for the CTI foundation deployment in the management subscription — no default; the real value is customer-specific configuration
+    type: string
+
+  - name: workloadServiceConnection
+    displayName: Azure DevOps service connection with permission for the policy assignment and remediation in the target workload subscription — no default; the real value is customer-specific configuration
+    type: string
+
+  - name: foundationParametersFile
+    displayName: Path to the environment-specific CTI foundation Bicep parameter file
+    type: string
+    default: 'config/example/observability/change-tracking-inventory-foundation.bicepparam'
+
+  - name: policyParametersFile
+    displayName: Path to the environment-specific CTI policy-assignment Bicep parameter file
+    type: string
+    default: 'config/example/observability/change-tracking-inventory-policy.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build/lint/build-params validation'
+    inputs:
+      azureSubscription: ${{ parameters.managementServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        echo "== bicep build: src/observability/change-tracking-inventory-foundation/main.bicep =="
+        az bicep build --file "src/observability/change-tracking-inventory-foundation/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/observability/change-tracking-inventory-foundation/main.bicep =="
+        az bicep lint --file "src/observability/change-tracking-inventory-foundation/main.bicep"
+        echo "== bicep build: src/observability/change-tracking-inventory-policy/main.bicep =="
+        az bicep build --file "src/observability/change-tracking-inventory-policy/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/observability/change-tracking-inventory-policy/main.bicep =="
+        az bicep lint --file "src/observability/change-tracking-inventory-policy/main.bicep"
+        echo "== bicep build-params: ${{ parameters.foundationParametersFile }} =="
+        az bicep build-params --file "${{ parameters.foundationParametersFile }}" --stdout > /dev/null
+        echo "== bicep build-params: ${{ parameters.policyParametersFile }} =="
+        az bicep build-params --file "${{ parameters.policyParametersFile }}" --stdout > /dev/null
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'CTI foundation what-if (${{ parameters.environment }})'
+        inputs:
+          azureSubscription: ${{ parameters.managementServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az deployment sub what-if \
+              --name "cti-onboard-foundation-${{ parameters.environment }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.foundationParametersFile }}"
+
+      - task: AzureCLI@2
+        displayName: 'CTI policy assignment what-if (${{ parameters.environment }})'
+        inputs:
+          azureSubscription: ${{ parameters.workloadServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az deployment sub what-if \
+              --name "cti-onboard-policy-${{ parameters.environment }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.policyParametersFile }}"
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployFoundation
+        displayName: '1. Deploy CTI foundation (${{ parameters.environment }})'
+        inputs:
+          azureSubscription: ${{ parameters.managementServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "cti-onboard-foundation-${{ parameters.environment }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.foundationParametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            dcrResourceId=$(echo "$outputs" | jq -r '.dataCollectionRuleResourceId.value')
+            echo "##vso[task.setvariable variable=dcrResourceId;isOutput=true]$dcrResourceId"
+            echo "CTI foundation deployed for ${{ parameters.environment }}. DCR resource ID: $dcrResourceId"
+
+      - task: AzureCLI@2
+        name: deployPolicy
+        displayName: '2. Deploy CTI policy assignment (${{ parameters.environment }})'
+        inputs:
+          azureSubscription: ${{ parameters.workloadServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "cti-onboard-policy-${{ parameters.environment }}-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.policyParametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            policyAssignmentId=$(echo "$outputs" | jq -r '.policyAssignmentId.value')
+            echo "##vso[task.setvariable variable=policyAssignmentId;isOutput=true]$policyAssignmentId"
+            echo "CTI policy assignment deployed for ${{ parameters.environment }}. Assignment resource ID: $policyAssignmentId"
+
+      - task: AzureCLI@2
+        displayName: '3. Remediate existing ${{ parameters.environment }} Windows VMs'
+        inputs:
+          azureSubscription: ${{ parameters.workloadServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            policyAssignmentId="$(deployPolicy.policyAssignmentId)"
+            buildId="$(Build.BuildId)"
+
+            # Bounded status-poll loop — no arbitrary sleep is used as the
+            # sequencing mechanism. Fails (non-zero return) on a terminal
+            # failure/cancellation state, on a non-zero failedDeployments
+            # count once complete, or on exhausting the poll budget.
+            wait_for_remediation() {
+              local remediationName="$1"
+              local maxAttempts=40
+              local sleepSeconds=15
+              local attempt=1
+              local state=""
+
+              while [ "$attempt" -le "$maxAttempts" ]; do
+                state=$(az policy remediation show --name "$remediationName" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+                echo "  [$remediationName] attempt $attempt/$maxAttempts: provisioningState=$state"
+
+                case "$state" in
+                  Succeeded|Complete)
+                    failedDeployments=$(az policy remediation show --name "$remediationName" --query "properties.deploymentSummary.failedDeployments" -o tsv 2>/dev/null || echo 0)
+                    if [ "${failedDeployments:-0}" != "0" ]; then
+                      echo "Remediation '$remediationName' completed with $failedDeployments failed deployment(s)."
+                      return 1
+                    fi
+                    echo "Remediation '$remediationName' completed successfully with no failed deployments."
+                    return 0
+                    ;;
+                  Failed|Canceled|Cancelled)
+                    echo "Remediation '$remediationName' ended in terminal failure state '$state'."
+                    return 1
+                    ;;
+                esac
+
+                attempt=$((attempt + 1))
+                sleep "$sleepSeconds"
+              done
+
+              echo "Remediation '$remediationName' did not reach a terminal state within the allotted poll budget."
+              return 1
+            }
+
+            echo "=== Remediation 1/3: Configure Virtual Machines to use Built-In User-Assigned Managed Identity ==="
+            remediationName1="cti-remediate-identity-${{ parameters.environment }}-${buildId}"
+            az policy remediation create \
+              --name "$remediationName1" \
+              --policy-assignment "$policyAssignmentId" \
+              --definition-reference-id "adduserassignedmanagedidentity_vm" \
+              --resource-discovery-mode ReEvaluateCompliance
+            wait_for_remediation "$remediationName1"
+
+            echo "=== Remediation 2/3: Configure ChangeTracking Extension for Windows virtual machines ==="
+            remediationName2="cti-remediate-extension-${{ parameters.environment }}-${buildId}"
+            az policy remediation create \
+              --name "$remediationName2" \
+              --policy-assignment "$policyAssignmentId" \
+              --definition-reference-id "deploychangetrackingextensionwindowsvm" \
+              --resource-discovery-mode ReEvaluateCompliance
+            wait_for_remediation "$remediationName2"
+
+            echo "=== Remediation 3/3: Configure Windows Virtual Machines to be associated with a Data Collection Rule for ChangeTracking and Inventory ==="
+            remediationName3="cti-remediate-dcra-${{ parameters.environment }}-${buildId}"
+            az policy remediation create \
+              --name "$remediationName3" \
+              --policy-assignment "$policyAssignmentId" \
+              --definition-reference-id "dcrawindowsvmchangetrackingandinventory" \
+              --resource-discovery-mode ReEvaluateCompliance
+            wait_for_remediation "$remediationName3"
+
+            echo "========================================="
+            echo "CTI onboarding remediation completed successfully for ${{ parameters.environment }}"
+            echo "========================================="
