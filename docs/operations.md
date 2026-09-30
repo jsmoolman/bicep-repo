@@ -101,6 +101,23 @@ Deploys a dedicated Data Collection Rule and the ChangeTracking solution against
 
 **What this foundation does not do:** it creates no policy assignment, no DCR association, no VM extension, no managed identity, and no role assignment. Policy assignment, remediation, DCR association, identity, and VM onboarding are handled separately from this foundation.
 
+### Change Tracking & Inventory (CTI) Dashboard
+
+Reports change activity and current software/service inventory, read entirely from the existing `ConfigurationChange`/`ConfigurationData` Log Analytics tables populated by the CTI foundation and onboarding pipeline above. This capability creates no DCR, policy assignment, identity, VM extension, DCR association, or LAW configuration, and makes no ARM or Resource Graph call.
+
+- **Reusable module:** [`modules/observability/change-tracking-inventory-workbook/main.bicep`](../modules/observability/change-tracking-inventory-workbook/main.bicep) — no subscription IDs or workspace ID hardcoded; all are parameters.
+- **Reusable entrypoint:** [`src/observability/change-tracking-inventory-workbook/main.bicep`](../src/observability/change-tracking-inventory-workbook/main.bicep) — explicitly scoped to `resourceGroup(workbookSubscriptionId, workbookResourceGroupName)`, independent of the Log Analytics workspace queried.
+- **Configuration:** see [`config/example/observability/change-tracking-inventory-workbook.bicepparam`](../config/example/observability/change-tracking-inventory-workbook.bicepparam) for the parameter shape.
+- **Deployment pipeline:** [`deploy-change-tracking-inventory-workbook.yml`](../.azuredevops/pipelines/deploy-change-tracking-inventory-workbook.yml) — manual-only, default `what-if`, reusing `templates/deploy-observability-workbook-steps.yml` for both actions, same as the other workbook pipelines.
+
+**Parameters:** **Workload** (static text, the Computer-name prefix used by every KQL query); **Report Month** (single-select, current month + previous 12 completed months); **Environment** (multi-select, populated dynamically from `ConfigurationData` — never a hard-coded list — with a synthetic "All" choice selected by default).
+
+**Historical vs. current-state sections:** Change Activity (headline tiles, daily trend, Recent Changes) is bounded by the selected Report Month. Coverage, Software Inventory, Service Inventory, and Configuration Differences report the latest observed state (a 30-day lookback) and ignore Report Month entirely — the Overview tab shows one of each kind side by side.
+
+**Inventory snapshot semantics:** for each VM, the Software and WindowsServices inventories are independent "latest collection burst" snapshots (max `TimeGenerated` per `Computer` per `ConfigDataType`, then every row within 5 minutes of that time) — never a combined whole-machine snapshot, and never an unlimited-history `arg_max()`.
+
+**Configuration Differences (peer comparison):** compares same-role VMs (Application: Computer ending `-001`; SQL: Computer ending `-002`) across the currently selected Environment set. Status values are purely factual (`Missing from peer`, `Version differs`, `Startup type differs`, `State differs`, `Startup type & state differ`, `Same`) — no environment is treated as authoritative or a baseline, and "Expected Peers" is always the live count of participating peer environments, never a fixed number.
+
 ## Continuous Integration
 
 [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml) is the only *automatically triggered* pipeline in this repository. It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger.
@@ -109,7 +126,9 @@ Deploys a dedicated Data Collection Rule and the ChangeTracking solution against
 2. **Bicep parameter file validation** — every `*.bicepparam` file is built to confirm it resolves against its composition.
 3. **Prohibited resource type guard** — a static search blocks any checked-in Bicep or parameter file that references Microsoft Graph, management-group creation, subscription creation, or role assignment/definition resource types, enforcing the boundaries in [`docs/scope.md`](scope.md).
 
-Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard, Change Tracking & Inventory Foundation) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the two foundation pipelines (Cost Management LAW Ingestion, Change Tracking & Inventory) reuse that same template only for their `what-if` action.
+Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard, Change Tracking & Inventory Foundation, Change Tracking & Inventory Dashboard) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the two foundation pipelines (Cost Management LAW Ingestion, Change Tracking & Inventory Foundation) reuse that same template only for their `what-if` action.
+
+A separate, non-template pipeline, [`onboard-change-tracking-inventory-environment.yml`](../.azuredevops/pipelines/onboard-change-tracking-inventory-environment.yml), orchestrates CTI foundation deploy, policy assignment deploy, and ordered remediation for a given environment; it is unrelated to the dashboard/workbook above.
 
 One further manual, non-deployment pipeline exists: [`collect-cost-management-snapshot.yml`](../.azuredevops/pipelines/collect-cost-management-snapshot.yml) (the collector, no `schedules:` block). It wraps a script rather than performing a Bicep deployment, and is kept out of `ci.yml`'s automatic trigger for the same reason as the deployment pipelines — it must never run unattended before its output is reviewed.
 

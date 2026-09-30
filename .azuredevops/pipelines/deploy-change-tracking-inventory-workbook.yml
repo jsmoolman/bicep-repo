@@ -1,0 +1,63 @@
+# =============================================================================
+# Deploy Change Tracking & Inventory (CTI) Dashboard
+# =============================================================================
+# Purpose:
+#   Deploys the reusable Change Tracking & Inventory Dashboard Workbook
+#   composition (src/observability/change-tracking-inventory-workbook/main.bicep)
+#   using a project-specific parameter file. Defaults to this repository's
+#   example configuration; accepts a different parameter-file path and
+#   service connection for reuse by another project. The workbook reads
+#   exclusively from the existing ConfigurationChange and ConfigurationData
+#   Log Analytics tables already populated by the CTI foundation and
+#   onboarding pipeline — it makes no ARM or Resource Graph call, and this
+#   pipeline deploys only the workbook resource: no DCR, policy assignment,
+#   identity, VM extension, DCR association, or LAW configuration mutation
+#   occurs here.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action.
+#
+# Deployment steps are shared with the VM Availability SLA Dashboard v2, Cost
+# Management Dashboard, and Backup & Restore Dashboard pipelines via
+# templates/deploy-observability-workbook-steps.yml.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: managementServiceConnection
+    displayName: Azure DevOps service connection (Contributor on the workbook-hosting subscription; this pipeline only deploys the workbook resource — it does not touch CTI foundation, policy, identity, or VM resources) — no default; the real value is customer-specific configuration
+    type: string
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/example/observability/change-tracking-inventory-workbook.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - template: templates/deploy-observability-workbook-steps.yml
+    parameters:
+      templateFile: 'src/observability/change-tracking-inventory-workbook/main.bicep'
+      deploymentNamePrefix: 'cti-workbook'
+      action: ${{ parameters.action }}
+      serviceConnection: ${{ parameters.managementServiceConnection }}
+      parametersFile: ${{ parameters.parametersFile }}
+      location: ${{ parameters.location }}
