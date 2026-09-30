@@ -244,7 +244,7 @@ steps:
             # only once the show call itself has already succeeded.
             wait_for_remediation() {
               local remediationName="$1"
-              local maxAttempts=40
+              local maxAttempts=120
               local sleepSeconds=15
               local attempt=1
               local remediationJson=""
