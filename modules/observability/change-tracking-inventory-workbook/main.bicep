@@ -21,17 +21,25 @@ param workspaceResourceId string
 @description('Tags applied to the workbook resource.')
 param tags object = {}
 
-// ─── Explicit LAW query time context ──────────────────────────────────────────
-// A generous fixed window so the Azure portal time picker can never silently
-// truncate results. Historical (change-event) queries are bounded instead by
-// explicit Report Month text substitution inside the KQL itself; current-
-// state (inventory/coverage) queries are bounded by an explicit ago(30d)
-// lookback inside the KQL itself. This timeContext only prevents an
-// unrelated, narrower portal-level time-range control from cutting either
-// off.
+// ─── Explicit LAW query time contexts ─────────────────────────────────────────
+// Two distinct contexts, so the Azure portal time-range control can never
+// silently truncate either query family below its own KQL-enforced boundary.
+//
+// Historical (change-event) queries are bounded by explicit Report Month
+// text substitution inside the KQL itself (MonthStart/MonthEnd) — this
+// context only needs to be wide enough to cover every selectable Report
+// Month (current month + previous 12 completed months, i.e. up to ~397
+// days back in the worst case). 400 days gives a small, explicit margin
+// without being unlimited.
+var historicalQueryTimeContext = {
+  durationMs: 34560000000 // 400 days
+}
 
-var lawQueryTimeContext = {
-  durationMs: 7776000000 // 90 days
+// Current-state (inventory/coverage/differences) queries are bounded by an
+// explicit ago(30d) lookback inside the KQL itself — this context matches
+// that same 30-day window so the portal time picker cannot cut it shorter.
+var currentStateQueryTimeContext = {
+  durationMs: 2592000000 // 30 days
 }
 
 // ─── KQL: shared fragments ────────────────────────────────────────────────────
@@ -50,7 +58,13 @@ var environmentFilterKql = '| where \'*\' in ({Environment}) or Environment in (
 
 // Computer -> Environment / Role derivation, validated against real CTI
 // telemetry (see module description). Never a hard-coded environment list.
-var envExtractKql = '| extend Environment = extract(@"^{workloadName}-([^-]+)-", 1, Computer)\n'
+// The isnotempty(Environment) filter is load-bearing: it removes any row
+// whose Computer does not match this workbook's {workloadName} prefix
+// *before* the Environment-selection condition below is ever evaluated —
+// otherwise such a row's blank Environment would incorrectly pass the "*"
+// (All) branch of environmentFilterKql and leak unrelated-workload data
+// into every query that reuses this fragment.
+var envExtractKql = '| extend Environment = extract(@"^{workloadName}-([^-]+)-", 1, Computer)\n| where isnotempty(Environment)\n'
 var roleCaseKql = '| extend Role = case(\n    Computer endswith "-001", "Application",\n    Computer endswith "-002", "SQL",\n    "Other")\n'
 
 // Practical current-state lookback (Software Inventory, Service Inventory,
@@ -122,7 +136,7 @@ var kqlSoftwareInventoryTiles = 'ConfigurationData\n| where ConfigDataType == "S
 var kqlSoftwareInventoryGrid = 'ConfigurationData\n| where ConfigDataType == "Software"\n${currentStateLookbackKql}| join kind=inner (\n    ConfigurationData\n    | where ConfigDataType == "Software"\n    ${currentStateLookbackKql}| summarize LatestTime = max(TimeGenerated) by Computer\n) on Computer\n| where TimeGenerated between (LatestTime - 5m .. LatestTime)\n| summarize arg_max(TimeGenerated, *)\n    by Computer, SoftwareName, CurrentVersion, Publisher, Architecture, Location\n${envExtractKql}${roleCaseKql}${environmentFilterKql}| where "{SoftwareTypeFilter}" == "All" or SoftwareType == "{SoftwareTypeFilter}"\n| where isempty("{SoftwareSearch}") or SoftwareName has "{SoftwareSearch}"\n| project\n    Environment,\n    Role,\n    Computer,\n    Software = SoftwareName,\n    ["Version / Status"] = CurrentVersion,\n    Publisher,\n    Type = SoftwareType,\n    Architecture,\n    ["Last Observed"] = TimeGenerated,\n    Location,\n    SoftwareDescription\n| order by Environment asc, Role asc, Computer asc, Software asc'
 
 // ─── KQL: Service Inventory (current state — ignores Report Month) ──────────
-var kqlServiceInventoryTiles = 'ConfigurationData\n| where ConfigDataType == "WindowsServices"\n${currentStateLookbackKql}| join kind=inner (\n    ConfigurationData\n    | where ConfigDataType == "WindowsServices"\n    ${currentStateLookbackKql}| summarize LatestTime = max(TimeGenerated) by Computer\n) on Computer\n| where TimeGenerated between (LatestTime - 5m .. LatestTime)\n| summarize arg_max(TimeGenerated, *)\n    by Computer, SvcName\n${envExtractKql}${environmentFilterKql}| summarize\n    ServicesObserved = count(),\n    Running = countif(SvcState == "Running"),\n    Stopped = countif(SvcState == "Stopped"),\n    Automatic = countif(SvcStartupType == "Automatic"),\n    Disabled = countif(SvcStartupType == "Disabled")\n| project Metric = "Services Observed", Value = ServicesObserved\n| union (print Metric = "Running", Value = Running)\n| union (print Metric = "Stopped", Value = Stopped)\n| union (print Metric = "Automatic", Value = Automatic)\n| union (print Metric = "Disabled", Value = Disabled)'
+var kqlServiceInventoryTiles = 'ConfigurationData\n| where ConfigDataType == "WindowsServices"\n${currentStateLookbackKql}| join kind=inner (\n    ConfigurationData\n    | where ConfigDataType == "WindowsServices"\n    ${currentStateLookbackKql}| summarize LatestTime = max(TimeGenerated) by Computer\n) on Computer\n| where TimeGenerated between (LatestTime - 5m .. LatestTime)\n| summarize arg_max(TimeGenerated, *)\n    by Computer, SvcName\n${envExtractKql}${environmentFilterKql}| summarize\n    ServicesObserved = count(),\n    Running = countif(SvcState == "Running"),\n    Stopped = countif(SvcState == "Stopped"),\n    Automatic = countif(SvcStartupType in ("Auto", "Automatic")),\n    Disabled = countif(SvcStartupType == "Disabled")\n| project Metric = "Services Observed", Value = ServicesObserved\n| union (print Metric = "Running", Value = Running)\n| union (print Metric = "Stopped", Value = Stopped)\n| union (print Metric = "Automatic", Value = Automatic)\n| union (print Metric = "Disabled", Value = Disabled)'
 
 var kqlServiceInventoryGrid = 'ConfigurationData\n| where ConfigDataType == "WindowsServices"\n${currentStateLookbackKql}| join kind=inner (\n    ConfigurationData\n    | where ConfigDataType == "WindowsServices"\n    ${currentStateLookbackKql}| summarize LatestTime = max(TimeGenerated) by Computer\n) on Computer\n| where TimeGenerated between (LatestTime - 5m .. LatestTime)\n| summarize arg_max(TimeGenerated, *)\n    by Computer, SvcName\n${envExtractKql}${roleCaseKql}${environmentFilterKql}| project\n    Environment,\n    Role,\n    Computer,\n    Service = SvcDisplayName,\n    ["Service Name"] = SvcName,\n    State = SvcState,\n    ["Startup Type"] = SvcStartupType,\n    Account = SvcAccount,\n    Path = SvcPath,\n    ["Last Observed"] = TimeGenerated,\n    SvcDescription\n| order by Environment asc, Role asc, Computer asc, Service asc'
 
@@ -145,7 +159,7 @@ var compactItemSpacing = {
   margin: '0px 0px 8px 0px'
 }
 
-// Standard Azure Workbooks tab-bar idiom (LinksItem/1.0, style "tabs") since
+// Standard Azure Workbooks tab-bar idiom (LinkItem/1.0, style "tabs") since
 // none of this repository's existing single-page workbooks have a multi-
 // section navigation pattern to reuse. SelectedTab is a hidden parameter
 // (default "Overview") that each link updates on click; each content group
@@ -242,7 +256,7 @@ var workbookContent = {
     {
       type: 11
       content: {
-        version: 'LinksItem/1.0'
+        version: 'LinkItem/1.0'
         style: 'tabs'
         links: tabLinks
       }
@@ -273,7 +287,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: historicalQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-overview-tiles'
@@ -299,7 +313,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
               gridSettings: {
                 formatters: [
                   { columnMatch: 'ResourceId', formatter: 5 }
@@ -322,7 +336,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: historicalQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-overview-trend'
@@ -360,7 +374,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: historicalQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-change-activity-tiles'
@@ -378,7 +392,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: historicalQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-change-activity-trend'
@@ -396,7 +410,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: historicalQueryTimeContext
               gridSettings: {
                 formatters: [
                   { columnMatch: 'SoftwareType', formatter: 5 }
@@ -475,7 +489,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-software-inventory-tiles'
@@ -493,7 +507,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
               gridSettings: {
                 formatters: [
                   { columnMatch: 'Location', formatter: 5 }
@@ -537,7 +551,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-service-inventory-tiles'
@@ -555,7 +569,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
               gridSettings: {
                 formatters: [
                   { columnMatch: 'SvcDescription', formatter: 5 }
@@ -641,7 +655,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-software-diff-application'
@@ -659,7 +673,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-software-diff-sql'
@@ -677,7 +691,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-service-diff-application'
@@ -695,7 +709,7 @@ var workbookContent = {
               queryType: 0
               resourceType: 'microsoft.operationalinsights/workspaces'
               crossComponentResources: [workspaceResourceId]
-              timeContext: lawQueryTimeContext
+              timeContext: currentStateQueryTimeContext
             }
             styleSettings: compactItemSpacing
             name: 'query-service-diff-sql'
