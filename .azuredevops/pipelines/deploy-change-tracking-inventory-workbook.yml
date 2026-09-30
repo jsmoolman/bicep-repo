@@ -42,7 +42,7 @@ parameters:
   - name: parametersFile
     displayName: Path to the project-specific Bicep parameter file
     type: string
-    default: 'config/example/observability/change-tracking-inventory-workbook.bicepparam'
+    default: 'config/nfi/lims/observability/change-tracking-inventory-workbook.bicepparam'
 
   - name: location
     displayName: Deployment location (subscription-scope deployment metadata location)
