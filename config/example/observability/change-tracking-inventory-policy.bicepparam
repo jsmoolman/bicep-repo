@@ -10,6 +10,8 @@
 // remediation tasks.
 using '../../../src/observability/change-tracking-inventory-policy/main.bicep'
 
+param targetSubscriptionId = '00000000-0000-0000-0000-000000000002'
+
 param assignmentName = 'cti-example-workload'
 
 param location = 'westeurope'

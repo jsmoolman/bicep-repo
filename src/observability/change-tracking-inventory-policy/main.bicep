@@ -4,6 +4,9 @@ targetScope = 'subscription'
 
 // ─── Parameters ──────────────────────────────────────────────────────────────
 
+@description('Subscription ID of the target workload subscription that the policy assignment applies to. The module is explicitly scoped to this subscription so the assignment cannot silently land in whichever subscription the deployment happens to run under.')
+param targetSubscriptionId string
+
 @description('Name of the policy assignment.')
 param assignmentName string
 
@@ -44,6 +47,7 @@ param dcrResourceId string
 
 module policy '../../../modules/observability/change-tracking-inventory-policy/main.bicep' = {
   name: 'cti-policy-${take(uniqueString(assignmentName, policyDefinitionId, dcrResourceId), 8)}'
+  scope: subscription(targetSubscriptionId)
   params: {
     assignmentName: assignmentName
     location: location

@@ -15,6 +15,8 @@
 // RBAC for it is created or modified here.
 using '../../../../src/observability/change-tracking-inventory-policy/main.bicep'
 
+param targetSubscriptionId = 'b29525c8-045f-4793-b3cf-e93b5ff9bf74'
+
 param assignmentName = 'cti-lims-acc'
 
 param location = 'westeurope'

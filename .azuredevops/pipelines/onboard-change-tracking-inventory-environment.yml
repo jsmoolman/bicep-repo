@@ -3,7 +3,7 @@
 # =============================================================================
 # Purpose:
 #   Orchestrates the proven CTI onboarding sequence for a single workload
-#   environment (first target: ACC), across two subscriptions:
+#   environment, across two subscriptions:
 #     1. CTI foundation (DCR + ChangeTracking solution) in the management
 #        subscription — deploy-change-tracking-inventory-foundation.yml is
 #        not replaced or altered by this pipeline.
@@ -16,7 +16,16 @@
 #   Management-subscription steps use managementServiceConnection; workload
 #   subscription (policy assignment + remediation) steps use
 #   workloadServiceConnection. No single service connection is assumed to
-#   have rights to both subscriptions.
+#   have rights to both subscriptions. A dedicated verification step confirms
+#   workloadServiceConnection actually authenticates to the policy parameter
+#   file's targetSubscriptionId before any policy what-if, policy deploy, or
+#   remediation runs.
+#
+#   ACC is currently the only automated workload environment — dev/tst/preprd/
+#   prd are intentionally not offered as environment choices, and the
+#   parameter-file defaults point at the real ACC configuration, until their
+#   own parameter files exist and have been reviewed. Broadening this later
+#   is a config addition plus a small parameter change here, not a redesign.
 #
 # Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
 # an explicit what-if (default) or deploy action. what-if never creates
@@ -37,15 +46,11 @@ parameters:
       - deploy
 
   - name: environment
-    displayName: Target workload environment
+    displayName: Target workload environment (only acc is onboarded so far; broadening this list requires reviewed parameter files for the new environment first)
     type: string
     default: acc
     values:
-      - dev
-      - tst
       - acc
-      - preprd
-      - prd
 
   - name: managementServiceConnection
     displayName: Azure DevOps service connection with permission for the CTI foundation deployment in the management subscription — no default; the real value is customer-specific configuration
@@ -58,12 +63,12 @@ parameters:
   - name: foundationParametersFile
     displayName: Path to the environment-specific CTI foundation Bicep parameter file
     type: string
-    default: 'config/example/observability/change-tracking-inventory-foundation.bicepparam'
+    default: 'config/nfi/lims/observability/change-tracking-inventory-foundation-acc.bicepparam'
 
   - name: policyParametersFile
     displayName: Path to the environment-specific CTI policy-assignment Bicep parameter file
     type: string
-    default: 'config/example/observability/change-tracking-inventory-policy.bicepparam'
+    default: 'config/nfi/lims/observability/change-tracking-inventory-policy-acc.bicepparam'
 
   - name: location
     displayName: Deployment location (subscription-scope deployment metadata location)
@@ -96,6 +101,35 @@ steps:
         az bicep build-params --file "${{ parameters.foundationParametersFile }}" --stdout > /dev/null
         echo "== bicep build-params: ${{ parameters.policyParametersFile }} =="
         az bicep build-params --file "${{ parameters.policyParametersFile }}" --stdout > /dev/null
+
+  - task: AzureCLI@2
+    displayName: 'Verify workload service connection targets the configured policy subscription'
+    inputs:
+      azureSubscription: ${{ parameters.workloadServiceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        # az bicep build-params --stdout wraps its output as
+        # {"parametersJson": "<json string>", "templateJson": "<json string>", ...} —
+        # the compiled parameters are a JSON-encoded string, not a nested object.
+        expectedSubscriptionId=$(az bicep build-params --file "${{ parameters.policyParametersFile }}" --stdout \
+          | jq -r '.parametersJson | fromjson | .parameters.targetSubscriptionId.value')
+
+        actualSubscriptionId=$(az account show --query id -o tsv)
+
+        expectedLower=$(echo "$expectedSubscriptionId" | tr '[:upper:]' '[:lower:]')
+        actualLower=$(echo "$actualSubscriptionId" | tr '[:upper:]' '[:lower:]')
+
+        if [ "$expectedLower" != "$actualLower" ]; then
+          echo "ERROR: workloadServiceConnection is authenticated to a different subscription than the policy parameter file's targetSubscriptionId."
+          echo "  Expected (targetSubscriptionId in ${{ parameters.policyParametersFile }}): $expectedSubscriptionId"
+          echo "  Actual   (workloadServiceConnection subscription):                          $actualSubscriptionId"
+          exit 1
+        fi
+
+        echo "Workload service connection subscription verified: $actualSubscriptionId"
 
   - ${{ if eq(parameters.action, 'what-if') }}:
       - task: AzureCLI@2
@@ -146,6 +180,30 @@ steps:
             echo "##vso[task.setvariable variable=dcrResourceId;isOutput=true]$dcrResourceId"
             echo "CTI foundation deployed for ${{ parameters.environment }}. DCR resource ID: $dcrResourceId"
 
+      - bash: |
+          set -euo pipefail
+
+          # Defensive consistency check: the foundation-deployed DCR must be
+          # the exact same DCR the policy assignment's dcrResourceId
+          # parameter points at. Local/offline check — no Azure call.
+          policyDcrResourceId=$(az bicep build-params --file "${{ parameters.policyParametersFile }}" --stdout \
+            | jq -r '.parametersJson | fromjson | .parameters.dcrResourceId.value')
+
+          foundationDcrResourceId="$(deployFoundation.dcrResourceId)"
+
+          policyDcrLower=$(echo "$policyDcrResourceId" | tr '[:upper:]' '[:lower:]')
+          foundationDcrLower=$(echo "$foundationDcrResourceId" | tr '[:upper:]' '[:lower:]')
+
+          if [ "$policyDcrLower" != "$foundationDcrLower" ]; then
+            echo "ERROR: the DCR deployed by the CTI foundation does not match the policy parameter file's dcrResourceId."
+            echo "  Foundation output (dataCollectionRuleResourceId): $foundationDcrResourceId"
+            echo "  Policy parameter file (dcrResourceId):            $policyDcrResourceId"
+            exit 1
+          fi
+
+          echo "DCR consistency verified: $foundationDcrResourceId"
+        displayName: 'Verify foundation DCR matches policy dcrResourceId'
+
       - task: AzureCLI@2
         name: deployPolicy
         displayName: '2. Deploy CTI policy assignment (${{ parameters.environment }})'
@@ -180,24 +238,32 @@ steps:
             buildId="$(Build.BuildId)"
 
             # Bounded status-poll loop — no arbitrary sleep is used as the
-            # sequencing mechanism. Fails (non-zero return) on a terminal
-            # failure/cancellation state, on a non-zero failedDeployments
-            # count once complete, or on exhausting the poll budget.
+            # sequencing mechanism. A failed "az policy remediation show" call
+            # fails the pipeline immediately (no fail-open fallback); a
+            # missing/null deploymentStatus.failedDeployments is treated as 0
+            # only once the show call itself has already succeeded.
             wait_for_remediation() {
               local remediationName="$1"
               local maxAttempts=40
               local sleepSeconds=15
               local attempt=1
+              local remediationJson=""
               local state=""
+              local failedDeployments=""
 
               while [ "$attempt" -le "$maxAttempts" ]; do
-                state=$(az policy remediation show --name "$remediationName" --query "properties.provisioningState" -o tsv 2>/dev/null || echo "Unknown")
+                if ! remediationJson=$(az policy remediation show --name "$remediationName" --output json); then
+                  echo "Failed to read remediation '$remediationName' via az policy remediation show."
+                  return 1
+                fi
+
+                state=$(echo "$remediationJson" | jq -r '.provisioningState')
                 echo "  [$remediationName] attempt $attempt/$maxAttempts: provisioningState=$state"
 
                 case "$state" in
                   Succeeded|Complete)
-                    failedDeployments=$(az policy remediation show --name "$remediationName" --query "properties.deploymentSummary.failedDeployments" -o tsv 2>/dev/null || echo 0)
-                    if [ "${failedDeployments:-0}" != "0" ]; then
+                    failedDeployments=$(echo "$remediationJson" | jq -r '.deploymentStatus.failedDeployments // 0')
+                    if [ "$failedDeployments" != "0" ]; then
                       echo "Remediation '$remediationName' completed with $failedDeployments failed deployment(s)."
                       return 1
                     fi
