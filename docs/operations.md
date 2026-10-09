@@ -54,7 +54,7 @@ Azure Cost Management API
 - The Environment grid's row order follows `subscriptionEnvironmentMappings`' configured order; `Total` is always last.
 - The Service grid's Trend compares only the selected Report Month against the immediately preceding calendar month (not the six-month window), using cent-rounded aggregates so it matches the displayed money values; it is `-` for the current month or when either month's snapshot is unavailable.
 - The Service grid's Trend vs 5M Avg compares the selected Report Month against the arithmetic average of the other five displayed months, computed independently per service, using the same symbols/rounding as Trend; it is `-` for the current month, when the selected month's snapshot is unavailable, or when any one of the five preceding months' snapshots is unavailable — the average is never computed from fewer than all five.
-- Both Trend columns' monetary and Total columns on the Environment and Service grids are right-aligned; Environment/Service/Trend columns are not.
+- The six monthly monetary columns and Total column on the Environment and Service grids are right-aligned; Environment, Service, and trend columns are not.
 - `managementGroupId` and `subscriptionEnvironmentMappings` in the Cost Management workbook parameter file remain the collector script's own configuration source (read via `az bicep build-params`) — do not remove or restructure them for the workbook alone.
 
 **Known limitations:**

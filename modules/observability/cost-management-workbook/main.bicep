@@ -180,11 +180,11 @@ var workbookContent = {
           formatters: [
             // Monetary columns only: the six dynamic yyyy-MM month columns
             // (matched by pattern, since their names depend on the selected
-            // Report Month) plus Total. Formatter stays 0 (Automatic) so the
-            // existing FormatMoney()/"-" string values are never reformatted
-            // — only their alignment changes from Automatic to Right.
-            { columnMatch: '^\\d{4}-\\d{2}$', formatter: 0, alignment: 'right' }
-            { columnMatch: '^TotalDisplay$', formatter: 0, alignment: 'right' }
+            // Report Month) plus Total use the Azure Workbooks Right
+            // Aligned renderer (formatter 2). The existing FormatMoney()/"-"
+            // string values themselves are unchanged.
+            { columnMatch: '^\\d{4}-\\d{2}$', formatter: 2 }
+            { columnMatch: '^TotalDisplay$', formatter: 2 }
           ]
           labelSettings: [
             { columnId: 'Environment',   label: 'Environment' }
@@ -212,17 +212,16 @@ var workbookContent = {
         crossComponentResources: [workspaceResourceId]
         timeContext: lawQueryTimeContext
         // Trend / Trend vs 5M Avg get no formatter: both render as plain
-        // text (arrow + percentage). Only the monetary columns are
-        // explicitly right-aligned.
+        // text (arrow + percentage).
         gridSettings: {
           formatters: [
             // Monetary columns only: the six dynamic yyyy-MM month columns
             // (matched by pattern, since their names depend on the selected
-            // Report Month) plus Total. Formatter stays 0 (Automatic) so the
-            // existing FormatMoney()/"-" string values are never reformatted
-            // — only their alignment changes from Automatic to Right.
-            { columnMatch: '^\\d{4}-\\d{2}$', formatter: 0, alignment: 'right' }
-            { columnMatch: '^TotalDisplay$', formatter: 0, alignment: 'right' }
+            // Report Month) plus Total use the Azure Workbooks Right
+            // Aligned renderer (formatter 2). The existing FormatMoney()/"-"
+            // string values themselves are unchanged.
+            { columnMatch: '^\\d{4}-\\d{2}$', formatter: 2 }
+            { columnMatch: '^TotalDisplay$', formatter: 2 }
           ]
           labelSettings: [
             { columnId: 'ServiceName',   label: 'Service' }
