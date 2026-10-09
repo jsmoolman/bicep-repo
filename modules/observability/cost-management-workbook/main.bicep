@@ -167,7 +167,9 @@ var workbookContent = {
       content: {
         version: 'KqlItem/1.0'
         query: kqlEnvironmentGrid
-        size: 0
+        // Full-size (Azure Workbooks Size = Full) so all rows + Total render
+        // without scrolling.
+        size: 3
         title: 'Cost per Environment'
         noDataMessage: 'No cost data returned for the selected Report Month.'
         showExportToExcel: true
@@ -195,14 +197,25 @@ var workbookContent = {
       name: 'query-environment-grid'
     }
 
+    // ── Trend guidance (shown immediately above the Service grid, where the
+    // two trend columns are visible) ─────────────────────────────────────────
+    {
+      type: 1
+      content: {
+        json: '**Trend guidance**\n\n- **Trend** compares the selected Report Month with the immediately preceding month.\n- **Trend vs 5M Avg** compares the selected Report Month with the arithmetic average of the five preceding months.\n- `-` means the trend is unavailable because the selected month is still incomplete or required monthly snapshot data is unavailable.'
+      }
+      name: 'text-trend-guidance'
+    }
+
     // ── Service pivot grid (with Trend) ──────────────────────────────────────
     {
       type: 3
       content: {
         version: 'KqlItem/1.0'
         query: kqlServiceGrid
-        // Full-size grid so all service rows + Total render without scrolling.
-        size: 4
+        // Full-size (Azure Workbooks Size = Full) so all service rows +
+        // Total render without scrolling.
+        size: 3
         title: 'Cost per Service'
         noDataMessage: 'No cost data returned for the selected Report Month and Environment.'
         showExportToExcel: true
