@@ -8,6 +8,8 @@ This repository is a small, maintainable foundation for Azure operational automa
 
 This repository does not manage management groups, subscription vending, tenant-wide policy, tenant-wide RBAC, or general landing-zone infrastructure. See [`docs/scope.md`](scope.md) for the full boundary.
 
+A small number of specific, named workloads have an explicitly approved infrastructure exception recorded in `docs/scope.md` (e.g. the LIMS WS2025 compute foundation) — each exception states exactly which resources it covers. This is not general infrastructure authority: it does not extend to other workloads, and it does not change the default observability/reporting/maintenance-as-code scope for everything else in this repository.
+
 ## Design principles
 
 1. **Reuse over duplication.** One reusable Bicep composition per deployment unit; environment and target differences are driven by configuration, not by duplicated Bicep.

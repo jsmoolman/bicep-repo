@@ -50,12 +50,39 @@ steps:
       shopt -s globstar nullglob
       # Guards the identity boundary documented in docs/scope.md: no Entra/Graph
       # mutation, no tenant-wide RBAC, no management-group/subscription creation.
-      pattern='Microsoft\.Graph/|Microsoft\.Management/managementGroups|Microsoft\.Subscription/|Microsoft\.Authorization/roleAssignments|Microsoft\.Authorization/roleDefinitions'
-      matches=$(grep -RInE "$pattern" --include='*.bicep' --include='*.bicepparam' . || true)
-      if [ -n "$matches" ]; then
+      #
+      # Microsoft.Authorization/roleAssignments and Microsoft.Authorization/
+      # roleDefinitions each have exactly one narrow, path-scoped exception:
+      # the LIMS WS2025 compute-foundation module and entrypoint, approved in
+      # docs/scope.md under "RBAC exception (VM login roles only)". The
+      # roleDefinitions reference there is a read-only lookup of the two
+      # built-in Virtual Machine Administrator/User Login role IDs via
+      # subscriptionResourceId() — it declares no custom role definition.
+      # Both patterns remain fully prohibited everywhere else in the
+      # repository. Microsoft.Graph and Microsoft.Management/managementGroups
+      # and Microsoft.Subscription/ have no exception and are blocked
+      # everywhere, including in the LIMS paths.
+      status=0
+
+      blanket_pattern='Microsoft\.Graph/|Microsoft\.Management/managementGroups|Microsoft\.Subscription/'
+      blanket_matches=$(grep -RInE "$blanket_pattern" --include='*.bicep' --include='*.bicepparam' . || true)
+      if [ -n "$blanket_matches" ]; then
         echo "Prohibited resource types found in deployable Bicep files (see docs/scope.md):"
-        echo "$matches"
-        exit 1
+        echo "$blanket_matches"
+        status=1
       fi
-      echo "No prohibited resource types found."
+
+      rbac_exception_pattern='Microsoft\.Authorization/roleAssignments|Microsoft\.Authorization/roleDefinitions'
+      rbac_exception_allowed_paths='^\./modules/compute/lims-ws2025-dev-foundation/main\.bicep:|^\./src/compute/lims-ws2025-dev-foundation/main\.bicep:'
+      rbac_exception_matches=$(grep -RInE "$rbac_exception_pattern" --include='*.bicep' --include='*.bicepparam' . | grep -Ev "$rbac_exception_allowed_paths" || true)
+      if [ -n "$rbac_exception_matches" ]; then
+        echo "Prohibited Microsoft.Authorization/roleAssignments or roleDefinitions usage found outside the approved LIMS WS2025 compute-foundation exception (see docs/scope.md):"
+        echo "$rbac_exception_matches"
+        status=1
+      fi
+
+      if [ "$status" -eq 0 ]; then
+        echo "No prohibited resource types found outside approved exceptions."
+      fi
+      exit $status
     displayName: Prohibited resource type guard

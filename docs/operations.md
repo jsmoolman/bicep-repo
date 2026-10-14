@@ -88,15 +88,40 @@ Reports backup execution, failures, policy evidence, and restore/recovery activi
 - No per-item/database policy-assignment correlation is asserted — Backup Policy Evidence reports only the actual current policy configuration, filtered to an agreed allowlist.
 - Restore-test/business-continuity compliance is not asserted — absence of restore/recovery evidence is reported as exactly that, never as a pass/fail result.
 
+### LIMS WS2025 Phase 1 — compute foundation
+
+Creates the replacement LIMS DEV APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, and the Microsoft Entra sign-in extension — into the existing `rg-compute-lims-dev-westeu` resource group. Approved under the narrow, named exception recorded in [`docs/scope.md`](scope.md#explicitly-approved-workload-infrastructure-exceptions); it is not general infrastructure authority and does not extend to any other workload.
+
+- **Reusable module:** [`modules/compute/lims-ws2025-dev-foundation/main.bicep`](../modules/compute/lims-ws2025-dev-foundation/main.bicep) — resource-group-scoped, no hardcoded subscription/resource-group/subnet/Disk-Encryption-Set values.
+- **Reusable entrypoint:** [`src/compute/lims-ws2025-dev-foundation/main.bicep`](../src/compute/lims-ws2025-dev-foundation/main.bicep) — subscription-scoped; target subscription and resource group are both derived from a single `resourceGroupResourceId` parameter.
+- **Configuration:** see [`config/example/compute/lims-ws2025-dev-foundation.bicepparam`](../config/example/compute/lims-ws2025-dev-foundation.bicepparam) for the parameter shape; the real (non-secret) DEV configuration lives at `config/lims/compute/lims-ws2025-dev-foundation-dev.bicepparam` and is not deployment-ready until its existing-resource placeholder values are replaced — see the comments at the top of that file.
+- **Deployment pipeline:** [`deploy-lims-ws2025-dev-foundation.yml`](../.azuredevops/pipelines/deploy-lims-ws2025-dev-foundation.yml) — `trigger: none`/`pr: none`; supports an explicit `what-if` (default) or `deploy` action, run manually. Not routed through the shared observability workbook steps template (it needs to map two secure admin-credential pipeline variables into the Bicep parameter file's `readEnvironmentVariable()` calls, which that template does not support).
+
+**What this creates:** two VMs (`Standard_D4ads_v5`, Gen2, Trusted Launch with Secure Boot + vTPM, `encryptionAtHost` enabled, system-assigned managed identity, no public IP), one NIC per VM on the existing `snet-routable` subnet, an OS disk per VM, a 128 GiB APP application data disk (future `A:`, not initialized or formatted here), a 1024 GiB SQL DATA disk (`ReadOnly` caching) and a 512 GiB SQL LOG disk (`None` caching), and the `AADLoginForWindows` extension on both VMs. All managed disks use the existing Disk Encryption Set supplied via `diskEncryptionSetResourceId`.
+
+**What this does not do:** configure the LIMS application, install or configure SQL Server, migrate any data or application content, initialize/format/assign drive letters to any data disk, create or modify any VNet/subnet/NSG/Key Vault/Disk Encryption Set/Log Analytics workspace/Data Collection Rule/Recovery Services Vault, create or modify any Entra group, or modify any existing (v1) LIMS DEV VM or disk. These remain later, separate stages.
+
+**Microsoft Entra VM sign-in and RBAC — not yet complete.** The `AADLoginForWindows` extension alone does not grant anyone sign-in access. The module's `appAdministratorLoginPrincipalIds`, `appUserLoginPrincipalIds`, `sqlAdministratorLoginPrincipalIds`, and `sqlUserLoginPrincipalIds` parameters default to empty arrays, so **no** Virtual Machine Administrator/User Login role assignment is created until real, already-existing Entra security group object IDs are supplied. No principal ID is invented or guessed by this repository. Before granting access, the following must be supplied as live input (outside this repository, via the real parameter file): the object ID of the existing Entra security group(s) currently used for LIMS VM administrator login, and the object ID of the existing group(s) used for LIMS VM user login, per VM. Only the built-in **Virtual Machine Administrator Login** and **Virtual Machine User Login** roles are ever used, scoped to the individual VM.
+
+**Required live inputs before this can be deployed (not available in this repository):**
+
+- The resource ID of the existing `rg-compute-lims-dev-westeu` resource group.
+- The resource ID of the existing `snet-routable` subnet.
+- The resource ID of the existing LIMS DEV Disk Encryption Set.
+- The Entra security group object IDs described above, if/when Entra sign-in access is to be granted as part of this deployment.
+- A secret pipeline variable group (or equivalent) providing the local administrator username/password used only as a deployment/break-glass credential — never committed to source.
+
+**Known limitation:** OS disk size is left at the Windows Server 2025 image default (`diskSizeGB` is not set), because no current OS disk size value was available in this repository to preserve; supply it explicitly in the parameter file if a different size is required. The APP application data disk's caching is set to `None` as a conservative default since the task defining this capability did not specify a caching value for it (unlike the two SQL disks, which have explicit required values).
+
 ## Continuous Integration
 
 [`.azuredevops/pipelines/ci.yml`](../.azuredevops/pipelines/ci.yml) is the only *automatically triggered* pipeline in this repository. It runs on every push to every branch, including `main`, and performs static validation only — it does not deploy or otherwise mutate Azure. There is no PR-specific trigger.
 
 1. **Bicep build and lint** — every `*.bicep` file is compiled and linted.
 2. **Bicep parameter file validation** — every `*.bicepparam` file is built to confirm it resolves against its composition.
-3. **Prohibited resource type guard** — a static search blocks any checked-in Bicep or parameter file that references Microsoft Graph, management-group creation, subscription creation, or role assignment/definition resource types, enforcing the boundaries in [`docs/scope.md`](scope.md).
+3. **Prohibited resource type guard** — a static search blocks any checked-in Bicep or parameter file that references Microsoft Graph, management-group creation, or subscription creation unconditionally, and blocks role assignment/definition resource types everywhere *except* the single narrow, path-scoped exception for the LIMS WS2025 compute-foundation module/entrypoint described in [`docs/scope.md`](scope.md), enforcing the boundaries documented there.
 
-Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the LAW Ingestion Foundation pipeline reuses that same template only for its `what-if` action.
+Capability deployment pipelines (VM Availability, Cost Management Dashboard, Cost Management LAW Ingestion Foundation, Backup & Restore Dashboard, LIMS WS2025 DEV Compute Foundation) exist alongside `ci.yml`; none triggers automatically (`trigger: none`, `pr: none`) — each must be run manually. The workbook pipelines share their full validate/what-if/deploy steps via [`templates/deploy-observability-workbook-steps.yml`](../.azuredevops/pipelines/templates/deploy-observability-workbook-steps.yml); the LAW Ingestion Foundation pipeline reuses that same template only for its `what-if` action; the LIMS compute-foundation pipeline does not reuse it at all (see above).
 
 One further manual, non-deployment pipeline exists: [`collect-cost-management-snapshot.yml`](../.azuredevops/pipelines/collect-cost-management-snapshot.yml) (the collector, no `schedules:` block). It wraps a script rather than performing a Bicep deployment, and is kept out of `ci.yml`'s automatic trigger for the same reason as the deployment pipelines — it must never run unattended before its output is reviewed.
 

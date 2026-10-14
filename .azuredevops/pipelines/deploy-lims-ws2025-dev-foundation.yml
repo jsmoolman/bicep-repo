@@ -1,0 +1,155 @@
+# =============================================================================
+# Deploy LIMS WS2025 DEV Compute Foundation
+# =============================================================================
+# Purpose:
+#   Deploys the LIMS WS2025 Phase 1 compute foundation composition
+#   (src/compute/lims-ws2025-dev-foundation/main.bicep) using a
+#   project-specific parameter file. Creates only the replacement LIMS APP
+#   and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure
+#   Edition), their directly coupled NICs and managed disks, and the
+#   Microsoft Entra sign-in extension - into an existing resource group.
+#   Approved under the narrow LIMS WS2025 Phase 1 exception recorded in
+#   docs/scope.md.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action.
+#
+# Not routed through templates/deploy-observability-workbook-steps.yml: this
+# composition requires two secure admin-credential values that must reach the
+# Bicep parameter file's readEnvironmentVariable() calls via explicit
+# environment-variable mapping from secret pipeline variables. The shared
+# template has no env-mapping parameter, and is not modified here to add one
+# (out of scope for this change; it is reused unmodified by the two existing
+# workbook pipelines). This pipeline duplicates only the minimal
+# validate/what-if/deploy steps needed to add that mapping.
+#
+# Required pipeline configuration (outside this repository, not performed
+# here): a secret variable group (or equivalent) providing
+# limsWs2025DevAdminUsername and limsWs2025DevAdminPassword, linked to this
+# pipeline before it can be run. Neither value is ever stored in source,
+# Bicep files, or parameter files.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (Contributor on rg-compute-lims-dev-westeu) - no default; the real value is customer-specific configuration
+    type: string
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/example/compute/lims-ws2025-dev-foundation.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  - group: lims-ws2025-dev-foundation-secrets # must define limsWs2025DevAdminUsername (secret) and limsWs2025DevAdminPassword (secret)
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+        echo "== bicep build: src/compute/lims-ws2025-dev-foundation/main.bicep =="
+        az bicep build --file "src/compute/lims-ws2025-dev-foundation/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/compute/lims-ws2025-dev-foundation/main.bicep =="
+        az bicep lint --file "src/compute/lims-ws2025-dev-foundation/main.bicep"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+    env:
+      LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
+      LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            az deployment sub what-if \
+              --name "lims-ws2025-dev-foundation-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}"
+        env:
+          LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
+          LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployFoundation
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            outputs=$(az deployment sub create \
+              --name "lims-ws2025-dev-foundation-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            appVmResourceId=$(echo "$outputs"       | jq -r '.appVmResourceId.value')
+            sqlVmResourceId=$(echo "$outputs"       | jq -r '.sqlVmResourceId.value')
+            appVmPrincipalId=$(echo "$outputs"      | jq -r '.appVmPrincipalId.value')
+            sqlVmPrincipalId=$(echo "$outputs"      | jq -r '.sqlVmPrincipalId.value')
+            appNicResourceId=$(echo "$outputs"      | jq -r '.appNicResourceId.value')
+            sqlNicResourceId=$(echo "$outputs"      | jq -r '.sqlNicResourceId.value')
+            appDataDiskResourceId=$(echo "$outputs" | jq -r '.appDataDiskResourceId.value')
+            sqlDataDiskResourceId=$(echo "$outputs" | jq -r '.sqlDataDiskResourceId.value')
+            sqlLogDiskResourceId=$(echo "$outputs"  | jq -r '.sqlLogDiskResourceId.value')
+
+            echo "##vso[task.setvariable variable=appVmResourceId;isOutput=true]$appVmResourceId"
+            echo "##vso[task.setvariable variable=sqlVmResourceId;isOutput=true]$sqlVmResourceId"
+
+            echo "========================================="
+            echo "LIMS WS2025 DEV compute foundation deployed successfully"
+            echo "========================================="
+            echo "  APP VM resource ID      : $appVmResourceId"
+            echo "  SQL VM resource ID      : $sqlVmResourceId"
+            echo "  APP VM principal ID     : $appVmPrincipalId"
+            echo "  SQL VM principal ID     : $sqlVmPrincipalId"
+            echo "  APP NIC resource ID     : $appNicResourceId"
+            echo "  SQL NIC resource ID     : $sqlNicResourceId"
+            echo "  APP application disk ID : $appDataDiskResourceId"
+            echo "  SQL DATA disk ID        : $sqlDataDiskResourceId"
+            echo "  SQL LOG disk ID         : $sqlLogDiskResourceId"
+            echo ""
+            echo "Reminder: this deployment alone does not grant any personnel"
+            echo "VM sign-in access. Virtual Machine Administrator/User Login"
+            echo "role assignments are only created for principal IDs supplied"
+            echo "via the *LoginPrincipalIds parameters (empty by default) - see"
+            echo "docs/operations.md for what is required before granting access."
+        env:
+          LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
+          LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
