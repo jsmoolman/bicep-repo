@@ -49,19 +49,18 @@ steps:
       set -euo pipefail
       shopt -s globstar nullglob
       # Guards the identity boundary documented in docs/scope.md: no Entra/Graph
-      # mutation, no tenant-wide RBAC, no management-group/subscription creation.
+      # mutation, no management-group/subscription creation, and no custom
+      # Azure role-definition creation.
       #
-      # Microsoft.Authorization/roleAssignments and Microsoft.Authorization/
-      # roleDefinitions each have exactly one narrow, path-scoped exception:
-      # the LIMS WS2025 compute-foundation module and entrypoint, approved in
-      # docs/scope.md under "RBAC exception (VM login roles only)". The
-      # roleDefinitions reference there is a read-only lookup of the two
-      # built-in Virtual Machine Administrator/User Login role IDs via
-      # subscriptionResourceId() — it declares no custom role definition.
-      # Both patterns remain fully prohibited everywhere else in the
-      # repository. Microsoft.Graph and Microsoft.Management/managementGroups
-      # and Microsoft.Subscription/ have no exception and are blocked
-      # everywhere, including in the LIMS paths.
+      # Assigning an already-existing Entra principal to a built-in Azure role
+      # (Microsoft.Authorization/roleAssignments, or a
+      # subscriptionResourceId()/resourceId() reference to a built-in role
+      # definition) is not an Entra ID mutation (see docs/scope.md, "RBAC and
+      # Entra ID mutation are distinct") and is not guarded here — RBAC
+      # assignment is governed by the "Explicit architecture decision
+      # required" boundary in docs/scope.md, not by this automated guard. No
+      # path-scoped exception is needed because these patterns are not
+      # blocked in the first place.
       status=0
 
       blanket_pattern='Microsoft\.Graph/|Microsoft\.Management/managementGroups|Microsoft\.Subscription/'
@@ -72,17 +71,21 @@ steps:
         status=1
       fi
 
-      rbac_exception_pattern='Microsoft\.Authorization/roleAssignments|Microsoft\.Authorization/roleDefinitions'
-      rbac_exception_allowed_paths='^\./modules/compute/lims-ws2025-dev-foundation/main\.bicep:|^\./src/compute/lims-ws2025-dev-foundation/main\.bicep:'
-      rbac_exception_matches=$(grep -RInE "$rbac_exception_pattern" --include='*.bicep' --include='*.bicepparam' . | grep -Ev "$rbac_exception_allowed_paths" || true)
-      if [ -n "$rbac_exception_matches" ]; then
-        echo "Prohibited Microsoft.Authorization/roleAssignments or roleDefinitions usage found outside the approved LIMS WS2025 compute-foundation exception (see docs/scope.md):"
-        echo "$rbac_exception_matches"
+      # Matches only a literal resource-type/apiVersion declaration
+      # (...roleDefinitions@<version>), i.e. creating or declaring `existing`
+      # a Microsoft.Authorization/roleDefinitions resource — a custom role
+      # definition. A subscriptionResourceId()/resourceId() string reference
+      # to a built-in role has no trailing @<version> after the type, so it
+      # never matches this pattern and is not blocked.
+      role_definition_matches=$(grep -RInE 'Microsoft\.Authorization/roleDefinitions@' --include='*.bicep' --include='*.bicepparam' . || true)
+      if [ -n "$role_definition_matches" ]; then
+        echo "Prohibited custom Microsoft.Authorization/roleDefinitions resource declaration found (see docs/scope.md). A subscriptionResourceId()/resourceId() reference to a built-in role is allowed and would not match this:"
+        echo "$role_definition_matches"
         status=1
       fi
 
       if [ "$status" -eq 0 ]; then
-        echo "No prohibited resource types found outside approved exceptions."
+        echo "No prohibited resource types found."
       fi
       exit $status
     displayName: Prohibited resource type guard

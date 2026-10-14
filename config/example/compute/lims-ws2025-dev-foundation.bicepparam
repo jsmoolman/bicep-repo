@@ -21,10 +21,16 @@
 // through Microsoft Entra sign-in (see the *LoginPrincipalIds parameters
 // below).
 //
+// osDiskSizeGiB = 127 preserves the current LIMS v1 OS disk size for both the
+// APP and SQL OS disks rather than relying on the Marketplace image default.
+//
 // The *AdministratorLoginPrincipalIds / *UserLoginPrincipalIds parameters are
-// left empty below. Populating them requires the authoritative existing Entra
-// security group object IDs for this workload's VM-login access model — see
-// docs/operations.md for what is required before they can be set.
+// left empty below. Assigning an already-existing Entra security group to the
+// built-in VM-login roles is not an Entra ID mutation (see docs/scope.md,
+// "RBAC and Entra ID mutation are distinct"), but populating these arrays
+// still requires the authoritative existing Entra security group object IDs
+// for this workload's approved VM-login mapping — see docs/operations.md for
+// exactly what is required before they can be set.
 using '../../../src/compute/lims-ws2025-dev-foundation/main.bicep'
 
 param resourceGroupResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-compute-lims-dev-westeu'
@@ -44,6 +50,8 @@ param adminUsername = readEnvironmentVariable('LIMS_WS2025_DEV_ADMIN_USERNAME', 
 param adminPassword = readEnvironmentVariable('LIMS_WS2025_DEV_ADMIN_PASSWORD', 'not-set-see-pipeline-secret-variable')
 
 param vmSize = 'Standard_D4ads_v5'
+
+param osDiskSizeGiB = 127
 
 param appVmName = 'vm-lims-dev-v2-westeu-001'
 

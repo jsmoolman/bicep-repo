@@ -28,6 +28,14 @@
 # limsWs2025DevAdminUsername and limsWs2025DevAdminPassword, linked to this
 # pipeline before it can be run. Neither value is ever stored in source,
 # Bicep files, or parameter files.
+#
+# Service connection permissions: the deployment identity needs permission
+# both to deploy the compute resources (VMs/NICs/disks/extensions) below AND
+# to create the approved VM-scoped Azure RBAC role assignments once the
+# *LoginPrincipalIds parameter arrays are populated (Virtual Machine
+# Administrator/User Login only, scoped to the individual VM - see
+# docs/scope.md and docs/operations.md). This is a documentation/preflight
+# note only; no permission is granted or changed by this repository.
 # =============================================================================
 
 trigger: none
@@ -44,7 +52,7 @@ parameters:
       - deploy
 
   - name: serviceConnection
-    displayName: Azure DevOps service connection (Contributor on rg-compute-lims-dev-westeu) - no default; the real value is customer-specific configuration
+    displayName: Azure DevOps service connection (needs permission to deploy VMs/NICs/disks/extensions on rg-compute-lims-dev-westeu, AND to create the approved VM-scoped RBAC role assignments once *LoginPrincipalIds are populated) - no default; the real value is customer-specific configuration
     type: string
 
   - name: parametersFile

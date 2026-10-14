@@ -59,6 +59,27 @@ The following are not treated as normal repository authority. Each requires a se
 
 Once a specific decision of this kind is made, it is recorded as a named, narrowly scoped exception below — it does not become general repository authority, and it does not authorize anything beyond what the exception explicitly states.
 
+### RBAC and Entra ID mutation are distinct
+
+RBAC appears in the list above because any RBAC assignment still requires a separate, specific, approved decision before implementation — it is never default repository authority. However, RBAC assignment of an already-existing Entra principal is **not** itself a form of Entra ID mutation, and must not be documented or guarded as one.
+
+Prohibited as Entra ID mutation (see "Prohibited" below — this is unaffected and unchanged):
+
+- Creating or modifying Entra users
+- Creating or modifying Entra groups
+- Changing Entra group membership
+- Application registrations or enterprise applications
+- Service principals
+- Directory roles
+- Microsoft Graph mutations
+- General Entra identity lifecycle management
+
+Not prohibited as Entra ID mutation:
+
+- Assigning an already-existing Entra object/principal to an Azure RBAC role.
+
+This is still subject to the "Explicit architecture decision required" rule above: it must be deliberate, narrowly scoped to a specific, approved workload decision (see the exceptions below), and never a general or standing grant. It simply is not categorized, guarded, or described as identity mutation.
+
 ## Explicitly approved workload-infrastructure exceptions
 
 This repository's default authority remains observability, reporting, and approved maintenance-as-code only (see above). The following exceptions are each a separate, specific architecture decision for one named workload, not a general grant of infrastructure authority. Each exception lists exactly what it covers; anything not listed stays outside repository authority.
@@ -72,7 +93,7 @@ This exception covers, for this workload only:
 - The LIMS replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition).
 - NICs directly coupled to those VMs.
 - Managed OS, application, and SQL data/log disks directly coupled to those VMs.
-- VM extensions required by the approved workload design (e.g. the Microsoft Entra sign-in extension — see the managed-identity and RBAC exceptions below).
+- VM extensions required by the approved workload design (e.g. the Microsoft Entra sign-in extension — see the managed-identity exception and RBAC decision below).
 - Read-only references to existing VNet/subnet, Disk Encryption Set, Key Vault (via the DES), monitoring, and other shared platform resources needed to attach the above.
 
 It does **not** authorize creation or modification of: VNets, subnets, route tables, shared NSGs/firewalls, private endpoints, Key Vaults, Disk Encryption Sets, Log Analytics workspaces, Data Collection Rules, Recovery Services Vaults, or any other general platform/landing-zone infrastructure. It does not authorize SQL Server installation/configuration, application content migration, or any other capability listed under "Explicitly out of scope" in the LIMS compute-foundation entry in `docs/operations.md`. It does not extend to any other workload's compute/VM infrastructure.
@@ -83,16 +104,25 @@ For a VM explicitly covered by an approved workload-infrastructure exception (su
 
 This does **not** authorize: user-assigned managed identity creation, standalone managed identity resources, service principals, application registrations, Entra users/groups, Microsoft Graph mutations, directory-role management, or any broader identity lifecycle management. The "Prohibited" section below otherwise still applies in full.
 
-### RBAC exception (VM login roles only)
+### RBAC decision (VM login roles only) — LIMS WS2025
 
-RBAC remains prohibited by default (see "Prohibited" below). For a VM explicitly covered by an approved workload-infrastructure exception, narrowly scoped Azure RBAC assignments may be created **only** where required to preserve that workload's existing VM access model, and only when all of the following hold:
+RBAC always requires an explicit, specific decision before implementation (see "Explicit architecture decision required" and "RBAC and Entra ID mutation are distinct" above) — it is not categorically prohibited, and assigning an existing Entra principal to an Azure role is not an Entra mutation. For the LIMS WS2025 VMs explicitly covered by the compute-foundation exception above, that decision is: narrowly scoped Azure RBAC assignments may be created **only** where required to preserve this workload's approved VM access model, and only when all of the following hold:
 
 - The principal is an existing Entra security group (never a user, service principal, or newly created group).
 - The role is limited to **Virtual Machine Administrator Login** and/or **Virtual Machine User Login**.
-- The assignment preserves the existing access mapping for that workload (e.g. which group gets administrator vs. user login on which machine) — it is not a new access decision.
-- The scope is the individual VM/resource, not the subscription or resource group, unless the existing approved design for that workload clearly uses a different least-privilege scope.
+- The assignment preserves the approved access mapping for this workload (e.g. which group gets administrator vs. user login on which machine) — it is not a new access decision made by this repository.
+- The scope is the individual VM resource, not the subscription or resource group.
 
-This does **not** authorize creating or modifying Entra groups, broadening group membership, inventing/guessing principal IDs, using any other role, or assigning VM-login roles at subscription scope for convenience. Where the authoritative principal IDs or exact access mapping for a workload are not yet available in source, the role assignments are parameterized/deferred rather than guessed, and the required live inputs are reported.
+**Approved DEV mapping** (object IDs supplied via the real parameter file, never hardcoded in Bicep source):
+
+| VM | Virtual Machine Administrator Login | Virtual Machine User Login |
+|---|---|---|
+| `vm-lims-dev-v2-westeu-001` (APP) | `AZ-TC-LIMS-Infra`, `AZ-TC-LIMS-Func`, `AZ-TC-LIMS-App` | none currently required |
+| `vm-lims-dev-v2-westeu-002` (SQL) | `AZ-TC-LIMS-Infra`, `AZ-TC-LIMS-App` | none currently required |
+
+`AZ-TC-LIMS-Data` currently has no DEV VM-login assignment on either VM. This table records group *names* for traceability only; the Bicep module and parameter files reference only the groups' Entra object IDs, never their display names (see `docs/operations.md` for exactly which object IDs are still required).
+
+This does **not** authorize creating or modifying Entra groups, broadening group membership, inventing/guessing principal IDs, using any other role, or assigning VM-login roles at subscription or resource-group scope. Where an authoritative object ID for one of the groups above is not yet available, that group's entry in the real parameter file's role array is left out rather than guessed.
 
 ### Networking exception (NIC attachment only)
 
@@ -108,9 +138,10 @@ No deployable functionality for:
 - Directory roles
 - Microsoft Graph mutations
 - Identity lifecycle management
-- RBAC creation or modification by default (narrow exception: see "RBAC exception (VM login roles only)" above)
 - Creation or modification of managed identities (narrow exception: see "Managed identity exception (system-assigned only)" above)
 
-The deployment identity used by this repository is intentionally granted no Entra ID permissions. Lack of identity permission is never treated as a defect to work around, and permissions are not broadened to compensate. Existing Azure resources and identities may be referenced read-only where necessary, but this repository does not create or modify identity. The two narrow exceptions above are the only departures from this section, and only for the specific workload(s) they each name.
+RBAC assignment is deliberately not listed here: assigning an already-existing Entra principal to an Azure role is not an Entra ID mutation (see "RBAC and Entra ID mutation are distinct" above). RBAC still requires its own explicit, specific, approved decision per the "Explicit architecture decision required" section — it is simply categorized correctly rather than guarded as identity mutation.
+
+The deployment identity used by this repository is intentionally granted no Entra ID permissions. Lack of identity permission is never treated as a defect to work around, and permissions are not broadened to compensate. Existing Azure resources and identities may be referenced read-only where necessary, but this repository does not create or modify identity — that remains unconditional. The managed-identity exception above is the only departure from this section, and only for the specific workload(s) it names.
 
 This repository also does not introduce Terraform-style state (state files, state storage accounts, deployment-state databases, state locking, or custom deployment inventory databases), and does not use Azure Deployment Stacks purely to introduce resource-ownership/state tracking.

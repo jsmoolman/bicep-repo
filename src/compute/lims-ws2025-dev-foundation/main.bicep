@@ -31,6 +31,9 @@ param imageSku string = '2025-datacenter-g2'
 @description('Marketplace image version.')
 param imageVersion string = 'latest'
 
+@description('Size in GiB of both the APP and SQL OS disks. Explicitly set to preserve the current LIMS v1 OS disk size rather than relying on the Windows Server 2025 Marketplace image default.')
+param osDiskSizeGiB int = 127
+
 @description('Azure resource name of the APP virtual machine.')
 param appVmName string
 
@@ -120,6 +123,7 @@ module foundation '../../../modules/compute/lims-ws2025-dev-foundation/main.bice
     imageOffer: imageOffer
     imageSku: imageSku
     imageVersion: imageVersion
+    osDiskSizeGiB: osDiskSizeGiB
     appVmName: appVmName
     appComputerName: appComputerName
     appNicName: appNicName

@@ -1,4 +1,4 @@
-metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, and the Microsoft Entra sign-in extension. Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, Entra group, or any RBAC beyond the narrowly scoped VM-login exception. Installs no SQL Server, performs no application/data migration, and configures no guest drive letters — those belong to later SQL-configuration/content-migration stages.'
+metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, and the Microsoft Entra sign-in extension. Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server, performs no application/data migration, and configures no guest drive letters — those belong to later SQL-configuration/content-migration stages.'
 
 targetScope = 'resourceGroup'
 
@@ -27,6 +27,9 @@ param imageSku string = '2025-datacenter-g2'
 
 @description('Marketplace image version.')
 param imageVersion string = 'latest'
+
+@description('Size in GiB of both the APP and SQL OS disks. Explicitly set to preserve the current LIMS v1 OS disk size rather than relying on the Windows Server 2025 Marketplace image default.')
+param osDiskSizeGiB int = 127
 
 @description('Azure resource name of the APP virtual machine, e.g. vm-lims-dev-v2-westeu-001.')
 param appVmName string
@@ -83,21 +86,23 @@ param adminPassword string
 @description('Common tags applied to every resource in this module (e.g. environment, purpose). Each VM/disk additionally gets a role tag (application or sql) added internally — do not duplicate role here.')
 param tags object = {}
 
-@description('''Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the APP VM. Empty (default) creates no role assignment — RBAC remains prohibited by default per docs/scope.md; only the narrow VM-login exception for this workload allows populating this list, and only with existing group object IDs already authoritative outside this repository (never invented/guessed).''')
+@description('''Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the APP VM. Empty (default) creates no role assignment. Assigning an existing Entra principal to this built-in role is not an Entra ID mutation (see docs/scope.md, "RBAC and Entra ID mutation are distinct"), but it is still a deliberate, approved decision scoped to this workload only — populate only with existing group object IDs already authoritative outside this repository (never invented/guessed). The approved DEV mapping for this parameter is AZ-TC-LIMS-Infra, AZ-TC-LIMS-Func, AZ-TC-LIMS-App (see docs/scope.md and docs/operations.md).''')
 param appAdministratorLoginPrincipalIds array = []
 
-@description('Existing Entra security group object IDs to grant Virtual Machine User Login on the APP VM. Same constraints as appAdministratorLoginPrincipalIds.')
+@description('Existing Entra security group object IDs to grant Virtual Machine User Login on the APP VM. Same constraints as appAdministratorLoginPrincipalIds. No DEV User Login assignment is currently approved/required for this VM, so this is expected to stay empty for DEV.')
 param appUserLoginPrincipalIds array = []
 
-@description('Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds.')
+@description('Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds. The approved DEV mapping for this parameter is AZ-TC-LIMS-Infra, AZ-TC-LIMS-App (see docs/scope.md and docs/operations.md).')
 param sqlAdministratorLoginPrincipalIds array = []
 
-@description('Existing Entra security group object IDs to grant Virtual Machine User Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds.')
+@description('Existing Entra security group object IDs to grant Virtual Machine User Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds. No DEV User Login assignment is currently approved/required for this VM, so this is expected to stay empty for DEV.')
 param sqlUserLoginPrincipalIds array = []
 
-// ─── Built-in role definition IDs (VM-login exception only — see docs/scope.md) ───
-// GUIDs verified against Microsoft Learn's built-in roles reference. No other
-// role is used anywhere in this module.
+// ─── Built-in role definition IDs (approved RBAC decision — see docs/scope.md) ───
+// GUIDs verified against Microsoft Learn's built-in roles reference. These are
+// read-only references to Microsoft's built-in role definitions via
+// subscriptionResourceId() — no custom role definition is declared anywhere in
+// this module, and no other role is used anywhere in this module.
 
 var vmAdministratorLoginRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '1c0163c0-47e6-4577-8991-ea5c82e286e4')
 var vmUserLoginRoleDefinitionId = subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'fb879df8-f326-4884-b1cf-06f3ad86be52')
@@ -143,7 +148,6 @@ resource appDataDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: appDataDiskSizeGiB
-    osType: 'Windows'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -173,6 +177,7 @@ resource appVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
         name: appOsDiskName
         createOption: 'FromImage'
         caching: 'ReadWrite'
+        diskSizeGB: osDiskSizeGiB
         managedDisk: {
           storageAccountType: 'Premium_LRS'
           diskEncryptionSet: {
@@ -294,7 +299,6 @@ resource sqlDataDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: sqlDataDiskSizeGiB
-    osType: 'Windows'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -314,7 +318,6 @@ resource sqlLogDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: sqlLogDiskSizeGiB
-    osType: 'Windows'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -344,6 +347,7 @@ resource sqlVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
         name: sqlOsDiskName
         createOption: 'FromImage'
         caching: 'ReadWrite'
+        diskSizeGB: osDiskSizeGiB
         managedDisk: {
           storageAccountType: 'Premium_LRS'
           diskEncryptionSet: {
