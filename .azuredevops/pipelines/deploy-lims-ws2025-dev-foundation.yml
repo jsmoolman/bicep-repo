@@ -58,7 +58,7 @@ parameters:
   - name: parametersFile
     displayName: Path to the project-specific Bicep parameter file
     type: string
-    default: 'config/example/compute/lims-ws2025-dev-foundation.bicepparam'
+    default: 'config/nfi/lims/compute/lims-ws2025-dev-foundation.bicepparam'
 
   - name: location
     displayName: Deployment location (subscription-scope deployment metadata location)
