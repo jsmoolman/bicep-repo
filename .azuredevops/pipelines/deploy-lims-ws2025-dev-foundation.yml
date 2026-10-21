@@ -55,6 +55,10 @@ parameters:
     displayName: Azure DevOps service connection (needs permission to deploy VMs/NICs/disks/extensions on rg-compute-lims-dev-westeu, AND to create the approved VM-scoped RBAC role assignments once *LoginPrincipalIds are populated) - no default; the real value is customer-specific configuration
     type: string
 
+  - name: targetSubscriptionId
+    displayName: Target Azure subscription ID to deploy into (sc-az-devops-trustedcloud-mgmt's default subscription is not LIMS DEV; this subscription is explicitly selected via "az account set" at the start of every task below) - no default; required
+    type: string
+
   - name: parametersFile
     displayName: Path to the project-specific Bicep parameter file
     type: string
@@ -82,6 +86,20 @@ steps:
       scriptLocation: inlineScript
       inlineScript: |
         set -euo pipefail
+
+        if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+          echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+          exit 1
+        fi
+        az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+        selectedSubscriptionId=$(az account show --query id --output tsv)
+        selectedSubscriptionName=$(az account show --query name --output tsv)
+        if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+          echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+          exit 1
+        fi
+        echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
         echo "== bicep build: src/compute/lims-ws2025-dev-foundation/main.bicep =="
         az bicep build --file "src/compute/lims-ws2025-dev-foundation/main.bicep" --stdout > /dev/null
         echo "== bicep lint: src/compute/lims-ws2025-dev-foundation/main.bicep =="
@@ -89,6 +107,7 @@ steps:
         echo "== bicep build-params: ${{ parameters.parametersFile }} =="
         az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
     env:
+      TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
       LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
       LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
 
@@ -101,11 +120,26 @@ steps:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
             az deployment sub what-if \
               --name "lims-ws2025-dev-foundation-$(Build.BuildId)" \
               --location "${{ parameters.location }}" \
               --parameters "${{ parameters.parametersFile }}"
         env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
           LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
           LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
 
@@ -119,6 +153,19 @@ steps:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
 
             outputs=$(az deployment sub create \
               --name "lims-ws2025-dev-foundation-$(Build.BuildId)" \
@@ -159,5 +206,6 @@ steps:
             echo "via the *LoginPrincipalIds parameters (empty by default) - see"
             echo "docs/operations.md for what is required before granting access."
         env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
           LIMS_WS2025_DEV_ADMIN_USERNAME: $(limsWs2025DevAdminUsername)
           LIMS_WS2025_DEV_ADMIN_PASSWORD: $(limsWs2025DevAdminPassword)
