@@ -236,7 +236,6 @@ resource appAadLogin 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' =
     type: 'AADLoginForWindows'
     typeHandlerVersion: '1.0'
     autoUpgradeMinorVersion: true
-    enableAutomaticUpgrade: true
   }
 }
 
@@ -411,7 +410,6 @@ resource sqlAadLogin 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' =
     type: 'AADLoginForWindows'
     typeHandlerVersion: '1.0'
     autoUpgradeMinorVersion: true
-    enableAutomaticUpgrade: true
   }
 }
 
