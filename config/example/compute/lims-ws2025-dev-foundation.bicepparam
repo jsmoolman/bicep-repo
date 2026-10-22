@@ -21,6 +21,12 @@
 // through Microsoft Entra sign-in (see the *LoginPrincipalIds parameters
 // below).
 //
+// tags.dataClassification = 'non-production' is what makes both v2 VMs
+// members of the existing mc-lims-nonprod-westeu maintenance configuration's
+// dynamic scope — see config/example/compute/lims-ws2025-dev-patch-policy.bicepparam
+// for the built-in Policy assignments that configure/maintain the matching
+// VM-level patch settings this tag depends on.
+//
 // osDiskSizeGiB = 127 preserves the current LIMS v1 OS disk size for both the
 // APP and SQL OS disks rather than relying on the Marketplace image default.
 //
@@ -84,6 +90,7 @@ param sqlLogDiskSizeGiB = 512
 param tags = {
   environment: 'development'
   purpose: 'lims'
+  dataClassification: 'non-production'
 }
 
 param appAdministratorLoginPrincipalIds = []

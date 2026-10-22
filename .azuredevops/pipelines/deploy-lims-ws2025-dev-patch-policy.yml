@@ -1,0 +1,206 @@
+# =============================================================================
+# Deploy LIMS WS2025 DEV v2 Patch-Onboarding Policy (Pilot)
+# =============================================================================
+# Purpose:
+#   Assigns two Microsoft built-in Azure Policy definitions (never copied
+#   into custom definitions), each individually scoped to exactly one of the
+#   two replacement LIMS WS2025 DEV v2 virtual machines
+#   (vm-lims-dev-v2-westeu-001, vm-lims-dev-v2-westeu-002) — four policy
+#   assignments total, always at resource scope, never subscription or
+#   resource-group scope:
+#     - Configure periodic checking for missing system updates on azure
+#       virtual machines (fixed Modify effect) — assessmentMode=
+#       AutomaticByPlatform, osType=Windows.
+#     - Set prerequisite for Scheduling recurring updates on Azure virtual
+#       machines (effect explicitly set to DeployIfNotExists) —
+#       operatingSystemTypes=[Windows].
+#   Approved under the narrow LIMS WS2025 DEV v2 patch-onboarding exception
+#   recorded in docs/scope.md.
+#
+# What this pipeline does NOT do:
+#   - Does not assign the broader "Schedule recurring updates using Azure
+#     Update Manager" policy.
+#   - Does not create or modify any maintenance configuration, dynamic
+#     scope, or direct/static maintenance assignment — schedule membership
+#     is supplied entirely by the existing mc-lims-nonprod-westeu dynamic
+#     scope, via the dataClassification=non-production tag set on both VMs
+#     by src/compute/lims-ws2025-dev-foundation (not by this pipeline).
+#   - Does not create any identity, Entra object, custom role, or new RBAC
+#     grant. The policy assignments reuse an existing, already-approved
+#     user-assigned managed identity supplied via the parameter file's
+#     userAssignedIdentityResourceId — verify out-of-band that this identity
+#     already has effective permission to remediate both built-in policies
+#     (both list the built-in Contributor role for remediation) at the
+#     target scope, and that this pipeline's service connection has
+#     permission to attach (reference) that existing identity on a policy
+#     assignment, before running a deploy action.
+#   - Does not create an automatic remediation task. Creating these
+#     assignments does not by itself correct any existing non-compliant
+#     resource, and what-if does not preview downstream Policy remediation
+#     or runtime patch operations — see docs/operations.md for the required
+#     separate, explicit post-deployment compliance check and remediation
+#     step, scoped only to these two VMs.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action. Kept independently runnable
+# from deploy-lims-ws2025-dev-foundation.yml so configuration changes and
+# this governance rollout can be reviewed and deployed separately.
+#
+# No admin credentials: unlike the compute-foundation pipeline, this
+# deployment does not need the local administrator username/password, so
+# none are mapped here.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (needs permission to create policy assignments scoped to the two LIMS DEV v2 VMs, AND to attach the existing approved user-assigned managed identity supplied via userAssignedIdentityResourceId — no new identity/RBAC is created) - no default; the real value is customer-specific configuration
+    type: string
+
+  - name: targetSubscriptionId
+    displayName: Target Azure subscription ID to deploy into (same reused-service-connection pattern as the compute foundation pipeline; this subscription is explicitly selected via "az account set" at the start of every task below) - no default; required
+    type: string
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/nfi/lims/compute/lims-ws2025-dev-patch-policy.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+          echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+          exit 1
+        fi
+        az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+        selectedSubscriptionId=$(az account show --query id --output tsv)
+        selectedSubscriptionName=$(az account show --query name --output tsv)
+        if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+          echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+          exit 1
+        fi
+        echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+        echo "== bicep build: src/compute/lims-ws2025-dev-patch-policy/main.bicep =="
+        az bicep build --file "src/compute/lims-ws2025-dev-patch-policy/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/compute/lims-ws2025-dev-patch-policy/main.bicep =="
+        az bicep lint --file "src/compute/lims-ws2025-dev-patch-policy/main.bicep"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+    env:
+      TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            echo "NOTE: what-if does not preview downstream Policy remediation or runtime"
+            echo "patch operations, and does not prove existing resources are already"
+            echo "compliant. It previews only the four policyAssignment resources below."
+
+            az deployment sub what-if \
+              --name "lims-ws2025-dev-patch-policy-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}"
+        env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployPatchPolicy
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            outputs=$(az deployment sub create \
+              --name "lims-ws2025-dev-patch-policy-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            appAssessmentAssignmentId=$(echo "$outputs" | jq -r '.appAssessmentAssignmentId.value')
+            appSchedulePrerequisiteAssignmentId=$(echo "$outputs" | jq -r '.appSchedulePrerequisiteAssignmentId.value')
+            sqlAssessmentAssignmentId=$(echo "$outputs" | jq -r '.sqlAssessmentAssignmentId.value')
+            sqlSchedulePrerequisiteAssignmentId=$(echo "$outputs" | jq -r '.sqlSchedulePrerequisiteAssignmentId.value')
+
+            echo "========================================="
+            echo "LIMS WS2025 DEV v2 patch-onboarding policy assignments deployed"
+            echo "========================================="
+            echo "  APP assessment assignment ID            : $appAssessmentAssignmentId"
+            echo "  APP schedule-prerequisite assignment ID  : $appSchedulePrerequisiteAssignmentId"
+            echo "  SQL assessment assignment ID            : $sqlAssessmentAssignmentId"
+            echo "  SQL schedule-prerequisite assignment ID  : $sqlSchedulePrerequisiteAssignmentId"
+            echo ""
+            echo "Reminder: creating these assignments does not remediate any existing"
+            echo "non-compliant resource, and successful assessment does not by itself"
+            echo "prove successful scheduled patching. A separate, explicit post-"
+            echo "deployment step is required to inspect compliance and remediate only"
+            echo "these two VMs if needed - see docs/operations.md."
+        env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}

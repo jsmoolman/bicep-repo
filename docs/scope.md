@@ -128,6 +128,26 @@ This does **not** authorize creating or modifying Entra groups, broadening group
 
 For a VM explicitly covered by an approved workload-infrastructure exception, creating the NIC(s) directly coupled to that VM is allowed. The NIC(s) must attach only to an existing subnet already approved for that workload — no VNet, subnet, address-space, or network-security redesign is authorized by this exception.
 
+### LIMS WS2025 DEV v2 — patch onboarding (Policy pilot)
+
+"Policy assignments" always requires an explicit, specific decision before implementation (see "Explicit architecture decision required" above) — it is not categorically prohibited. For the two LIMS WS2025 DEV v2 virtual machines explicitly covered by the compute-foundation exception above, that decision is: a narrow pilot that uses two Microsoft built-in Azure Policy definitions, never copied into custom definitions, to maintain Azure Update Manager patch settings on those VMs, reusing their existing non-prod maintenance schedule membership.
+
+This exception covers, for this workload only, exactly:
+
+- Four `Microsoft.Authorization/policyAssignments` resources, each individually scoped to one of the two named VMs (`vm-lims-dev-v2-westeu-001`, `vm-lims-dev-v2-westeu-002`) — never at subscription or resource-group scope, and never applied via a tag filter at a broader scope.
+- Assignment of exactly these two built-in definitions, unmodified:
+  - "Configure periodic checking for missing system updates on azure virtual machines" (`59efceea-0c96-497e-a4a1-4eb2290dac15`) — Modify effect.
+  - "Set prerequisite for Scheduling recurring updates on Azure virtual machines." (`9905ca54-1471-49c6-8291-7582c04cd4d4`) — DeployIfNotExists effect.
+- Reuse (not creation) of one existing, already-approved user-assigned managed identity for policy remediation — see "Managed identity reuse (user-assigned, existing identity only)" below.
+
+It does **not** authorize: the broader "Schedule recurring updates using Azure Update Manager" built-in policy; any custom policy definition; any policy assignment at subscription, management-group, or resource-group scope; any new maintenance configuration, dynamic scope, or direct/static maintenance assignment (schedule membership continues to be supplied entirely by the existing `mc-lims-nonprod-westeu` dynamic scope together with the `dataClassification` tag set by the compute foundation); any automatic remediation task; any change to the v1 LIMS DEV VMs, `mc-lims-prod-westeu`, or any other existing maintenance configuration; or expansion to any other VM, workload, or environment. Expansion beyond these two VMs requires its own separate, specific decision recorded as a new exception.
+
+### Managed identity reuse (user-assigned, existing identity only) — LIMS WS2025 DEV v2 patch onboarding
+
+The "Managed identity exception (system-assigned only)" above does not authorize user-assigned managed identity use. For the narrow patch-onboarding pilot above only, the four policy assignments may reference (attach to) one existing, already-approved user-assigned managed identity for Policy Modify/DeployIfNotExists remediation, supplied as an explicit, non-secret resource-ID parameter (`userAssignedIdentityResourceId`) — never guessed, reconstructed, or inferred from any source (including screenshots).
+
+This does **not** authorize: creating a user-assigned managed identity resource, creating any new RBAC role assignment for that identity (both built-in definitions list the built-in Contributor role for remediation; whether the identity already holds that effective permission at the target scope, and whether the pipeline's service connection has permission to attach an existing identity to a policy assignment, must be verified outside this repository before any `deploy` action — see [`docs/operations.md`](operations.md)), or any other identity/RBAC change beyond referencing the existing identity's resource ID on these four assignments.
+
 ## Prohibited
 
 No deployable functionality for:

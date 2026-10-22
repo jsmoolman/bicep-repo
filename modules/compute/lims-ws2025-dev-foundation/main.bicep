@@ -203,6 +203,13 @@ resource appVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
       windowsConfiguration: {
         enableAutomaticUpdates: true
         provisionVMAgent: true
+        patchSettings: {
+          assessmentMode: 'AutomaticByPlatform'
+          patchMode: 'AutomaticByPlatform'
+          automaticByPlatformSettings: {
+            bypassPlatformSafetyChecksOnUserSchedule: true
+          }
+        }
       }
     }
     networkProfile: {
@@ -380,6 +387,13 @@ resource sqlVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
       windowsConfiguration: {
         enableAutomaticUpdates: true
         provisionVMAgent: true
+        patchSettings: {
+          assessmentMode: 'AutomaticByPlatform'
+          patchMode: 'AutomaticByPlatform'
+          automaticByPlatformSettings: {
+            bypassPlatformSafetyChecksOnUserSchedule: true
+          }
+        }
       }
     }
     networkProfile: {

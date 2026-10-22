@@ -22,6 +22,15 @@
 // is a deployment/break-glass account only; normal personnel access is
 // through Microsoft Entra sign-in.
 //
+// tags.dataClassification = 'non-production' is what makes both v2 VMs
+// members of the existing mc-lims-nonprod-westeu maintenance configuration's
+// dynamic scope (filtered on dataClassification=non-production) — this file
+// creates no maintenance configuration or dynamic scope itself. See the LIMS
+// WS2025 DEV v2 patch-onboarding exception in docs/scope.md and
+// config/nfi/lims/compute/lims-ws2025-dev-patch-policy.bicepparam for the
+// built-in Policy assignments that configure/maintain the matching VM-level
+// patch settings this tag depends on.
+//
 // osDiskSizeGiB = 127 preserves the current LIMS v1 OS disk size for both the
 // APP and SQL OS disks — do not remove; the Marketplace image default is not
 // relied upon.
@@ -111,6 +120,7 @@ param sqlLogDiskSizeGiB = 512
 param tags = {
   environment: 'development'
   purpose: 'lims'
+  dataClassification: 'non-production'
 }
 
 param appAdministratorLoginPrincipalIds = []
