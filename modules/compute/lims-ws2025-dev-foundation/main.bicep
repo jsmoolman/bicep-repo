@@ -86,6 +86,12 @@ param adminPassword string
 @description('Common tags applied to every resource in this module (e.g. environment, purpose). Each VM/disk additionally gets a role tag (application or sql) added internally — do not duplicate role here.')
 param tags object = {}
 
+@description('''Full ARM resource IDs of existing user-assigned managed identities that must remain attached to the APP VM across redeployments (e.g. an existing Policy-managed monitoring/CTI identity such as Built-In-Identity-westeurope). This is NOT the same thing as modules/compute/lims-ws2025-dev-patch-policy's userAssignedIdentityResourceId parameter: that identity is referenced only by Microsoft.Authorization/policyAssignments resources for Policy remediation and is never attached to either VM, while this parameter is attached directly to the VM's own identity property. This module never creates a user-assigned identity, grants it any new permission, or attaches the deployment/remediation identity to a VM — it only preserves identities already attached to the VM from outside this module (e.g. by Azure Policy's own remediation). Supply only authoritative existing resource IDs — never guessed, inferred, or reconstructed (including from screenshots). The system-assigned identity is always retained regardless of this parameter's value. Empty (default) preserves the VM's original initial-creation identity shape (SystemAssigned only) — on an already-converged VM that already has a user-assigned identity attached from outside Bicep, leaving this parameter empty on redeployment does NOT preserve that identity: Azure resets an omitted identity.userAssignedIdentities property on redeployment (see docs/operations.md and docs/scope.md).''')
+param appExistingUserAssignedIdentityResourceIds array = []
+
+@description('Same purpose and constraints as appExistingUserAssignedIdentityResourceIds, applied to the SQL VM.')
+param sqlExistingUserAssignedIdentityResourceIds array = []
+
 @description('''Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the APP VM. Empty (default) creates no role assignment. Assigning an existing Entra principal to this built-in role is not an Entra ID mutation (see docs/scope.md, "RBAC and Entra ID mutation are distinct"), but it is still a deliberate, approved decision scoped to this workload only — populate only with existing group object IDs already authoritative outside this repository (never invented/guessed). The approved DEV mapping for this parameter is AZ-TC-LIMS-Infra, AZ-TC-LIMS-Func, AZ-TC-LIMS-App (see docs/scope.md and docs/operations.md).''')
 param appAdministratorLoginPrincipalIds array = []
 
@@ -109,6 +115,26 @@ var vmUserLoginRoleDefinitionId = subscriptionResourceId('Microsoft.Authorizatio
 
 var appTags = union(tags, { role: 'application' })
 var sqlTags = union(tags, { role: 'sql' })
+
+// ─── VM identity shape (preserve existing user-assigned identities, e.g. Azure Policy remediation identities) ───
+// Always retains SystemAssigned. When *ExistingUserAssignedIdentityResourceIds is
+// non-empty, declares SystemAssigned plus UserAssigned and includes every supplied
+// ID. Empty input reproduces the original initial-creation behavior (SystemAssigned
+// only) — it does not read live state and cannot discover identities on its own; see
+// the parameter descriptions above and docs/operations.md.
+var appIdentity = empty(appExistingUserAssignedIdentityResourceIds) ? {
+  type: 'SystemAssigned'
+} : {
+  type: 'SystemAssigned, UserAssigned'
+  userAssignedIdentities: toObject(appExistingUserAssignedIdentityResourceIds, id => id, id => {})
+}
+
+var sqlIdentity = empty(sqlExistingUserAssignedIdentityResourceIds) ? {
+  type: 'SystemAssigned'
+} : {
+  type: 'SystemAssigned, UserAssigned'
+  userAssignedIdentities: toObject(sqlExistingUserAssignedIdentityResourceIds, id => id, id => {})
+}
 
 // ─── APP: NIC, disks, VM ───────────────────────────────────────────────────────
 // Dynamic private IPv4 on the existing subnet only; no public IP, no NSG created
@@ -159,9 +185,7 @@ resource appVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
   name: appVmName
   location: location
   tags: appTags
-  identity: {
-    type: 'SystemAssigned'
-  }
+  identity: appIdentity
   properties: {
     hardwareProfile: {
       vmSize: vmSize
@@ -335,9 +359,7 @@ resource sqlVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
   name: sqlVmName
   location: location
   tags: sqlTags
-  identity: {
-    type: 'SystemAssigned'
-  }
+  identity: sqlIdentity
   properties: {
     hardwareProfile: {
       vmSize: vmSize

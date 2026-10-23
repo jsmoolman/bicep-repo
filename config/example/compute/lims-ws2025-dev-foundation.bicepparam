@@ -27,6 +27,18 @@
 // for the built-in Policy assignments that configure/maintain the matching
 // VM-level patch settings this tag depends on.
 //
+// *ExistingUserAssignedIdentityResourceIds below preserve existing
+// user-assigned managed identities already attached to each VM outside this
+// Bicep composition (e.g. an identity attached by Azure Policy remediation,
+// such as Built-In-Identity-westeurope) across redeployments. This is
+// DIFFERENT from the patch-policy composition's userAssignedIdentityResourceId
+// (config/example/compute/lims-ws2025-dev-patch-policy.bicepparam), which is
+// only referenced by policy assignments for remediation and is never attached
+// to a VM. Leaving these arrays empty reproduces the original initial-creation
+// identity shape (SystemAssigned only) and does NOT preserve a user-assigned
+// identity that was attached outside Bicep after creation — see
+// docs/operations.md before redeploying an already-converged VM.
+//
 // osDiskSizeGiB = 127 preserves the current LIMS v1 OS disk size for both the
 // APP and SQL OS disks rather than relying on the Marketplace image default.
 //
@@ -92,6 +104,18 @@ param tags = {
   purpose: 'lims'
   dataClassification: 'non-production'
 }
+
+// Example only: preserves a fictional existing Policy-managed identity
+// (Built-In-Identity-westeurope) on both VMs across redeployments. Supply the
+// authoritative existing resource ID(s) actually attached to each VM — never
+// guessed. Leave as [] if no user-assigned identity is attached outside Bicep.
+param appExistingUserAssignedIdentityResourceIds = [
+  '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-identity-example-westeu/providers/Microsoft.ManagedIdentity/userAssignedIdentities/Built-In-Identity-westeurope'
+]
+
+param sqlExistingUserAssignedIdentityResourceIds = [
+  '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-identity-example-westeu/providers/Microsoft.ManagedIdentity/userAssignedIdentities/Built-In-Identity-westeurope'
+]
 
 param appAdministratorLoginPrincipalIds = []
 

@@ -31,6 +31,23 @@
 // built-in Policy assignments that configure/maintain the matching VM-level
 // patch settings this tag depends on.
 //
+// *** REDEPLOYMENT WARNING — identity.userAssignedIdentities ***
+// Azure Resource Manager's Incremental deployment mode reapplies ALL
+// properties on every redeployment; a property omitted from the template is
+// reset to its default (see Microsoft Learn, "Deployment modes" -
+// https://learn.microsoft.com/en-us/azure/azure-resource-manager/templates/deployment-modes).
+// Both v2 VMs already have the existing, Policy-managed
+// Built-In-Identity-westeurope user-assigned identity attached outside this
+// Bicep composition. *ExistingUserAssignedIdentityResourceIds below MUST be
+// populated with that identity's authoritative resource ID before the next
+// redeployment, or the redeployment will remove it (leaving SystemAssigned
+// only) — this is NOT the patch-policy composition's
+// userAssignedIdentityResourceId (that identity is only referenced by policy
+// assignments for remediation and is never attached to a VM). The
+// REPLACE_WITH_REAL_VALUE placeholders below are intentionally non-empty so
+// this cannot be silently left at the empty/discard-identity default — see
+// docs/operations.md and docs/scope.md.
+//
 // osDiskSizeGiB = 127 preserves the current LIMS v1 OS disk size for both the
 // APP and SQL OS disks — do not remove; the Marketplace image default is not
 // relied upon.
@@ -122,6 +139,19 @@ param tags = {
   purpose: 'lims'
   dataClassification: 'non-production'
 }
+
+// REQUIRED preflight input — see the REDEPLOYMENT WARNING above. Never
+// guessed or reconstructed (including from screenshots); replace with the
+// authoritative resource ID of the existing Built-In-Identity-westeurope
+// user-assigned identity (or whichever identity Azure Policy has actually
+// attached to each VM) before the next redeployment.
+param appExistingUserAssignedIdentityResourceIds = [
+  'REPLACE_WITH_REAL_VALUE:<resource ID of the existing Built-In-Identity-westeurope user-assigned identity already attached to vm-lims-dev-v2-westeu-001>'
+]
+
+param sqlExistingUserAssignedIdentityResourceIds = [
+  'REPLACE_WITH_REAL_VALUE:<resource ID of the existing Built-In-Identity-westeurope user-assigned identity already attached to vm-lims-dev-v2-westeu-002>'
+]
 
 param appAdministratorLoginPrincipalIds = []
 

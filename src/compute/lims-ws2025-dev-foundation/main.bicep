@@ -89,6 +89,12 @@ param adminPassword string
 @description('Common tags applied to every resource (e.g. environment, purpose). A role tag (application/sql) is added internally per VM — do not duplicate role here.')
 param tags object = {}
 
+@description('Full ARM resource IDs of existing user-assigned managed identities that must remain attached to the APP VM across redeployments (e.g. an existing Policy-managed identity such as Built-In-Identity-westeurope). Distinct from src/compute/lims-ws2025-dev-patch-policy\'s userAssignedIdentityResourceId, which is only referenced by policy assignments for remediation and is never attached to a VM. Never creates an identity or new permission here — reuse/preservation only. Empty (default) preserves the original initial-creation identity shape (SystemAssigned only); see modules/compute/lims-ws2025-dev-foundation for full constraints.')
+param appExistingUserAssignedIdentityResourceIds array = []
+
+@description('Same purpose and constraints as appExistingUserAssignedIdentityResourceIds, applied to the SQL VM.')
+param sqlExistingUserAssignedIdentityResourceIds array = []
+
 @description('Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the APP VM. Empty (default) creates no role assignment.')
 param appAdministratorLoginPrincipalIds array = []
 
@@ -141,6 +147,8 @@ module foundation '../../../modules/compute/lims-ws2025-dev-foundation/main.bice
     adminUsername: adminUsername
     adminPassword: adminPassword
     tags: tags
+    appExistingUserAssignedIdentityResourceIds: appExistingUserAssignedIdentityResourceIds
+    sqlExistingUserAssignedIdentityResourceIds: sqlExistingUserAssignedIdentityResourceIds
     appAdministratorLoginPrincipalIds: appAdministratorLoginPrincipalIds
     appUserLoginPrincipalIds: appUserLoginPrincipalIds
     sqlAdministratorLoginPrincipalIds: sqlAdministratorLoginPrincipalIds
