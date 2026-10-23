@@ -50,6 +50,9 @@ param appDataDiskName string
 @description('Size in GiB of the APP application data disk.')
 param appDataDiskSizeGiB int = 128
 
+@description('Performance tier of the APP application data disk (e.g. P10, P15, P20...). Explicitly preserved so it is not reset to a default by redeployment (see docs/operations.md). This is the free-form disk.properties.tier value, not the disk SKU name — Premium_LRS is unaffected. Must match the baseline tier implied by appDataDiskSizeGiB per the Premium SSD size/tier table (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size); defaults to P10, the baseline tier for the current 128 GiB size. This module does not derive the tier from the size automatically — if appDataDiskSizeGiB ever changes, update this parameter to the matching tier yourself, otherwise the disk would be deployed below its size baseline (not supported) or burst-billed above it (a real cost/performance change, not a default).')
+param appDataDiskTier string = 'P10'
+
 @description('Azure resource name of the SQL virtual machine, e.g. vm-lims-dev-v2-westeu-002.')
 param sqlVmName string
 
@@ -69,11 +72,17 @@ param sqlDataDiskName string
 @description('Size in GiB of the SQL DATA disk.')
 param sqlDataDiskSizeGiB int = 1024
 
+@description('Performance tier of the SQL DATA disk. Same purpose and constraints as appDataDiskTier. Defaults to P30, the baseline tier for the current 1024 GiB size (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size). Keep in sync with sqlDataDiskSizeGiB.')
+param sqlDataDiskTier string = 'P30'
+
 @description('Resource name of the SQL LOG disk.')
 param sqlLogDiskName string
 
 @description('Size in GiB of the SQL LOG disk.')
 param sqlLogDiskSizeGiB int = 512
+
+@description('Performance tier of the SQL LOG disk. Same purpose and constraints as appDataDiskTier. Defaults to P20, the baseline tier for the current 512 GiB size (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size). Keep in sync with sqlLogDiskSizeGiB.')
+param sqlLogDiskTier string = 'P20'
 
 @description('Local administrator username for both VMs — a deployment/break-glass account only. Normal personnel access is through Microsoft Entra sign-in (see appAdministratorLoginPrincipalIds etc. below), not this account.')
 @secure()
@@ -145,11 +154,15 @@ resource appNic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   location: location
   tags: appTags
   properties: {
+    auxiliaryMode: 'None'
+    auxiliarySku: 'None'
+    disableTcpStateTracking: false
     ipConfigurations: [
       {
         name: 'ipconfig1'
         properties: {
           privateIPAllocationMethod: 'Dynamic'
+          privateIPAddressVersion: 'IPv4'
           subnet: {
             id: subnetResourceId
           }
@@ -174,6 +187,9 @@ resource appDataDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: appDataDiskSizeGiB
+    tier: appDataDiskTier
+    networkAccessPolicy: 'AllowAll'
+    publicNetworkAccess: 'Enabled'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -212,8 +228,10 @@ resource appVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
       dataDisks: [
         {
           lun: 0
+          name: appDataDiskName
           caching: 'None'
           createOption: 'Attach'
+          deleteOption: 'Detach'
           managedDisk: {
             id: appDataDisk.id
           }
@@ -303,11 +321,15 @@ resource sqlNic 'Microsoft.Network/networkInterfaces@2024-05-01' = {
   location: location
   tags: sqlTags
   properties: {
+    auxiliaryMode: 'None'
+    auxiliarySku: 'None'
+    disableTcpStateTracking: false
     ipConfigurations: [
       {
         name: 'ipconfig1'
         properties: {
           privateIPAllocationMethod: 'Dynamic'
+          privateIPAddressVersion: 'IPv4'
           subnet: {
             id: subnetResourceId
           }
@@ -329,6 +351,9 @@ resource sqlDataDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: sqlDataDiskSizeGiB
+    tier: sqlDataDiskTier
+    networkAccessPolicy: 'AllowAll'
+    publicNetworkAccess: 'Enabled'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -348,6 +373,9 @@ resource sqlLogDisk 'Microsoft.Compute/disks@2024-03-02' = {
       createOption: 'Empty'
     }
     diskSizeGB: sqlLogDiskSizeGiB
+    tier: sqlLogDiskTier
+    networkAccessPolicy: 'AllowAll'
+    publicNetworkAccess: 'Enabled'
     encryption: {
       type: 'EncryptionAtRestWithCustomerKey'
       diskEncryptionSetId: diskEncryptionSetResourceId
@@ -386,16 +414,20 @@ resource sqlVm 'Microsoft.Compute/virtualMachines@2024-11-01' = {
       dataDisks: [
         {
           lun: 0
+          name: sqlDataDiskName
           caching: 'ReadOnly'
           createOption: 'Attach'
+          deleteOption: 'Detach'
           managedDisk: {
             id: sqlDataDisk.id
           }
         }
         {
           lun: 1
+          name: sqlLogDiskName
           caching: 'None'
           createOption: 'Attach'
+          deleteOption: 'Detach'
           managedDisk: {
             id: sqlLogDisk.id
           }

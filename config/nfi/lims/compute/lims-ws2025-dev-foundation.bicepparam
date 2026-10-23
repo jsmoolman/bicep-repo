@@ -118,6 +118,10 @@ param appDataDiskName = 'appdata-vm-lims-dev-v2-westeu-001'
 
 param appDataDiskSizeGiB = 128
 
+// Must match the baseline tier for appDataDiskSizeGiB per the Premium SSD
+// size/tier table (128 GiB -> P10) — update together if the size ever changes.
+param appDataDiskTier = 'P10'
+
 param sqlVmName = 'vm-lims-dev-v2-westeu-002'
 
 param sqlComputerName = 'lims-dev-v2-002'
@@ -130,9 +134,15 @@ param sqlDataDiskName = 'sqldata-vm-lims-dev-v2-westeu-002'
 
 param sqlDataDiskSizeGiB = 1024
 
+// Must match the baseline tier for sqlDataDiskSizeGiB (1024 GiB -> P30).
+param sqlDataDiskTier = 'P30'
+
 param sqlLogDiskName = 'sqllog-vm-lims-dev-v2-westeu-002'
 
 param sqlLogDiskSizeGiB = 512
+
+// Must match the baseline tier for sqlLogDiskSizeGiB (512 GiB -> P20).
+param sqlLogDiskTier = 'P20'
 
 param tags = {
   environment: 'development'

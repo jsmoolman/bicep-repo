@@ -53,6 +53,9 @@ param appDataDiskName string
 @description('Size in GiB of the APP application data disk.')
 param appDataDiskSizeGiB int = 128
 
+@description('Performance tier of the APP application data disk (e.g. P10). Explicitly preserved so it is not reset by redeployment. Keep in sync with appDataDiskSizeGiB — see modules/compute/lims-ws2025-dev-foundation for the full size/tier constraint.')
+param appDataDiskTier string = 'P10'
+
 @description('Azure resource name of the SQL virtual machine.')
 param sqlVmName string
 
@@ -72,11 +75,17 @@ param sqlDataDiskName string
 @description('Size in GiB of the SQL DATA disk.')
 param sqlDataDiskSizeGiB int = 1024
 
+@description('Performance tier of the SQL DATA disk (e.g. P30). Same purpose and constraints as appDataDiskTier. Keep in sync with sqlDataDiskSizeGiB.')
+param sqlDataDiskTier string = 'P30'
+
 @description('Resource name of the SQL LOG disk.')
 param sqlLogDiskName string
 
 @description('Size in GiB of the SQL LOG disk.')
 param sqlLogDiskSizeGiB int = 512
+
+@description('Performance tier of the SQL LOG disk (e.g. P20). Same purpose and constraints as appDataDiskTier. Keep in sync with sqlLogDiskSizeGiB.')
+param sqlLogDiskTier string = 'P20'
 
 @description('Local administrator username for both VMs — deployment/break-glass account only.')
 @secure()
@@ -136,14 +145,17 @@ module foundation '../../../modules/compute/lims-ws2025-dev-foundation/main.bice
     appOsDiskName: appOsDiskName
     appDataDiskName: appDataDiskName
     appDataDiskSizeGiB: appDataDiskSizeGiB
+    appDataDiskTier: appDataDiskTier
     sqlVmName: sqlVmName
     sqlComputerName: sqlComputerName
     sqlNicName: sqlNicName
     sqlOsDiskName: sqlOsDiskName
     sqlDataDiskName: sqlDataDiskName
     sqlDataDiskSizeGiB: sqlDataDiskSizeGiB
+    sqlDataDiskTier: sqlDataDiskTier
     sqlLogDiskName: sqlLogDiskName
     sqlLogDiskSizeGiB: sqlLogDiskSizeGiB
+    sqlLogDiskTier: sqlLogDiskTier
     adminUsername: adminUsername
     adminPassword: adminPassword
     tags: tags
