@@ -57,13 +57,13 @@
 // exactly what is required before they can be set.
 using '../../../src/compute/lims-ws2025-dev-foundation/main.bicep'
 
-param resourceGroupResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-compute-lims-dev-westeu'
+param resourceGroupResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-compute-lims-dev-westeu'
 
 param location = 'westeurope'
 
-param subnetResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-network-lims-dev-westeu/providers/Microsoft.Network/virtualNetworks/vnet-lims-dev-westeu/subnets/snet-routable'
+param subnetResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-network-lims-dev-westeu/providers/Microsoft.Network/virtualNetworks/vnet-lims-dev-westeu/subnets/snet-routable'
 
-param diskEncryptionSetResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
+param diskEncryptionSetResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
 
 // The default values below are deliberately non-functional placeholders that
 // only satisfy static `bicep build-params` validation (e.g. in CI, where
@@ -151,6 +151,13 @@ param sqlUserLoginPrincipalIds = []
 // Service identity, LUN, managed-disk resource name, and capacity checks —
 // this flag only controls whether the guest Run Command resource exists.
 param enableGuestDiskPreparation = false
+
+// Explicitly 'None' (also the default) — neither VM's guest data-disk
+// preparation Run Command is deployed, regardless of
+// enableGuestDiskPreparation. See docs/operations.md for the full set of
+// allowed values and the six-step customer validate -> apply -> reverify
+// sequence (there is deliberately no 'ApplyBoth' value).
+param guestDiskPreparationExecutionTarget = 'None'
 
 param appDataVolumeDriveLetter = 'A'
 

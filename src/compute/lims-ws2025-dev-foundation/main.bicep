@@ -1,4 +1,4 @@
-metadata description = 'Subscription-scoped orchestrator for the LIMS WS2025 Phase 1 compute foundation: deploys the replacement APP and SQL virtual machines, their NICs and managed disks, the Microsoft Entra sign-in extension, and (opt-in only, enableGuestDiskPreparation) guest data-disk preparation for their approved data disks, into the existing resource group that already hosts the LIMS DEV network/encryption foundation. Deploys no VNet, subnet, Key Vault, Disk Encryption Set, or any resource not explicitly covered by the LIMS WS2025 Phase 1 exception in docs/scope.md.'
+metadata description = 'Subscription-scoped orchestrator for the LIMS WS2025 Phase 1 compute foundation: deploys the replacement APP and SQL virtual machines, their NICs and managed disks, the Microsoft Entra sign-in extension, and (opt-in only, enableGuestDiskPreparation plus guestDiskPreparationExecutionTarget) guest data-disk preparation (Validate or Apply, per VM) for their approved data disks, into the existing resource group that already hosts the LIMS DEV network/encryption foundation. Deploys no VNet, subnet, Key Vault, Disk Encryption Set, or any resource not explicitly covered by the LIMS WS2025 Phase 1 exception in docs/scope.md.'
 
 targetScope = 'subscription'
 
@@ -119,6 +119,17 @@ param sqlUserLoginPrincipalIds array = []
 @description('Opt-in switch for automated guest data-disk preparation. Defaults to false. See modules/compute/lims-ws2025-dev-foundation for the full behavioral contract and docs/operations.md for the customer opt-in/validation procedure.')
 param enableGuestDiskPreparation bool = false
 
+@description('Which guest data-disk preparation Run Command(s) are deployed and which mode (Validate/Apply) each runs in, once enableGuestDiskPreparation is true. Defaults to "None". See modules/compute/lims-ws2025-dev-foundation for the full allowed-value contract (deliberately no "ApplyBoth" value) and docs/operations.md for the customer validate→apply→reverify sequence.')
+@allowed([
+  'None'
+  'ValidateApp'
+  'ValidateSql'
+  'ValidateBoth'
+  'ApplyApp'
+  'ApplySql'
+])
+param guestDiskPreparationExecutionTarget string = 'None'
+
 @description('Destination drive letter (single character, no colon) for the APP application data disk once enableGuestDiskPreparation is true.')
 param appDataVolumeDriveLetter string = 'A'
 
@@ -199,6 +210,7 @@ module foundation '../../../modules/compute/lims-ws2025-dev-foundation/main.bice
     sqlAdministratorLoginPrincipalIds: sqlAdministratorLoginPrincipalIds
     sqlUserLoginPrincipalIds: sqlUserLoginPrincipalIds
     enableGuestDiskPreparation: enableGuestDiskPreparation
+    guestDiskPreparationExecutionTarget: guestDiskPreparationExecutionTarget
     appDataVolumeDriveLetter: appDataVolumeDriveLetter
     appDataVolumeLabel: appDataVolumeLabel
     appDataVolumeAllocationUnitBytes: appDataVolumeAllocationUnitBytes

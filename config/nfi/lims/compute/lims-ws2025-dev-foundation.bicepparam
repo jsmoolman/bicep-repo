@@ -177,6 +177,15 @@ param sqlUserLoginPrincipalIds = []
 // procedure before ever setting this to true against these two VMs.
 param enableGuestDiskPreparation = false
 
+// Explicitly 'None' (also the default) — neither VM's guest data-disk
+// preparation Run Command is deployed. See docs/operations.md for the
+// exact six-step validate -> apply -> reverify sequence to follow when this
+// capability is eventually opted into for real against these two VMs
+// (e.g. 'ValidateApp' / 'ValidateSql' first, then 'ApplyApp' / 'ApplySql'
+// one VM at a time — never 'ValidateBoth' immediately followed by applying
+// both in the same change, and there is no 'ApplyBoth' value at all).
+param guestDiskPreparationExecutionTarget = 'None'
+
 param appDataVolumeDriveLetter = 'A'
 
 param appDataVolumeLabel = 'LIMS-App'

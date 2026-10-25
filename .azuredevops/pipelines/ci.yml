@@ -89,3 +89,61 @@ steps:
       fi
       exit $status
     displayName: Prohibited resource type guard
+
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      Write-Host "PowerShell version: $($PSVersionTable.PSVersion)"
+      # Pinned to the same versions verified locally against this
+      # repository's guest-preparation scripts, for reproducibility.
+      Install-Module -Name Pester -RequiredVersion 5.9.0 -Force -SkipPublisherCheck -Scope CurrentUser
+      Install-Module -Name PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
+      Import-Module Pester -RequiredVersion 5.9.0
+      Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+      Write-Host "Pester version: $((Get-Module Pester).Version)"
+      Write-Host "PSScriptAnalyzer version: $((Get-Module PSScriptAnalyzer).Version)"
+    displayName: Install pinned PowerShell test tooling
+
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      Import-Module PSScriptAnalyzer -RequiredVersion 1.25.0
+      $scriptFiles = @(Get-ChildItem -Path . -Recurse -Filter '*.ps1' | Where-Object { $_.Name -notlike '*.Tests.ps1' })
+      if ($scriptFiles.Count -eq 0) {
+        Write-Host 'No PowerShell scripts found — nothing to analyze.'
+        exit 0
+      }
+      $failed = $false
+      foreach ($file in $scriptFiles) {
+        # A script-colocated PSScriptAnalyzerSettings.psd1 (e.g. guest-runtime
+        # PowerShell 5.1 compatibility checks) is used when present; otherwise
+        # the full default ruleset applies.
+        $settingsPath = Join-Path $file.DirectoryName 'PSScriptAnalyzerSettings.psd1'
+        Write-Host "== PSScriptAnalyzer: $($file.FullName) =="
+        if (Test-Path -LiteralPath $settingsPath) {
+          $results = @(Invoke-ScriptAnalyzer -Path $file.FullName -Settings $settingsPath)
+        }
+        else {
+          $results = @(Invoke-ScriptAnalyzer -Path $file.FullName)
+        }
+        if ($results.Count -gt 0) {
+          $results | Format-Table -AutoSize RuleName, Severity, Line, Message
+          $failed = $true
+        }
+      }
+      if ($failed) { exit 1 }
+      Write-Host 'No PSScriptAnalyzer issues found.'
+    displayName: PowerShell static analysis (PSScriptAnalyzer)
+
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      Import-Module Pester -RequiredVersion 5.9.0
+      $testFiles = @(Get-ChildItem -Path . -Recurse -Filter '*.Tests.ps1')
+      if ($testFiles.Count -eq 0) {
+        Write-Host 'No Pester test files found — nothing to run.'
+        exit 0
+      }
+      $config = New-PesterConfiguration
+      $config.Run.Path = $testFiles.FullName
+      $config.Run.Exit = $true
+      $config.Output.Verbosity = 'Detailed'
+      Invoke-Pester -Configuration $config
+    displayName: PowerShell unit tests (Pester)

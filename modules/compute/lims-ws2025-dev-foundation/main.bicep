@@ -1,4 +1,4 @@
-metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server and performs no application/data migration. Optionally (enableGuestDiskPreparation, default false) also initializes/partitions/formats/labels the APP application data disk and the two SQL data/log disks to their approved drive letters via a Run Command resource scoped to exactly these two VMs — see docs/operations.md for the full guest data-disk preparation behavioral contract.'
+metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server and performs no application/data migration. Optionally (enableGuestDiskPreparation, default false, plus guestDiskPreparationExecutionTarget, default "None") also validates and/or initializes/partitions/formats/labels the APP application data disk and the two SQL data/log disks to their approved drive letters via a Run Command resource scoped to exactly these two VMs — see docs/operations.md for the full guest data-disk preparation behavioral contract, Validate/Apply modes, and customer opt-in sequence.'
 
 targetScope = 'resourceGroup'
 
@@ -116,6 +116,17 @@ param sqlUserLoginPrincipalIds array = []
 @description('''Opt-in switch for automated guest data-disk preparation (initialize, partition, format, assign drive letter/label) on the APP application data disk and the two SQL data/log disks, delivered via Microsoft.Compute/virtualMachines/runCommands scoped to exactly these two VMs. Defaults to false — a normal foundation redeployment never formats a disk unless this is explicitly set to true. Every mutation target is still re-verified at execution time against Azure Instance Metadata Service identity, LUN, managed-disk resource name, and capacity before anything is touched — this flag only controls whether the Run Command resource is deployed at all. See docs/operations.md for the full behavioral contract, idempotency model, and customer opt-in/validation procedure.''')
 param enableGuestDiskPreparation bool = false
 
+@description('''Which guest data-disk preparation Run Command(s) are deployed and which mode (Validate/Apply) each runs in, once enableGuestDiskPreparation is true. Defaults to "None" — deliberately neither VM's Run Command resource exists, regardless of enableGuestDiskPreparation, until this is explicitly set. "ValidateApp"/"ValidateSql"/"ValidateBoth" deploy a read-only assessment only (the script\'s own Validate mode — mutation functions are unreachable); "ApplyApp"/"ApplySql" deploy the mutating run for exactly one VM. There is deliberately no "ApplyBoth" value: Apply can only ever be requested for one VM per deployment, so a single enum value (and therefore a single parameter file edit) can never simultaneously authorize mutation on both APP and SQL. See docs/operations.md for the full customer validate→apply→reverify sequence.''')
+@allowed([
+  'None'
+  'ValidateApp'
+  'ValidateSql'
+  'ValidateBoth'
+  'ApplyApp'
+  'ApplySql'
+])
+param guestDiskPreparationExecutionTarget string = 'None'
+
 @description('Destination drive letter (single character, no colon) for the APP application data disk once enableGuestDiskPreparation is true.')
 param appDataVolumeDriveLetter string = 'A'
 
@@ -172,6 +183,18 @@ var sqlTags = union(tags, { role: 'sql' })
 // are read from the same single source, so the script's verification target
 // can never drift from the VM's actual disk attachment.
 var guestDiskPreparationScript = loadTextContent('scripts/Initialize-LimsGuestDataDisks.ps1')
+
+// guestDiskPreparationExecutionTarget drives, independently per VM, whether
+// its Run Command resource is deployed at all (appGuestDiskPreparationActive /
+// sqlGuestDiskPreparationActive) and which -Mode the script is invoked with.
+// Only one of the six allowed values is active at a time, so these two
+// Active flags can never both resolve to an Apply mode simultaneously —
+// there is no 'ApplyBoth' value for either flag to match.
+var appGuestDiskPreparationActive = enableGuestDiskPreparation && contains(['ValidateApp', 'ValidateBoth', 'ApplyApp'], guestDiskPreparationExecutionTarget)
+var appGuestDiskPreparationMode = (guestDiskPreparationExecutionTarget == 'ApplyApp') ? 'Apply' : 'Validate'
+
+var sqlGuestDiskPreparationActive = enableGuestDiskPreparation && contains(['ValidateSql', 'ValidateBoth', 'ApplySql'], guestDiskPreparationExecutionTarget)
+var sqlGuestDiskPreparationMode = (guestDiskPreparationExecutionTarget == 'ApplySql') ? 'Apply' : 'Validate'
 
 var appExpectedGuestDisks = [
   {
@@ -412,8 +435,9 @@ resource appUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }]
 
-// Opt-in only (see enableGuestDiskPreparation). Scoped to exactly appVm — no
-// other resource reference, tag filter, or subscription/resource-group-wide
+// Opt-in only (see enableGuestDiskPreparation and
+// guestDiskPreparationExecutionTarget). Scoped to exactly appVm — no other
+// resource reference, tag filter, or subscription/resource-group-wide
 // discovery is used anywhere in this composition. asyncExecution is left at
 // its documented default (false), and treatFailureAsDeploymentFailure is
 // explicitly true, so this deployment genuinely waits for the guest script
@@ -422,9 +446,16 @@ resource appUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-0
 // — a successful ARM deployment of this resource is not presented as
 // evidence of guest-script success independently of that behavior. No
 // RunAsUser/RunAsPassword is supplied, so the script executes as SYSTEM, the
-// documented default for Run Command on Windows. DvdLetterMoveTarget is
-// empty — this VM's DVD-ROM letter is never touched.
-resource appGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (enableGuestDiskPreparation) {
+// documented default for Run Command on Windows. scriptShell is left at its
+// documented default ('Default' = Windows PowerShell 5.1 on Windows —
+// see https://learn.microsoft.com/en-us/azure/templates/microsoft.compute/virtualmachines/runcommands
+// and the script's own EXECUTION RUNTIME header comment) — never
+// 'Powershell7', and PowerShell 7 is never installed on either VM.
+// DvdLetterMoveTarget is empty — this VM's DVD-ROM letter is never touched.
+// Target is always the literal 'App'; Mode follows
+// appGuestDiskPreparationMode (Validate unless guestDiskPreparationExecutionTarget
+// is exactly 'ApplyApp' — see that variable's comment above).
+resource appGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (appGuestDiskPreparationActive) {
   parent: appVm
   name: 'lims-guest-disk-preparation'
   location: location
@@ -434,6 +465,14 @@ resource appGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@
       script: guestDiskPreparationScript
     }
     parameters: [
+      {
+        name: 'Target'
+        value: 'App'
+      }
+      {
+        name: 'Mode'
+        value: appGuestDiskPreparationMode
+      }
       {
         name: 'ExpectedSubscriptionId'
         value: subscription().subscriptionId
@@ -673,13 +712,19 @@ resource sqlUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }]
 
-// Opt-in only (see enableGuestDiskPreparation). Scoped to exactly sqlVm —
-// same constraints and reasoning as appGuestDiskPreparation above.
-// DvdLetterMoveTarget is 'Z' — the one approved, conditional SQL-only DVD
-// letter move (E: -> Z:, only if E: is confirmed to be the empty virtual
-// DVD-ROM and Z: is free; the script fails rather than moving anything else
-// or overwriting an occupied Z:).
-resource sqlGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (enableGuestDiskPreparation) {
+// Opt-in only (see enableGuestDiskPreparation and
+// guestDiskPreparationExecutionTarget). Scoped to exactly sqlVm — same
+// constraints and reasoning as appGuestDiskPreparation above. DvdLetterMoveTarget
+// is 'Z' — the one approved, conditional SQL-only DVD letter move (E: -> Z:,
+// only if E: is confirmed to be the empty virtual DVD-ROM and Z: is free;
+// the script fails rather than moving anything else or overwriting an
+// occupied Z:). Target is always the literal 'Sql'; Mode follows
+// sqlGuestDiskPreparationMode (Validate unless guestDiskPreparationExecutionTarget
+// is exactly 'ApplySql' — see that variable's comment above). Because the
+// enum has no 'ApplyBoth' value, appGuestDiskPreparationMode and
+// sqlGuestDiskPreparationMode can never both be 'Apply' in the same
+// deployment.
+resource sqlGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (sqlGuestDiskPreparationActive) {
   parent: sqlVm
   name: 'lims-guest-disk-preparation'
   location: location
@@ -689,6 +734,14 @@ resource sqlGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@
       script: guestDiskPreparationScript
     }
     parameters: [
+      {
+        name: 'Target'
+        value: 'Sql'
+      }
+      {
+        name: 'Mode'
+        value: sqlGuestDiskPreparationMode
+      }
       {
         name: 'ExpectedSubscriptionId'
         value: subscription().subscriptionId
