@@ -1,0 +1,196 @@
+# =============================================================================
+# Deploy LIMS WS2025 DEV v2 Time-Zone Enforcement RBAC Grant
+# =============================================================================
+# Purpose:
+#   Grants the EXISTING, separately-managed subscription-scoped time-zone
+#   enforcement policy assignment (configure-windows-timezone-dev, built-in
+#   definition 6141c932-9384-44c6-a395-59e4c057d7c9) system-assigned identity
+#   exactly one built-in role - Guest Configuration Resource Contributor
+#   (088ab73d-1256-47ae-bea9-9de8e7131f31) - scoped to exactly the resource
+#   group hosting the two replacement LIMS WS2025 DEV v2 virtual machines
+#   (rg-compute-lims-dev-westeu). This is the single role and minimum
+#   effective scope that built-in policy definition's own
+#   policyRule.then.details.roleDefinitionIds requires for its
+#   DeployIfNotExists remediation - verified directly against the official
+#   policy source and Microsoft's remediation documentation, not assumed.
+#   Approved under the narrow LIMS WS2025 DEV v2 time-zone enforcement
+#   exception recorded in docs/scope.md.
+#
+# What this pipeline does NOT do:
+#   - Does not create, modify, or delete the existing time-zone policy
+#     assignment, any guest configuration assignment, or any other policy
+#     assignment/definition.
+#   - Does not create any identity, Entra object, or custom role. The role
+#     assignment targets the EXISTING system-assigned identity already
+#     reported by that policy assignment, supplied via the parameter file's
+#     timeZonePolicyAssignmentPrincipalId - never guessed or reconstructed.
+#   - Does not grant subscription-wide Owner/Contributor, or any role at
+#     subscription scope. Scope is exactly one resource group.
+#   - Does not create a remediation task. Creating this role assignment does
+#     not by itself correct any existing non-compliant resource - see
+#     docs/operations.md for the required separate, explicit remediation
+#     step, scoped only to the two named v2 VMs.
+#   - Does not install or modify the Machine Configuration (Guest
+#     Configuration) VM extension - that is deployed by
+#     deploy-lims-ws2025-dev-foundation.yml, not this pipeline.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action. Kept independently runnable
+# from deploy-lims-ws2025-dev-foundation.yml and
+# deploy-lims-ws2025-dev-patch-policy.yml so this narrow RBAC change can be
+# reviewed and deployed separately.
+#
+# No admin credentials: this deployment creates only a role assignment, so no
+# VM admin username/password are mapped here.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection (needs permission to create a role assignment scoped to the target resource group only - Microsoft.Authorization/roleAssignments/write at that scope; no broader permission is required or granted by this pipeline) - no default; the real value is customer-specific configuration
+    type: string
+
+  - name: targetSubscriptionId
+    displayName: Target Azure subscription ID to deploy into (same reused-service-connection pattern as the compute foundation and patch-policy pipelines; this subscription is explicitly selected via "az account set" at the start of every task below) - no default; required
+    type: string
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/nfi/lims/compute/lims-ws2025-dev-timezone-rbac.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+          echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+          exit 1
+        fi
+        az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+        selectedSubscriptionId=$(az account show --query id --output tsv)
+        selectedSubscriptionName=$(az account show --query name --output tsv)
+        if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+          echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+          exit 1
+        fi
+        echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+        echo "== bicep build: src/compute/lims-ws2025-dev-timezone-rbac/main.bicep =="
+        az bicep build --file "src/compute/lims-ws2025-dev-timezone-rbac/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/compute/lims-ws2025-dev-timezone-rbac/main.bicep =="
+        az bicep lint --file "src/compute/lims-ws2025-dev-timezone-rbac/main.bicep"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+    env:
+      TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            echo "NOTE: what-if does not preview downstream Policy remediation and does"
+            echo "not prove the two target VMs will become compliant. It previews only"
+            echo "the single roleAssignment resource below."
+
+            az deployment sub what-if \
+              --name "lims-ws2025-dev-timezone-rbac-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}"
+        env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deployTimezoneRbac
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${TARGET_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: TARGET_SUBSCRIPTION_ID is empty - map the targetSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$TARGET_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${TARGET_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested subscription '$TARGET_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription: $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            outputs=$(az deployment sub create \
+              --name "lims-ws2025-dev-timezone-rbac-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            roleAssignmentId=$(echo "$outputs" | jq -r '.roleAssignmentId.value')
+            resourceGroupName=$(echo "$outputs" | jq -r '.resourceGroupName.value')
+
+            echo "========================================="
+            echo "LIMS WS2025 DEV v2 time-zone enforcement RBAC grant deployed"
+            echo "========================================="
+            echo "  Role assignment ID  : $roleAssignmentId"
+            echo "  Resource group      : $resourceGroupName"
+            echo ""
+            echo "Reminder: this grant does not remediate any existing non-compliant"
+            echo "resource. A separate, explicit remediation task - scoped only to the"
+            echo "two named v2 VMs, not the whole subscription-wide policy assignment -"
+            echo "is required next. See docs/operations.md for the full validation"
+            echo "procedure, including confirming Get-TimeZone returns"
+            echo "'W. Europe Standard Time' on both VMs."
+        env:
+          TARGET_SUBSCRIPTION_ID: ${{ parameters.targetSubscriptionId }}

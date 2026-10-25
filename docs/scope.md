@@ -148,6 +148,28 @@ The "Managed identity exception (system-assigned only)" above does not authorize
 
 This does **not** authorize: creating a user-assigned managed identity resource, creating any new RBAC role assignment for that identity (both built-in definitions list the built-in Contributor role for remediation; whether the identity already holds that effective permission at the target scope, and whether the pipeline's service connection has permission to attach an existing identity to a policy assignment, must be verified outside this repository before any `deploy` action — see [`docs/operations.md`](operations.md)), or any other identity/RBAC change beyond referencing the existing identity's resource ID on these four assignments.
 
+### LIMS WS2025 DEV v2 — time-zone enforcement (Machine Configuration extension)
+
+"Infrastructure creation" always requires an explicit, specific decision before implementation (see "Explicit architecture decision required" above) — it is not categorically prohibited. For the two LIMS WS2025 DEV v2 virtual machines explicitly covered by the compute-foundation exception above, that decision is: install the Azure Machine Configuration (Guest Configuration) VM extension so an already-existing, separately-managed subscription-scoped time-zone enforcement policy assignment can evaluate and remediate those two VMs.
+
+This exception covers, for this workload only, exactly:
+
+- Two `Microsoft.Compute/virtualMachines/extensions` resources, each a child of one of the two named VMs (`vm-lims-dev-v2-westeu-001`, `vm-lims-dev-v2-westeu-002`), publisher `Microsoft.GuestConfiguration`, type `ConfigurationforWindows`, instance name `AzurePolicyforWindows` (this exact instance name is required by Microsoft's own baseline/Guest-Configuration policies, not an arbitrary choice here), with `autoUpgradeMinorVersion` and `enableAutomaticUpgrade` set per Microsoft's documented settings.
+
+It does **not** authorize: creating, modifying, or deleting the existing subscription-scoped time-zone policy assignment (`configure-windows-timezone-dev`) or its parameters; creating any `Microsoft.GuestConfiguration/guestConfigurationAssignments` resource (that resource is created by the existing policy's own remediation, outside this repository's authority); creating a second/duplicate time-zone policy or guest assignment; introducing any broader Guest-Configuration prerequisite initiative (e.g. the built-in "Deploy prerequisites to enable Guest Configuration policies on virtual machines" initiative); installing this or any other Guest Configuration extension on the v1 LIMS DEV VMs or any other workload; or any new identity (the extension relies on the VM's existing system-assigned identity — see "Managed identity exception (system-assigned only)" above, which already covers it). Expansion beyond these two VMs requires its own separate, specific decision recorded as a new exception.
+
+### RBAC decision (Guest Configuration Resource Contributor, resource-group scope) — LIMS WS2025 DEV v2 time-zone enforcement
+
+RBAC always requires an explicit, specific decision before implementation (see "Explicit architecture decision required" and "RBAC and Entra ID mutation are distinct" above) — it is not categorically prohibited, and assigning an existing Entra principal to an Azure role is not an Entra mutation. For the time-zone enforcement capability above only, that decision is: grant the EXISTING time-zone policy assignment's system-assigned identity (principal, not created by this repository) the single built-in role its own policy definition requires for remediation, at the narrowest scope that role's mechanics permit.
+
+This decision covers, for this workload only, exactly:
+
+- One `Microsoft.Authorization/roleAssignments` resource granting **Guest Configuration Resource Contributor** (`088ab73d-1256-47ae-bea9-9de8e7131f31`) to the existing time-zone policy assignment's system-assigned identity (principal ID supplied as an explicit parameter, never hardcoded or guessed), scoped to exactly the resource group hosting the two named v2 VMs (`rg-compute-lims-dev-westeu`) — not the subscription, not a VM.
+- Resource-group scope, rather than VM scope, is the architecturally minimum viable grant for this specific policy's DeployIfNotExists mechanics: Microsoft's own "Remediate non-compliant resources" documentation confirms the nested remediation deployment executes at the resource group of the target resource by default, and the Guest Configuration Resource Contributor role's own action list already includes `Microsoft.Resources/deployments/*` alongside the guest-configuration-assignment actions — so no second role is required, only this scope. See `docs/operations.md` for the full verification.
+- This resource group may contain resources beyond the two named v2 VMs (not fully confirmed from this repository alone — see `docs/operations.md`); this grant does not itself cause any remediation of any resource in that resource group — remediation still requires a separate, explicit, narrowly-targeted remediation task created outside this repository (see `docs/operations.md`).
+
+This does **not** authorize: subscription-wide Owner or Contributor, any role at subscription scope, any role beyond Guest Configuration Resource Contributor, creating or modifying the time-zone policy assignment or its identity, creating any new identity, or any RBAC grant for any other principal, workload, or VM. Expansion beyond this one role/principal/scope requires its own separate, specific decision recorded as a new exception.
+
 ## Prohibited
 
 No deployable functionality for:

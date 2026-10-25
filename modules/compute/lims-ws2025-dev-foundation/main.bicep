@@ -1,4 +1,4 @@
-metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, and the Microsoft Entra sign-in extension. Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server, performs no application/data migration, and configures no guest drive letters — those belong to later SQL-configuration/content-migration stages.'
+metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server, performs no application/data migration, and configures no guest drive letters — those belong to later SQL-configuration/content-migration stages.'
 
 targetScope = 'resourceGroup'
 
@@ -288,6 +288,32 @@ resource appAadLogin 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' =
   }
 }
 
+// Azure Machine Configuration (Guest Configuration) extension. Required so the
+// existing, separately-managed subscription-scoped time-zone enforcement
+// policy assignment (built-in definition 6141c932-9384-44c6-a395-59e4c057d7c9)
+// can evaluate and remediate this VM — this module does not create, modify,
+// or reference that policy assignment, or any guest configuration assignment,
+// itself (see docs/scope.md). Instance name, publisher, type, and upgrade
+// settings match Microsoft's documented deployment exactly
+// (https://learn.microsoft.com/en-us/azure/virtual-machines/extensions/guest-configuration).
+// The VM's system-assigned identity (always retained — see appIdentity above)
+// satisfies the extension's only other prerequisite. No settings/
+// protectedSettings are declared: the agent reads its configuration from the
+// guest configuration assignment resource, not from this extension.
+resource appGuestConfigurationExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = {
+  parent: appVm
+  name: 'AzurePolicyforWindows'
+  location: location
+  tags: appTags
+  properties: {
+    publisher: 'Microsoft.GuestConfiguration'
+    type: 'ConfigurationforWindows'
+    typeHandlerVersion: '1.0'
+    autoUpgradeMinorVersion: true
+    enableAutomaticUpgrade: true
+  }
+}
+
 resource appAdministratorLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-04-01' = [for principalId in appAdministratorLoginPrincipalIds: {
   name: guid(appVm.id, principalId, vmAdministratorLoginRoleDefinitionId)
   scope: appVm
@@ -478,6 +504,21 @@ resource sqlAadLogin 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' =
     type: 'AADLoginForWindows'
     typeHandlerVersion: '1.0'
     autoUpgradeMinorVersion: true
+  }
+}
+
+// Same purpose and constraints as appGuestConfigurationExtension above.
+resource sqlGuestConfigurationExtension 'Microsoft.Compute/virtualMachines/extensions@2024-11-01' = {
+  parent: sqlVm
+  name: 'AzurePolicyforWindows'
+  location: location
+  tags: sqlTags
+  properties: {
+    publisher: 'Microsoft.GuestConfiguration'
+    type: 'ConfigurationforWindows'
+    typeHandlerVersion: '1.0'
+    autoUpgradeMinorVersion: true
+    enableAutomaticUpgrade: true
   }
 }
 
