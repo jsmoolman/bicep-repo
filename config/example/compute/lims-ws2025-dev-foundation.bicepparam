@@ -11,6 +11,12 @@
 // Recovery Services Vault, and installs no SQL Server. Approved under the
 // narrow LIMS WS2025 Phase 1 exception recorded in docs/scope.md.
 //
+// enableGuestDiskPreparation (near the bottom of this file) is a separate,
+// disabled-by-default opt-in for initializing/formatting only the approved
+// APP/SQL data disks — see the "LIMS WS2025 DEV v2 — guest data-disk
+// preparation" exception in docs/scope.md and the matching section in
+// docs/operations.md before ever setting it to true.
+//
 // adminUsername / adminPassword are read from environment variables via
 // readEnvironmentVariable() rather than assigned a literal value — the
 // pipeline sets LIMS_WS2025_DEV_ADMIN_USERNAME / LIMS_WS2025_DEV_ADMIN_PASSWORD
@@ -51,13 +57,13 @@
 // exactly what is required before they can be set.
 using '../../../src/compute/lims-ws2025-dev-foundation/main.bicep'
 
-param resourceGroupResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-compute-lims-dev-westeu'
+param resourceGroupResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-compute-lims-dev-westeu'
 
 param location = 'westeurope'
 
-param subnetResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-network-lims-dev-westeu/providers/Microsoft.Network/virtualNetworks/vnet-lims-dev-westeu/subnets/snet-routable'
+param subnetResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-network-lims-dev-westeu/providers/Microsoft.Network/virtualNetworks/vnet-lims-dev-westeu/subnets/snet-routable'
 
-param diskEncryptionSetResourceId = '/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
+param diskEncryptionSetResourceId = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
 
 // The default values below are deliberately non-functional placeholders that
 // only satisfy static `bicep build-params` validation (e.g. in CI, where
@@ -134,3 +140,34 @@ param appUserLoginPrincipalIds = []
 param sqlAdministratorLoginPrincipalIds = []
 
 param sqlUserLoginPrincipalIds = []
+
+// Guest data-disk preparation (initialize/partition/format/assign drive
+// letter) is disabled by default — enableGuestDiskPreparation = false means
+// a normal redeployment of this example never formats anything. Flip to
+// true only after confirming the approved targets below (drive letters,
+// labels, allocation unit sizes) and after reading the full behavioral
+// contract in docs/operations.md. Every mutation target is still
+// independently re-verified at execution time via Azure Instance Metadata
+// Service identity, LUN, managed-disk resource name, and capacity checks —
+// this flag only controls whether the guest Run Command resource exists.
+param enableGuestDiskPreparation = false
+
+param appDataVolumeDriveLetter = 'A'
+
+param appDataVolumeLabel = 'LIMS-App'
+
+param appDataVolumeAllocationUnitBytes = 4096
+
+param sqlDataVolumeDriveLetter = 'E'
+
+param sqlDataVolumeLabel = 'SQL-Data'
+
+param sqlDataVolumeAllocationUnitBytes = 65536
+
+param sqlLogVolumeDriveLetter = 'F'
+
+param sqlLogVolumeLabel = 'SQL-Logs'
+
+param sqlLogVolumeAllocationUnitBytes = 65536
+
+param guestDiskPreparationTimeoutInSeconds = 1800

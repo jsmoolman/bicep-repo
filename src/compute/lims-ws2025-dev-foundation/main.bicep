@@ -1,4 +1,4 @@
-metadata description = 'Subscription-scoped orchestrator for the LIMS WS2025 Phase 1 compute foundation: deploys the replacement APP and SQL virtual machines, their NICs and managed disks, and the Microsoft Entra sign-in extension into the existing resource group that already hosts the LIMS DEV network/encryption foundation. Deploys no VNet, subnet, Key Vault, Disk Encryption Set, or any resource not explicitly covered by the LIMS WS2025 Phase 1 exception in docs/scope.md.'
+metadata description = 'Subscription-scoped orchestrator for the LIMS WS2025 Phase 1 compute foundation: deploys the replacement APP and SQL virtual machines, their NICs and managed disks, the Microsoft Entra sign-in extension, and (opt-in only, enableGuestDiskPreparation) guest data-disk preparation for their approved data disks, into the existing resource group that already hosts the LIMS DEV network/encryption foundation. Deploys no VNet, subnet, Key Vault, Disk Encryption Set, or any resource not explicitly covered by the LIMS WS2025 Phase 1 exception in docs/scope.md.'
 
 targetScope = 'subscription'
 
@@ -116,6 +116,39 @@ param sqlAdministratorLoginPrincipalIds array = []
 @description('Existing Entra security group object IDs to grant Virtual Machine User Login on the SQL VM. Empty (default) creates no role assignment.')
 param sqlUserLoginPrincipalIds array = []
 
+@description('Opt-in switch for automated guest data-disk preparation. Defaults to false. See modules/compute/lims-ws2025-dev-foundation for the full behavioral contract and docs/operations.md for the customer opt-in/validation procedure.')
+param enableGuestDiskPreparation bool = false
+
+@description('Destination drive letter (single character, no colon) for the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeDriveLetter string = 'A'
+
+@description('NTFS volume label applied to the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeLabel string = 'LIMS-App'
+
+@description('NTFS allocation unit size, in bytes, for the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeAllocationUnitBytes int = 4096
+
+@description('Destination drive letter (single character, no colon) for the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeDriveLetter string = 'E'
+
+@description('NTFS volume label applied to the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeLabel string = 'SQL-Data'
+
+@description('NTFS allocation unit size, in bytes, for the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeAllocationUnitBytes int = 65536
+
+@description('Destination drive letter (single character, no colon) for the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeDriveLetter string = 'F'
+
+@description('NTFS volume label applied to the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeLabel string = 'SQL-Logs'
+
+@description('NTFS allocation unit size, in bytes, for the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeAllocationUnitBytes int = 65536
+
+@description('Timeout, in seconds, for each guest data-disk preparation Run Command execution once enableGuestDiskPreparation is true.')
+param guestDiskPreparationTimeoutInSeconds int = 1800
+
 // ─── Derived scope ────────────────────────────────────────────────────────────
 // Subscription ID and resource group name are parsed out of
 // resourceGroupResourceId rather than accepted as separate parameters, mirroring
@@ -165,6 +198,17 @@ module foundation '../../../modules/compute/lims-ws2025-dev-foundation/main.bice
     appUserLoginPrincipalIds: appUserLoginPrincipalIds
     sqlAdministratorLoginPrincipalIds: sqlAdministratorLoginPrincipalIds
     sqlUserLoginPrincipalIds: sqlUserLoginPrincipalIds
+    enableGuestDiskPreparation: enableGuestDiskPreparation
+    appDataVolumeDriveLetter: appDataVolumeDriveLetter
+    appDataVolumeLabel: appDataVolumeLabel
+    appDataVolumeAllocationUnitBytes: appDataVolumeAllocationUnitBytes
+    sqlDataVolumeDriveLetter: sqlDataVolumeDriveLetter
+    sqlDataVolumeLabel: sqlDataVolumeLabel
+    sqlDataVolumeAllocationUnitBytes: sqlDataVolumeAllocationUnitBytes
+    sqlLogVolumeDriveLetter: sqlLogVolumeDriveLetter
+    sqlLogVolumeLabel: sqlLogVolumeLabel
+    sqlLogVolumeAllocationUnitBytes: sqlLogVolumeAllocationUnitBytes
+    guestDiskPreparationTimeoutInSeconds: guestDiskPreparationTimeoutInSeconds
   }
 }
 

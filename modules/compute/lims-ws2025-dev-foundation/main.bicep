@@ -1,4 +1,4 @@
-metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server, performs no application/data migration, and configures no guest drive letters — those belong to later SQL-configuration/content-migration stages.'
+metadata description = 'LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server and performs no application/data migration. Optionally (enableGuestDiskPreparation, default false) also initializes/partitions/formats/labels the APP application data disk and the two SQL data/log disks to their approved drive letters via a Run Command resource scoped to exactly these two VMs — see docs/operations.md for the full guest data-disk preparation behavioral contract.'
 
 targetScope = 'resourceGroup'
 
@@ -113,6 +113,39 @@ param sqlAdministratorLoginPrincipalIds array = []
 @description('Existing Entra security group object IDs to grant Virtual Machine User Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds. No DEV User Login assignment is currently approved/required for this VM, so this is expected to stay empty for DEV.')
 param sqlUserLoginPrincipalIds array = []
 
+@description('''Opt-in switch for automated guest data-disk preparation (initialize, partition, format, assign drive letter/label) on the APP application data disk and the two SQL data/log disks, delivered via Microsoft.Compute/virtualMachines/runCommands scoped to exactly these two VMs. Defaults to false — a normal foundation redeployment never formats a disk unless this is explicitly set to true. Every mutation target is still re-verified at execution time against Azure Instance Metadata Service identity, LUN, managed-disk resource name, and capacity before anything is touched — this flag only controls whether the Run Command resource is deployed at all. See docs/operations.md for the full behavioral contract, idempotency model, and customer opt-in/validation procedure.''')
+param enableGuestDiskPreparation bool = false
+
+@description('Destination drive letter (single character, no colon) for the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeDriveLetter string = 'A'
+
+@description('NTFS volume label applied to the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeLabel string = 'LIMS-App'
+
+@description('NTFS allocation unit size, in bytes, for the APP application data disk once enableGuestDiskPreparation is true.')
+param appDataVolumeAllocationUnitBytes int = 4096
+
+@description('Destination drive letter (single character, no colon) for the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeDriveLetter string = 'E'
+
+@description('NTFS volume label applied to the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeLabel string = 'SQL-Data'
+
+@description('NTFS allocation unit size, in bytes, for the SQL DATA disk once enableGuestDiskPreparation is true.')
+param sqlDataVolumeAllocationUnitBytes int = 65536
+
+@description('Destination drive letter (single character, no colon) for the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeDriveLetter string = 'F'
+
+@description('NTFS volume label applied to the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeLabel string = 'SQL-Logs'
+
+@description('NTFS allocation unit size, in bytes, for the SQL LOG disk once enableGuestDiskPreparation is true.')
+param sqlLogVolumeAllocationUnitBytes int = 65536
+
+@description('Timeout, in seconds, for each of the two guest data-disk preparation Run Command executions once enableGuestDiskPreparation is true. The managed Run Command resource blocks the deployment until the script completes or this timeout elapses (see docs/operations.md).')
+param guestDiskPreparationTimeoutInSeconds int = 1800
+
 // ─── Built-in role definition IDs (approved RBAC decision — see docs/scope.md) ───
 // GUIDs verified against Microsoft Learn's built-in roles reference. These are
 // read-only references to Microsoft's built-in role definitions via
@@ -124,6 +157,51 @@ var vmUserLoginRoleDefinitionId = subscriptionResourceId('Microsoft.Authorizatio
 
 var appTags = union(tags, { role: 'application' })
 var sqlTags = union(tags, { role: 'sql' })
+
+// ─── Guest data-disk preparation (opt-in — see enableGuestDiskPreparation) ───
+// Source kept reviewable in this repository as a plain .ps1 file and loaded
+// inline via loadTextContent() — never published to a storage account, never
+// containing a secret. Delivered to the guest via
+// Microsoft.Compute/virtualMachines/runCommands (see the two conditional
+// resources below), scoped to exactly appVm/sqlVm. See
+// modules/compute/lims-ws2025-dev-foundation/scripts/Initialize-LimsGuestDataDisks.ps1
+// for the full safety model and docs/operations.md for the behavioral
+// contract. Lun values below are the exact literal values already used by
+// appVm/sqlVm's own storageProfile.dataDisks[] attachments further down in
+// this file (0 for the APP data disk; 0/1 for the SQL data/log disks) — they
+// are read from the same single source, so the script's verification target
+// can never drift from the VM's actual disk attachment.
+var guestDiskPreparationScript = loadTextContent('scripts/Initialize-LimsGuestDataDisks.ps1')
+
+var appExpectedGuestDisks = [
+  {
+    Lun: 0
+    DiskName: appDataDiskName
+    SizeBytes: appDataDiskSizeGiB * 1024 * 1024 * 1024
+    DriveLetter: appDataVolumeDriveLetter
+    FileSystemLabel: appDataVolumeLabel
+    AllocationUnitBytes: appDataVolumeAllocationUnitBytes
+  }
+]
+
+var sqlExpectedGuestDisks = [
+  {
+    Lun: 0
+    DiskName: sqlDataDiskName
+    SizeBytes: sqlDataDiskSizeGiB * 1024 * 1024 * 1024
+    DriveLetter: sqlDataVolumeDriveLetter
+    FileSystemLabel: sqlDataVolumeLabel
+    AllocationUnitBytes: sqlDataVolumeAllocationUnitBytes
+  }
+  {
+    Lun: 1
+    DiskName: sqlLogDiskName
+    SizeBytes: sqlLogDiskSizeGiB * 1024 * 1024 * 1024
+    DriveLetter: sqlLogVolumeDriveLetter
+    FileSystemLabel: sqlLogVolumeLabel
+    AllocationUnitBytes: sqlLogVolumeAllocationUnitBytes
+  }
+]
 
 // ─── VM identity shape (preserve existing user-assigned identities, e.g. Azure Policy remediation identities) ───
 // Always retains SystemAssigned. When *ExistingUserAssignedIdentityResourceIds is
@@ -334,6 +412,59 @@ resource appUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-0
   }
 }]
 
+// Opt-in only (see enableGuestDiskPreparation). Scoped to exactly appVm — no
+// other resource reference, tag filter, or subscription/resource-group-wide
+// discovery is used anywhere in this composition. asyncExecution is left at
+// its documented default (false), and treatFailureAsDeploymentFailure is
+// explicitly true, so this deployment genuinely waits for the guest script
+// to finish and surfaces a non-zero script exit code as a deployment
+// failure (https://learn.microsoft.com/en-us/azure/virtual-machines/windows/run-command-managed)
+// — a successful ARM deployment of this resource is not presented as
+// evidence of guest-script success independently of that behavior. No
+// RunAsUser/RunAsPassword is supplied, so the script executes as SYSTEM, the
+// documented default for Run Command on Windows. DvdLetterMoveTarget is
+// empty — this VM's DVD-ROM letter is never touched.
+resource appGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (enableGuestDiskPreparation) {
+  parent: appVm
+  name: 'lims-guest-disk-preparation'
+  location: location
+  tags: appTags
+  properties: {
+    source: {
+      script: guestDiskPreparationScript
+    }
+    parameters: [
+      {
+        name: 'ExpectedSubscriptionId'
+        value: subscription().subscriptionId
+      }
+      {
+        name: 'ExpectedResourceGroupName'
+        value: resourceGroup().name
+      }
+      {
+        name: 'ExpectedVmName'
+        value: appVmName
+      }
+      {
+        name: 'ExpectedComputerName'
+        value: appComputerName
+      }
+      {
+        name: 'ExpectedDisksJson'
+        value: string(appExpectedGuestDisks)
+      }
+      {
+        name: 'DvdLetterMoveTarget'
+        value: ''
+      }
+    ]
+    timeoutInSeconds: guestDiskPreparationTimeoutInSeconds
+    treatFailureAsDeploymentFailure: true
+    asyncExecution: false
+  }
+}
+
 // ─── SQL: NIC, disks, VM ─────────────────────────────────────────────────────
 // Plain Windows Server 2025 Datacenter VM only — no SQL Server Marketplace
 // image, no SQL Server installation, no SQL IaaS Agent registration. The two
@@ -541,6 +672,53 @@ resource sqlUserLoginAssignments 'Microsoft.Authorization/roleAssignments@2022-0
     roleDefinitionId: vmUserLoginRoleDefinitionId
   }
 }]
+
+// Opt-in only (see enableGuestDiskPreparation). Scoped to exactly sqlVm —
+// same constraints and reasoning as appGuestDiskPreparation above.
+// DvdLetterMoveTarget is 'Z' — the one approved, conditional SQL-only DVD
+// letter move (E: -> Z:, only if E: is confirmed to be the empty virtual
+// DVD-ROM and Z: is free; the script fails rather than moving anything else
+// or overwriting an occupied Z:).
+resource sqlGuestDiskPreparation 'Microsoft.Compute/virtualMachines/runCommands@2024-11-01' = if (enableGuestDiskPreparation) {
+  parent: sqlVm
+  name: 'lims-guest-disk-preparation'
+  location: location
+  tags: sqlTags
+  properties: {
+    source: {
+      script: guestDiskPreparationScript
+    }
+    parameters: [
+      {
+        name: 'ExpectedSubscriptionId'
+        value: subscription().subscriptionId
+      }
+      {
+        name: 'ExpectedResourceGroupName'
+        value: resourceGroup().name
+      }
+      {
+        name: 'ExpectedVmName'
+        value: sqlVmName
+      }
+      {
+        name: 'ExpectedComputerName'
+        value: sqlComputerName
+      }
+      {
+        name: 'ExpectedDisksJson'
+        value: string(sqlExpectedGuestDisks)
+      }
+      {
+        name: 'DvdLetterMoveTarget'
+        value: 'Z'
+      }
+    ]
+    timeoutInSeconds: guestDiskPreparationTimeoutInSeconds
+    treatFailureAsDeploymentFailure: true
+    asyncExecution: false
+  }
+}
 
 // ─── Outputs ────────────────────────────────────────────────────────────────
 

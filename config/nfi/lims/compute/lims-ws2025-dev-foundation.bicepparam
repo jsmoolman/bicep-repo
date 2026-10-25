@@ -170,3 +170,29 @@ param appUserLoginPrincipalIds = []
 param sqlAdministratorLoginPrincipalIds = []
 
 param sqlUserLoginPrincipalIds = []
+
+// Guest data-disk preparation stays disabled until this capability has been
+// reviewed and the customer explicitly opts in — see docs/operations.md for
+// the full behavioral contract and the required post-deployment validation
+// procedure before ever setting this to true against these two VMs.
+param enableGuestDiskPreparation = false
+
+param appDataVolumeDriveLetter = 'A'
+
+param appDataVolumeLabel = 'LIMS-App'
+
+param appDataVolumeAllocationUnitBytes = 4096
+
+param sqlDataVolumeDriveLetter = 'E'
+
+param sqlDataVolumeLabel = 'SQL-Data'
+
+param sqlDataVolumeAllocationUnitBytes = 65536
+
+param sqlLogVolumeDriveLetter = 'F'
+
+param sqlLogVolumeLabel = 'SQL-Logs'
+
+param sqlLogVolumeAllocationUnitBytes = 65536
+
+param guestDiskPreparationTimeoutInSeconds = 1800
