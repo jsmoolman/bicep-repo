@@ -11,6 +11,87 @@ pool:
 steps:
   - checkout: self
 
+  - pwsh: |
+      $ErrorActionPreference = 'Stop'
+      # Guards the loadTextContent() 131,072-character hard limit (BCP184,
+      # https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/bicep-functions-files#loadtextcontent)
+      # with a conservative project budget, so a script-size regression fails
+      # fast and clearly here instead of surfacing as a confusing downstream
+      # BCP184/BCP062/BCP104 Bicep build error. Runs before Bicep build/lint.
+      $projectBudget = 100000
+      $bicepHardLimit = 131072
+
+      $bicepFiles = @(Get-ChildItem -Path . -Recurse -Filter '*.bicep')
+      if ($bicepFiles.Count -eq 0) {
+        Write-Host 'No .bicep files found — nothing to check.'
+        exit 0
+      }
+
+      $failed = $false
+      $checked = 0
+      foreach ($bicepFile in $bicepFiles) {
+        $bicepText = Get-Content -Raw -LiteralPath $bicepFile.FullName
+        $callMatches = [regex]::Matches($bicepText, "loadTextContent\(\s*'([^']+)'")
+        foreach ($m in $callMatches) {
+          $relativePath = $m.Groups[1].Value
+          # loadTextContent() paths are resolved relative to the .bicep file
+          # that contains the call, not the repository root or the CI working
+          # directory.
+          $targetPath = Join-Path $bicepFile.DirectoryName $relativePath
+          $checked++
+
+          if (-not (Test-Path -LiteralPath $targetPath -PathType Leaf)) {
+            Write-Host "FAIL: $($bicepFile.FullName) calls loadTextContent('$relativePath'), but '$targetPath' does not exist. A missing referenced file is a hard failure, never a silent pass."
+            $failed = $true
+            continue
+          }
+
+          try {
+            $bytes = [System.IO.File]::ReadAllBytes($targetPath)
+            # Strip a UTF-8 BOM (EF BB BF) before decoding, matching the
+            # character count every other tool in this repository reports
+            # (e.g. Get-Content -Raw, which strips the BOM automatically) —
+            # otherwise the BOM decodes as one extra U+FEFF character and the
+            # count is inflated by one versus the file's actual content.
+            if ($bytes.Length -ge 3 -and $bytes[0] -eq 0xEF -and $bytes[1] -eq 0xBB -and $bytes[2] -eq 0xBF) {
+              $bytes = $bytes[3..($bytes.Length - 1)]
+            }
+            # Strict UTF-8 decode: throws on invalid byte sequences instead of
+            # silently substituting replacement characters, so a decode error
+            # is a hard failure here rather than a silently wrong character count.
+            $strictUtf8 = [System.Text.UTF8Encoding]::new($false, $true)
+            $text = $strictUtf8.GetString($bytes)
+          }
+          catch {
+            Write-Host "FAIL: could not decode '$targetPath' as strict UTF-8: $($_.Exception.Message). A decode error is a hard failure, never a silent pass."
+            $failed = $true
+            continue
+          }
+
+          # Conservative CRLF normalization: collapse any existing CRLF to a
+          # single LF, then expand every remaining LF back to CRLF, so mixed
+          # or LF-only line endings are measured as if every line ending were
+          # CRLF (2 characters) — matching the convention used by Microsoft's
+          # documented loadTextContent() character limit ("including line
+          # endings").
+          $normalized = ($text -replace "`r`n", "`n") -replace "`n", "`r`n"
+          $length = $normalized.Length
+
+          Write-Host "$($targetPath): $length characters (CRLF-normalized)"
+          if ($length -gt $projectBudget) {
+            Write-Host "FAIL: '$targetPath' is $length characters (CRLF-normalized), which exceeds this project's $projectBudget-character budget."
+            Write-Host "The $projectBudget budget is a conservative margin below Bicep's documented $bicepHardLimit-character loadTextContent() hard limit (BCP184)."
+            Write-Host 'Move explanatory comments/research prose into a companion Markdown document and keep the script lean, rather than compressing, minifying, generating a runtime copy, Base64-wrapping, or hosting it externally.'
+            $failed = $true
+          }
+        }
+      }
+
+      Write-Host "Checked $checked loadTextContent() reference(s) across $($bicepFiles.Count) .bicep file(s)."
+      if ($failed) { exit 1 }
+      Write-Host 'All loadTextContent()-embedded scripts are within the project size budget.'
+    displayName: loadTextContent() script-size guard
+
   - bash: |
       set -euo pipefail
       shopt -s globstar nullglob
