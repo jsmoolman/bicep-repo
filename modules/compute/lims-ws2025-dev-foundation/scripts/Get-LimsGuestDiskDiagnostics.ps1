@@ -96,6 +96,43 @@ Write-Section 'Win32_DiskDrive SCSI addressing (https://learn.microsoft.com/en-u
 Get-CimInstance -ClassName Win32_DiskDrive | Select-Object Index, DeviceID, Model, Size, SCSIBus, SCSIPort, SCSITargetId, SCSILogicalUnit |
     Format-Table -AutoSize | Out-String -Width 4096 | Write-Output
 
+Write-Section 'IMDS resourceDisk.size reconciliation (does the documented x1024 conversion actually match any guest disk here?)'
+Write-Output 'This section makes the real-world IMDS resourceDisk.size discrepancy (if any) visible without manual arithmetic.'
+Write-Output 'resourceDisk.size is documented in kB (https://learn.microsoft.com/en-us/azure/virtual-machines/instance-metadata-service, "Storage Profile"); x1024 is the documented, correct kB-to-bytes conversion -- this section does NOT guess any alternate unit.'
+try {
+    if ($imdsCompute -and $imdsCompute.storageProfile -and $imdsCompute.storageProfile.resourceDisk -and $imdsCompute.storageProfile.resourceDisk.PSObject.Properties.Name -contains 'size') {
+        $rawKb = $imdsCompute.storageProfile.resourceDisk.size
+        $convertedBytes = [int64]$rawKb * 1024
+        Write-Output "Raw IMDS compute.storageProfile.resourceDisk.size: $rawKb (documented unit: kB)"
+        Write-Output "Documented x1024 byte conversion: $convertedBytes bytes"
+        $nonOsDisksForReconciliation = @(Get-Disk | Where-Object { -not ($_.IsBoot -or $_.IsSystem) })
+        if ($nonOsDisksForReconciliation.Count -eq 0) {
+            Write-Output 'No non-OS Windows disks found to compare against.'
+        }
+        else {
+            $anyExactMatch = $false
+            foreach ($d in $nonOsDisksForReconciliation) {
+                $diffBytes = [int64]$d.Size - $convertedBytes
+                $reconciles = [math]::Abs($diffBytes) -le 67108864
+                if ($reconciles) { $anyExactMatch = $true }
+                Write-Output ("  Windows disk {0} (UniqueId={1}): Size={2} bytes, diff from converted resourceDisk.size={3} bytes, reconciles(<=64MiB)={4}" -f $d.Number, $d.UniqueId, $d.Size, $diffBytes, $reconciles)
+            }
+            if (-not $anyExactMatch) {
+                Write-Output 'RESULT: the documented IMDS resourceDisk.size conversion does NOT reconcile with ANY non-OS disk currently attached to this guest. This is the exact real-world condition that causes Select-NonOsNonTemporaryDiskCandidates in Initialize-LimsGuestDataDisks.ps1 to block the whole plan for this VM today.'
+            }
+            else {
+                Write-Output 'RESULT: at least one non-OS disk reconciles with the documented conversion (within tolerance).'
+            }
+        }
+    }
+    else {
+        Write-Output 'storageProfile.resourceDisk.size was not present in the IMDS response above; no reconciliation possible.'
+    }
+}
+catch {
+    Write-Output "Reconciliation check failed: $($_.Exception.Message)"
+}
+
 Write-Section 'Get-Partition (https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/msft-partition)'
 Get-Partition | Select-Object DiskNumber, PartitionNumber, DriveLetter, Type, GptType, Size, IsOffline, IsReadOnly, @{Name = 'AccessPaths'; Expression = { $_.AccessPaths -join ' | ' } } |
     Format-Table -AutoSize | Out-String -Width 4096 | Write-Output
@@ -111,6 +148,30 @@ Get-CimInstance -ClassName Win32_Volume | Where-Object { $_.DriveType -eq 5 } | 
 Write-Section 'Win32_CDROMDrive (https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-cdromdrive)'
 Get-CimInstance -ClassName Win32_CDROMDrive | Select-Object DeviceID, Name, Drive, MediaLoaded, SCSIBus, SCSIPort, SCSITargetId, SCSILogicalUnit |
     Format-Table -AutoSize | Out-String -Width 4096 | Write-Output
+
+Write-Section 'Non-OS disk UniqueId + SCSI addressing (needed ONLY if deliberately enabling the proposed, disabled-by-default customer-attested-binding mode)'
+Write-Output 'Initialize-LimsGuestDataDisks.ps1 defines an OPTIONAL, DISABLED-BY-DEFAULT AttestedGuestUniqueId field per approved disk descriptor in Get-ApprovedDiskPreparationAllowlist.'
+Write-Output 'It is left empty ("") for every disk today -- automatic identification remains the default path. If, and only if, a human reviewer deliberately decides to enable that proposal for a'
+Write-Output 'specific approved disk, the exact Get-Disk.UniqueId values below (joined with each disk''s SCSI bus/port/target/LUN, to help a reviewer tell which physical disk is which) are exactly'
+Write-Output 'what would need to be copied into that disk''s AttestedGuestUniqueId allowlist field, after independently confirming (e.g. against the Azure portal/CLI disk resource) that the disk'
+Write-Output 'carrying that UniqueId really is the intended managed disk. A UniqueId alone is never treated as proof of the Azure resource relationship by that logic -- it is layered on top of,'
+Write-Output 'never a replacement for, the existing exact managed-disk resource ID and LUN checks.'
+try {
+    $nonOsDisksForAttestation = @(Get-Disk | Where-Object { -not ($_.IsBoot -or $_.IsSystem) })
+    if ($nonOsDisksForAttestation.Count -eq 0) {
+        Write-Output 'No non-OS Windows disks found.'
+    }
+    else {
+        foreach ($d in $nonOsDisksForAttestation) {
+            $scsi = Get-CimInstance -ClassName Win32_DiskDrive | Where-Object { $_.Index -eq $d.Number } | Select-Object -First 1
+            Write-Output ("  Windows disk {0}: UniqueId={1}, Size={2} bytes, PartitionStyle={3}, SCSI bus={4}/port={5}/target={6}/LUN={7}" -f `
+                    $d.Number, $d.UniqueId, $d.Size, $d.PartitionStyle, $scsi.SCSIBus, $scsi.SCSIPort, $scsi.SCSITargetId, $scsi.SCSILogicalUnit)
+        }
+    }
+}
+catch {
+    Write-Output "Non-OS disk UniqueId enumeration failed: $($_.Exception.Message)"
+}
 
 Write-Output ''
 Write-Output 'End of read-only diagnostics. No mutation was performed.'

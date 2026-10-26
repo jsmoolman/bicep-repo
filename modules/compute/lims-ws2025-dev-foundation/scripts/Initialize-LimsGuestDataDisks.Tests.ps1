@@ -86,10 +86,27 @@ BeforeAll {
             [Parameter(Mandatory = $true)] [int64] $SizeBytes,
             [string] $SubscriptionId = $script:AllowedApp.SubscriptionId,
             [string] $ResourceGroupName = $script:AllowedApp.ResourceGroupName,
-            [string] $ManagedDiskId
+            [string] $ManagedDiskId,
+            # Real-evidence shape (CONFIRMED real APP/SQL customer VMs):
+            # diskCapacityBytes is empty/absent on these real, non-Ultra
+            # managed disks, and diskSizeGB (nominal, whole-GiB) is the
+            # only populated IMDS capacity field. Default ($false) keeps
+            # every existing fixture/test using diskCapacityBytes exactly
+            # as before; pass $true to build the REALISTIC shape used by
+            # the real-evidence tests below.
+            [switch] $UseDiskSizeGB
         )
         if (-not $ManagedDiskId) {
             $ManagedDiskId = "/subscriptions/$SubscriptionId/resourceGroups/$ResourceGroupName/providers/Microsoft.Compute/disks/$DiskName"
+        }
+        if ($UseDiskSizeGB) {
+            return [pscustomobject]@{
+                lun               = $Lun
+                name              = $DiskName
+                diskCapacityBytes = ''
+                diskSizeGB        = [int64]($SizeBytes / 1024 / 1024 / 1024)
+                managedDisk       = [pscustomobject]@{ id = $ManagedDiskId }
+            }
         }
         return [pscustomobject]@{
             lun               = $Lun
@@ -595,6 +612,161 @@ Describe 'Select-NonOsNonTemporaryDiskCandidates' {
         $result.Error | Should -Not -BeNullOrEmpty
         $result.Candidates.Count | Should -Be 0
     }
+
+    # ---- Defect fix: a nonzero platform-reported temporary disk size that
+    #      matches ZERO guest disks must BLOCK, never be silently treated
+    #      as "no temporary disk present" (previous behavior incorrectly
+    #      accepted zero matches and returned every non-OS disk as a
+    #      candidate). ------------------------------------------------------
+
+    It 'fails (blocks) when IMDS reports a negative (contradictory/malformed) resourceDisk.size-derived byte count, never silently treating it as "no temporary disk"' {
+        $osDisk = New-FakeOsDisk
+        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'data' -SizeBytes (128 * 1024 * 1024 * 1024) -ScsiLogicalUnit 0
+        $result = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory @($osDisk, $dataDisk) -ImdsResourceDiskSizeBytes ([int64]-1)
+        $result.Error | Should -Not -BeNullOrEmpty
+        $result.Candidates.Count | Should -Be 0
+    }
+
+    It 'fails (blocks) when IMDS reports a nonzero temporary disk size but no non-OS disk matches it, rather than silently admitting every non-OS disk as a candidate' {
+        $osDisk = New-FakeOsDisk
+        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'data' -SizeBytes (128 * 1024 * 1024 * 1024) -ScsiLogicalUnit 0
+        $result = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory @($osDisk, $dataDisk) -ImdsResourceDiskSizeBytes $script:TestDefaultTempDiskSizeBytes
+        $result.Error | Should -Not -BeNullOrEmpty
+        $result.Candidates.Count | Should -Be 0
+    }
+
+    It 'fails (blocks) using the REAL customer evidence: IMDS resourceDisk.size="201728" (x1024 = 206569472 bytes) does not match the real, guest-confirmed 161059207680-byte (~150 GiB) temporary disk on the actual non-OS disks present' {
+        $osDisk = New-FakeOsDisk
+        $realTempDisk = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiTargetId 0 -ScsiLogicalUnit 1
+        $appDataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -SizeBytes $script:AllowedApp.Disks[0].SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
+        $realImds = New-FakeImdsCompute -Name $script:AllowedApp.VmName -ResourceDiskSizeBytes ([int64]201728 * 1024)
+        $sizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $realImds
+        $sizeBytes | Should -Be 206569472
+        $result = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory @($osDisk, $realTempDisk, $appDataDisk) -ImdsResourceDiskSizeBytes $sizeBytes
+        $result.Error | Should -Not -BeNullOrEmpty
+        $result.Candidates.Count | Should -Be 0
+    }
+
+    # ---- Customer-attested guest-disk-UniqueId binding proposal:
+    #      -SkipTemporaryDiskExclusion bypass (used only once the caller
+    #      has independently confirmed attested-mode is valid). -----------
+
+    It 'returns every non-OS disk (including the temporary disk) as a candidate when -SkipTemporaryDiskExclusion is set, even for the real, otherwise-irreconcilable evidence' {
+        $osDisk = New-FakeOsDisk
+        $realTempDisk = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiTargetId 0 -ScsiLogicalUnit 1
+        $appDataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -SizeBytes $script:AllowedApp.Disks[0].SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
+        $realImds = New-FakeImdsCompute -Name $script:AllowedApp.VmName -ResourceDiskSizeBytes ([int64]201728 * 1024)
+        $sizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $realImds
+        $result = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory @($osDisk, $realTempDisk, $appDataDisk) -ImdsResourceDiskSizeBytes $sizeBytes -SkipTemporaryDiskExclusion $true
+        $result.Error | Should -BeNullOrEmpty
+        $result.Candidates.Count | Should -Be 2
+    }
+
+    It 'still rejects the OS-disk-count and invalid-SCSI checks even when -SkipTemporaryDiskExclusion is set (not a blanket bypass of every check)' {
+        $badDisk = New-FakeGuestDisk -Number 2 -UniqueId 'bad' -SizeBytes (128 * 1024 * 1024 * 1024) -ScsiBus -1 -ScsiPort -1 -ScsiTargetId -1 -ScsiLogicalUnit -1
+        $result = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory @((New-FakeOsDisk), $badDisk) -ImdsResourceDiskSizeBytes $null -SkipTemporaryDiskExclusion $true
+        $result.Error | Should -Not -BeNullOrEmpty
+        $result.Candidates.Count | Should -Be 0
+    }
+}
+
+# =============================================================================
+# 3a) Bounded, one-sided, evidence-calibrated managed-disk capacity
+#     tolerance (defect: real managed disks expose guest-visible byte
+#     counts slightly SMALLER than nominal diskSizeGB-derived bytes;
+#     real evidence from APP/SQL DATA/SQL LOG).
+# =============================================================================
+
+Describe 'Test-ManagedDiskCapacityWithinTolerance' {
+    It 'accepts an exact match' {
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes 137438953472 -NominalBytes 137438953472 | Should -BeTrue
+    }
+
+    It 'accepts the real APP data disk evidence (nominal 137438953472 vs actual guest 137436250112 bytes)' {
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes 137436250112 -NominalBytes 137438953472 | Should -BeTrue
+    }
+
+    It 'accepts the real SQL DATA evidence (nominal 1099511627776 vs actual guest 1099506078720 bytes)' {
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes 1099506078720 -NominalBytes 1099511627776 | Should -BeTrue
+    }
+
+    It 'accepts the real SQL LOG evidence (nominal 549755813888 vs actual guest 549753039360 bytes)' {
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes 549753039360 -NominalBytes 549755813888 | Should -BeTrue
+    }
+
+    It 'rejects a value just OUTSIDE the tolerance band' {
+        $nominal = [int64]128 * 1024 * 1024 * 1024
+        $justOutside = $nominal - [int64]([math]::Floor($nominal * 0.0001)) - 1
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes $justOutside -NominalBytes $nominal | Should -BeFalse
+    }
+
+    It 'rejects actual capacity GREATER than nominal (one-sided -- never allow the guest to report MORE than the approved nominal size)' {
+        $nominal = [int64]128 * 1024 * 1024 * 1024
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes ($nominal + 1) -NominalBytes $nominal | Should -BeFalse
+    }
+
+    It 'rejects a grossly undersized disk (e.g. a 1 GiB disk reported against a 128 GiB nominal size)' {
+        Test-ManagedDiskCapacityWithinTolerance -ActualBytes ([int64]1 * 1024 * 1024 * 1024) -NominalBytes ([int64]128 * 1024 * 1024 * 1024) | Should -BeFalse
+    }
+}
+
+# =============================================================================
+# 3b) Customer-attested guest-disk-UniqueId binding configuration validator
+#     (OPTIONAL, disabled-by-default proposal) -- all-or-nothing per VM,
+#     duplicate rejection.
+# =============================================================================
+
+Describe 'Test-AttestedGuestUniqueIdBindingConfiguration' {
+    It 'reports disabled (IsAttestedMode=$false, no error) when every disk has an empty AttestedGuestUniqueId -- today''s actual real allowlist state' {
+        $disks = @(
+            [pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = '' }
+            [pscustomobject]@{ Lun = 1; AttestedGuestUniqueId = '' }
+        )
+        $result = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $disks
+        $result.IsAttestedMode | Should -BeFalse
+        $result.Error | Should -BeNullOrEmpty
+    }
+
+    It 'reports attested mode enabled when every disk carries a non-empty, mutually unique AttestedGuestUniqueId' {
+        $disks = @(
+            [pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = '60022480FC5A2FF57B5FE802967E448E' }
+            [pscustomobject]@{ Lun = 1; AttestedGuestUniqueId = '60022480042D640894BBE41BA513DCFC' }
+        )
+        $result = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $disks
+        $result.IsAttestedMode | Should -BeTrue
+        $result.Error | Should -BeNullOrEmpty
+    }
+
+    It 'rejects a mixed configuration (some but not all disks attested) as a missing-binding error, never a silent fallback' {
+        $disks = @(
+            [pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = '60022480FC5A2FF57B5FE802967E448E' }
+            [pscustomobject]@{ Lun = 1; AttestedGuestUniqueId = '' }
+        )
+        $result = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $disks
+        $result.IsAttestedMode | Should -BeFalse
+        $result.Error | Should -Not -BeNullOrEmpty
+    }
+
+    It 'rejects a duplicate attested UniqueId reused across more than one disk' {
+        $disks = @(
+            [pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = 'same-uid' }
+            [pscustomobject]@{ Lun = 1; AttestedGuestUniqueId = 'same-uid' }
+        )
+        $result = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $disks
+        $result.IsAttestedMode | Should -BeFalse
+        $result.Error | Should -Not -BeNullOrEmpty
+    }
+
+    It 'reports disabled for a single-disk target (App) with an empty AttestedGuestUniqueId' {
+        $result = Test-AttestedGuestUniqueIdBindingConfiguration -Disks @([pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = '' })
+        $result.IsAttestedMode | Should -BeFalse
+        $result.Error | Should -BeNullOrEmpty
+    }
+
+    It 'confirms the REAL fixed allowlist is today entirely in disabled (non-attested) mode for both App and Sql' {
+        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedApp.Disks).IsAttestedMode | Should -BeFalse
+        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedSql.Disks).IsAttestedMode | Should -BeFalse
+    }
 }
 
 # =============================================================================
@@ -707,6 +879,112 @@ Describe 'Resolve-ApprovedDiskTarget' {
             -CandidateGuestDisks @($noUidCandidate) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId `
             -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName
         $result.Error | Should -Not -BeNullOrEmpty
+    }
+
+    # ---- Defect fix: bounded, one-sided capacity tolerance using the REAL
+    #      customer evidence (empty diskCapacityBytes, populated diskSizeGB,
+    #      and a guest byte count slightly smaller than nominal). ---------
+
+    Context 'Real-evidence capacity tolerance' {
+        It 'accepts the real APP data disk: IMDS diskSizeGB=128 (diskCapacityBytes empty) against a guest disk reporting the real 137436250112 bytes' {
+            $appExpected = $script:AllowedApp.Disks[0]
+            $realImdsDisk = New-FakeImdsDataDisk -Lun $appExpected.Lun -DiskName $appExpected.DiskName -SizeBytes $appExpected.SizeBytes -UseDiskSizeGB
+            $realImdsDisk.diskCapacityBytes | Should -BeNullOrEmpty
+            $realGuestDisk = New-FakeGuestDisk -Number 2 -UniqueId '60022480D1B07E6ACD98417F86591F4B' -PartitionStyle 'RAW' -SizeBytes 137436250112 -ScsiLogicalUnit $appExpected.Lun
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $appExpected -ImdsDataDisks @($realImdsDisk) `
+                -CandidateGuestDisks @($realGuestDisk) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName
+            $result.Error | Should -BeNullOrEmpty
+            $result.Target.DiskUniqueId | Should -Be '60022480D1B07E6ACD98417F86591F4B'
+        }
+
+        It 'accepts the real SQL DATA disk: IMDS diskSizeGB=1024 against a guest disk reporting the real 1099506078720 bytes' {
+            $sqlDataExpected = $script:AllowedSql.Disks | Where-Object Lun -EQ 0
+            $realImdsDisk = New-FakeImdsDataDisk -Lun $sqlDataExpected.Lun -DiskName $sqlDataExpected.DiskName -SizeBytes $sqlDataExpected.SizeBytes -UseDiskSizeGB `
+                -SubscriptionId $script:AllowedSql.SubscriptionId -ResourceGroupName $script:AllowedSql.ResourceGroupName
+            $realGuestDisk = New-FakeGuestDisk -Number 2 -UniqueId '60022480FC5A2FF57B5FE802967E448E' -PartitionStyle 'RAW' -SizeBytes 1099506078720 -ScsiLogicalUnit $sqlDataExpected.Lun
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $sqlDataExpected -ImdsDataDisks @($realImdsDisk) `
+                -CandidateGuestDisks @($realGuestDisk) -ExpectedSubscriptionId $script:AllowedSql.SubscriptionId -ExpectedResourceGroupName $script:AllowedSql.ResourceGroupName
+            $result.Error | Should -BeNullOrEmpty
+        }
+
+        It 'accepts the real SQL LOG disk: IMDS diskSizeGB=512 against a guest disk reporting the real 549753039360 bytes' {
+            $sqlLogExpected = $script:AllowedSql.Disks | Where-Object Lun -EQ 1
+            $realImdsDisk = New-FakeImdsDataDisk -Lun $sqlLogExpected.Lun -DiskName $sqlLogExpected.DiskName -SizeBytes $sqlLogExpected.SizeBytes -UseDiskSizeGB `
+                -SubscriptionId $script:AllowedSql.SubscriptionId -ResourceGroupName $script:AllowedSql.ResourceGroupName
+            $realGuestDisk = New-FakeGuestDisk -Number 3 -UniqueId '60022480042D640894BBE41BA513DCFC' -PartitionStyle 'RAW' -SizeBytes 549753039360 -ScsiLogicalUnit $sqlLogExpected.Lun
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $sqlLogExpected -ImdsDataDisks @($realImdsDisk) `
+                -CandidateGuestDisks @($realGuestDisk) -ExpectedSubscriptionId $script:AllowedSql.SubscriptionId -ExpectedResourceGroupName $script:AllowedSql.ResourceGroupName
+            $result.Error | Should -BeNullOrEmpty
+        }
+
+        It 'still rejects a guest disk capacity that is outside the bounded tolerance, even with the realistic diskSizeGB-only IMDS shape' {
+            $appExpected = $script:AllowedApp.Disks[0]
+            $realImdsDisk = New-FakeImdsDataDisk -Lun $appExpected.Lun -DiskName $appExpected.DiskName -SizeBytes $appExpected.SizeBytes -UseDiskSizeGB
+            $tooSmallGuestDisk = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -PartitionStyle 'RAW' -SizeBytes ([int64]1 * 1024 * 1024 * 1024) -ScsiLogicalUnit $appExpected.Lun
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $appExpected -ImdsDataDisks @($realImdsDisk) `
+                -CandidateGuestDisks @($tooSmallGuestDisk) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName
+            $result.Error | Should -Not -BeNullOrEmpty
+        }
+    }
+
+    # ---- Customer-attested guest-disk-UniqueId binding proposal:
+    #      -AttestedGuestUniqueId disambiguation (never a replacement for
+    #      the existing managed-disk-ID/LUN checks). ----------------------
+
+    Context 'Customer-attested guest UniqueId disambiguation' {
+        It 'correctly disambiguates a genuine real-world LUN collision: the temporary disk shares SQL LOG''s guest SCSILogicalUnit=1, but only the attested UniqueId matches the real log disk' {
+            $sqlLogExpected = $script:AllowedSql.Disks | Where-Object Lun -EQ 1
+            $imdsLogDisk = New-FakeImdsDataDisk -Lun $sqlLogExpected.Lun -DiskName $sqlLogExpected.DiskName -SizeBytes $sqlLogExpected.SizeBytes `
+                -SubscriptionId $script:AllowedSql.SubscriptionId -ResourceGroupName $script:AllowedSql.ResourceGroupName
+            # Both candidates share the SAME guest ScsiLogicalUnit (1) --
+            # exactly the real collision between the temp disk (bus0/port0)
+            # and SQL LOG (bus0/port1) -- only UniqueId disambiguates them.
+            $temporaryDiskCollidingOnLun = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiLogicalUnit 1
+            $realLogDisk = New-FakeGuestDisk -Number 3 -UniqueId '60022480042D640894BBE41BA513DCFC' -SizeBytes $sqlLogExpected.SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiLogicalUnit 1
+
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $sqlLogExpected -ImdsDataDisks @($imdsLogDisk) `
+                -CandidateGuestDisks @($temporaryDiskCollidingOnLun, $realLogDisk) `
+                -ExpectedSubscriptionId $script:AllowedSql.SubscriptionId -ExpectedResourceGroupName $script:AllowedSql.ResourceGroupName `
+                -AttestedGuestUniqueId '60022480042D640894BBE41BA513DCFC'
+            $result.Error | Should -BeNullOrEmpty
+            $result.Target.DiskNumber | Should -Be 3
+            $result.Target.DiskUniqueId | Should -Be '60022480042D640894BBE41BA513DCFC'
+        }
+
+        It 'blocks when the attested UniqueId matches ZERO candidates at the approved LUN' {
+            $sqlLogExpected = $script:AllowedSql.Disks | Where-Object Lun -EQ 1
+            $imdsLogDisk = New-FakeImdsDataDisk -Lun $sqlLogExpected.Lun -DiskName $sqlLogExpected.DiskName -SizeBytes $sqlLogExpected.SizeBytes `
+                -SubscriptionId $script:AllowedSql.SubscriptionId -ResourceGroupName $script:AllowedSql.ResourceGroupName
+            $realLogDisk = New-FakeGuestDisk -Number 3 -UniqueId 'some-other-uid' -SizeBytes $sqlLogExpected.SizeBytes -ScsiLogicalUnit 1
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $sqlLogExpected -ImdsDataDisks @($imdsLogDisk) `
+                -CandidateGuestDisks @($realLogDisk) `
+                -ExpectedSubscriptionId $script:AllowedSql.SubscriptionId -ExpectedResourceGroupName $script:AllowedSql.ResourceGroupName `
+                -AttestedGuestUniqueId '60022480042D640894BBE41BA513DCFC'
+            $result.Error | Should -Not -BeNullOrEmpty
+        }
+
+        It 'blocks when the attested UniqueId matches MORE THAN ONE candidate (duplicate UniqueId reported by the guest)' {
+            $sqlLogExpected = $script:AllowedSql.Disks | Where-Object Lun -EQ 1
+            $imdsLogDisk = New-FakeImdsDataDisk -Lun $sqlLogExpected.Lun -DiskName $sqlLogExpected.DiskName -SizeBytes $sqlLogExpected.SizeBytes `
+                -SubscriptionId $script:AllowedSql.SubscriptionId -ResourceGroupName $script:AllowedSql.ResourceGroupName
+            $dup1 = New-FakeGuestDisk -Number 3 -UniqueId 'attested-uid' -SizeBytes $sqlLogExpected.SizeBytes -ScsiLogicalUnit 1
+            $dup2 = New-FakeGuestDisk -Number 4 -UniqueId 'attested-uid' -SizeBytes $sqlLogExpected.SizeBytes -ScsiLogicalUnit 1
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $sqlLogExpected -ImdsDataDisks @($imdsLogDisk) `
+                -CandidateGuestDisks @($dup1, $dup2) `
+                -ExpectedSubscriptionId $script:AllowedSql.SubscriptionId -ExpectedResourceGroupName $script:AllowedSql.ResourceGroupName `
+                -AttestedGuestUniqueId 'attested-uid'
+            $result.Error | Should -Not -BeNullOrEmpty
+        }
+
+        It 'a correct attested UniqueId does NOT bypass a wrong managed-disk resource ID -- UniqueId is never, by itself, proof of the Azure resource relationship' {
+            $wrongIdDisk = New-FakeImdsDataDisk -Lun 0 -DiskName $script:expectedDisk.DiskName -SizeBytes $script:expectedDisk.SizeBytes `
+                -SubscriptionId '11111111-1111-1111-1111-111111111111'
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $script:expectedDisk -ImdsDataDisks @($wrongIdDisk) `
+                -CandidateGuestDisks @($script:goodCandidate) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId `
+                -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName -AttestedGuestUniqueId 'app-data-uid'
+            $result.Error | Should -Not -BeNullOrEmpty
+            $result.Target | Should -BeNullOrEmpty
+        }
     }
 }
 
@@ -1167,6 +1445,69 @@ Describe 'Get-GuestDiskPreparationPlan' {
         )
         $plan = Invoke-PlanFromFixture -Target 'App' -Fixture $fixture
         $plan.Blocked | Should -BeTrue
+    }
+
+    # ---- Whole-plan test using the REAL customer evidence end-to-end:
+    #      the real IMDS resourceDisk.size discrepancy must block the
+    #      ENTIRE plan with zero disk plans, never partially succeed. ----
+
+    It 'blocks the whole plan with zero DiskPlans using the real APP customer evidence (IMDS resourceDisk.size="201728" vs the real ~150 GiB temporary disk)' {
+        $appExpected = $script:AllowedApp.Disks[0]
+        $osDisk = New-FakeOsDisk -Number 0
+        $realTempDisk = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiTargetId 0 -ScsiLogicalUnit 1
+        $realAppDataDisk = New-FakeGuestDisk -Number 2 -UniqueId '60022480D1B07E6ACD98417F86591F4B' -SizeBytes 137436250112 -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
+        $realImds = New-FakeImdsCompute -ResourceDiskSizeBytes ([int64]201728 * 1024) -DataDisks @(
+            (New-FakeImdsDataDisk -Lun $appExpected.Lun -DiskName $appExpected.DiskName -SizeBytes $appExpected.SizeBytes -UseDiskSizeGB)
+        )
+        $fixture = [pscustomobject]@{
+            Disks = @($osDisk, $realTempDisk, $realAppDataDisk); Partitions = @(); Volumes = @(); DvdVolumes = @(); OpticalDrives = @(); Imds = $realImds
+        }
+        $plan = Invoke-PlanFromFixture -Target 'App' -Fixture $fixture
+        $plan.Blocked | Should -BeTrue
+        $plan.DiskPlans.Count | Should -Be 0
+        $plan.Errors.Count | Should -BeGreaterThan 0
+    }
+
+    It 'resolves the case-insensitively matching, uppercase-reported SQL resource group exactly as the lowercase allowlist value' {
+        $fixture = New-SqlRawGuestFixture
+        $fixture.Imds.resourceGroupName = $script:AllowedSql.ResourceGroupName.ToUpperInvariant()
+        $fixture.Imds.storageProfile.dataDisks = @($fixture.Imds.storageProfile.dataDisks | ForEach-Object {
+                $_.managedDisk.id = $_.managedDisk.id -replace [regex]::Escape($script:AllowedSql.ResourceGroupName), $script:AllowedSql.ResourceGroupName.ToUpperInvariant()
+                $_
+            })
+        $plan = Invoke-PlanFromFixture -Target 'Sql' -Fixture $fixture
+        $plan.Blocked | Should -BeFalse
+        $plan.DiskPlans.Count | Should -Be 2
+    }
+
+    It 'blocks the whole target when the fixed allowlist''s own attested-binding configuration is inconsistent (mixed: one disk attested, the other not), even before any guest/IMDS query matters' {
+        Mock Get-ApprovedDiskPreparationAllowlist {
+            $mixedDisk0 = $script:AllowedSql.Disks[0].PSObject.Copy()
+            $mixedDisk0.AttestedGuestUniqueId = 'some-attested-value'
+            $mixedDisk1 = $script:AllowedSql.Disks[1].PSObject.Copy()
+            $badSql = $script:AllowedSql.PSObject.Copy()
+            $badSql.Disks = @($mixedDisk0, $mixedDisk1)
+            return @{ App = $script:AllowedApp; Sql = $badSql }
+        }
+        $fixture = New-SqlRawGuestFixture
+        $plan = Invoke-PlanFromFixture -Target 'Sql' -Fixture $fixture
+        $plan.Blocked | Should -BeTrue
+        $plan.DiskPlans.Count | Should -Be 0
+    }
+
+    It 'successfully resolves BOTH SQL disks via the attested-binding path when the allowlist is deliberately, fully, and uniquely attested, correctly disambiguating the real temp-disk/SQL-LOG LUN collision' {
+        $attestedSql = $script:AllowedSql.PSObject.Copy()
+        $attestedDisk0 = $script:AllowedSql.Disks[0].PSObject.Copy()
+        $attestedDisk0.AttestedGuestUniqueId = 'sql-data-uid'
+        $attestedDisk1 = $script:AllowedSql.Disks[1].PSObject.Copy()
+        $attestedDisk1.AttestedGuestUniqueId = 'sql-log-uid'
+        $attestedSql.Disks = @($attestedDisk0, $attestedDisk1)
+        Mock Get-ApprovedDiskPreparationAllowlist { @{ App = $script:AllowedApp; Sql = $attestedSql } }
+
+        $fixture = New-SqlRawGuestFixture
+        $plan = Invoke-PlanFromFixture -Target 'Sql' -Fixture $fixture
+        $plan.Blocked | Should -BeFalse
+        $plan.DiskPlans.Count | Should -Be 2
     }
 }
 

@@ -48,13 +48,24 @@
        remaining candidate disk's own guest-reported size (Get-Disk.Size).
        A disk is only ever excluded as temporary storage when its size
        matches Azure's own independently reported temporary-disk size
-       exactly (within reasonable rounding tolerance); any ambiguity (more
-       than one candidate matching), any disk reporting missing/invalid SCSI
-       addressing, and any failure of IMDS to report resourceDisk.size at
-       all are each a hard failure for the whole plan -- never a silent
-       guess, never a fallback to guest-only topology. Only after this
-       exclusion are the remaining candidate disks correlated to an approved
-       Azure LUN via the documented Win32_DiskDrive.SCSILogicalUnit property
+       exactly (within reasonable rounding tolerance); any ambiguity --
+       ZERO candidates matching a nonzero platform-reported temporary-disk
+       size, or MORE THAN ONE candidate matching -- any disk reporting
+       missing/invalid SCSI addressing, and any failure of IMDS to report
+       resourceDisk.size at all are each a hard failure for the whole plan
+       -- never a silent guess, never a fallback to guest-only topology,
+       and a "no match found" result is never treated as "no temporary
+       disk is present." CONFIRMED REAL-WORLD LIMITATION: on the two real
+       LIMS WS2025 DEV v2 VMs, IMDS's reported resourceDisk.size does not
+       reconcile with the real, guest-confirmed ~150 GiB temporary disk
+       under this or any other single-unit interpretation (see
+       Get-ImdsResourceDiskSizeBytes's own comment) -- this correctly,
+       permanently blocks this identification path for those two VMs
+       today; see the OPTIONAL, disabled-by-default customer-attested
+       guest-disk-UniqueId binding proposal (point 2a below) for the
+       designed alternative. Only after this exclusion are the remaining
+       candidate disks correlated to an approved Azure LUN via the
+       documented Win32_DiskDrive.SCSILogicalUnit property
        (https://learn.microsoft.com/en-us/windows/win32/cimwin32prov/win32-diskdrive),
        which Microsoft's own "How to map Azure Disks to Windows VM guest
        disks" guidance
@@ -63,6 +74,39 @@
        Disks are never selected by size alone, by picking the first LUN
        match, or by enumerating "all RAW disks" -- any remaining ambiguity
        (zero or more than one candidate at a given LUN) is a hard failure.
+       Managed-disk capacity is compared against the guest's own
+       Get-Disk.Size using a small, fixed, one-sided, evidence-calibrated
+       tolerance (Test-ManagedDiskCapacityWithinTolerance) rather than an
+       exact byte match or an arbitrary broad tolerance -- real Azure
+       managed disks have been confirmed to expose a guest-visible byte
+       count slightly SMALLER than the nominal diskSizeGB-derived value
+       (see that function's own comment for the exact Microsoft source and
+       calibration); size remains corroborating evidence only, never the
+       sole identifier.
+
+    2a) OPTIONAL, DISABLED-BY-DEFAULT customer-attested guest-disk-UniqueId
+       binding (proposed design -- see
+       Test-AttestedGuestUniqueIdBindingConfiguration,
+       Select-NonOsNonTemporaryDiskCandidates's -SkipTemporaryDiskExclusion,
+       and Resolve-ApprovedDiskTarget's -AttestedGuestUniqueId). Every disk
+       descriptor in the fixed allowlist carries an AttestedGuestUniqueId
+       field, '' (empty/disabled) for every disk today. If, and only if, a
+       human deliberately, explicitly populates EVERY disk for one target
+       with the exact Get-Disk.UniqueId independently confirmed for that
+       approved disk (e.g. via Get-LimsGuestDiskDiagnostics.ps1), that
+       target switches to disambiguating each approved LUN by its attested
+       UniqueId instead of needing to positively exclude the temporary
+       disk by size first -- this correctly resolves the LUN-number
+       collision that can otherwise occur between the temporary disk (on
+       one SCSI controller) and an unrelated approved disk (on another)
+       sharing the same raw guest LUN number. This is ADDITIONAL
+       verification only: the exact managed-disk resource ID, Azure LUN,
+       capacity, and state checks in point 2 above still ALL apply
+       unchanged -- a UniqueId is never, by itself, treated as proof of
+       the Azure resource relationship. A mixed (some but not all disks
+       attested) or duplicate (the same attested UniqueId reused across
+       more than one disk) configuration is a hard configuration error
+       that blocks the whole target's plan, never a silent fallback.
 
     3) Guest disk and partition state is fully validated, never auto-
        corrected. Disk-level IsOffline/IsReadOnly/OperationalStatus
@@ -366,6 +410,23 @@ function Get-ImdsResourceDiskSizeBytes {
         "Storage Profile" ("resourceDisk.size -- Size of the local temp disk
         for the VM (in kB)" and "If there's no local temp disk for the VM,
         this value is 0.").
+
+        CONFIRMED REAL-WORLD LIMITATION (do not "fix" the x1024 below by
+        guessing a different unit). On the two real LIMS WS2025 DEV v2
+        VMs (Standard_D4ads_v5), IMDS reported resourceDisk.size="201728"
+        while the VM's actual, guest-confirmed temporary disk is
+        161059207680 bytes (~150 GiB, matching the documented
+        Standard_D4ads_v5 temp-disk size --
+        https://learn.microsoft.com/en-us/azure/virtual-machines/sizes/general-purpose/dadsv5-series).
+        201728 kB x 1024 = 206,569,472 bytes (~197 MiB) -- not reconcilable
+        with 161,059,207,680 bytes under this, or any other, single-unit
+        reinterpretation (kB/MB/sectors all checked); this is a genuine,
+        observed platform-metadata limitation for this VM generation, not
+        a bug in this conversion. Per the documented unit (kB), x1024 is
+        kept exactly as written; callers must treat a resulting byte count
+        that cannot be reconciled against any guest disk as a hard
+        blocking condition (see Select-NonOsNonTemporaryDiskCandidates),
+        never as "no temporary disk to exclude."
     #>
     param([Parameter(Mandatory = $true)] $ImdsCompute)
 
@@ -374,6 +435,53 @@ function Get-ImdsResourceDiskSizeBytes {
     if ($ImdsCompute.storageProfile.resourceDisk.PSObject.Properties.Name -notcontains 'size') { return $null }
 
     return [int64]$ImdsCompute.storageProfile.resourceDisk.size * 1024
+}
+
+# Azure managed disks expose a separate, platform-determined, read-only
+# DiskSizeBytes value that is documented to be distinct from the
+# writable/nominal DiskSizeGB used to create or resize the disk --
+# https://learn.microsoft.com/en-us/dotnet/api/microsoft.azure.management.compute.models.diskproperties
+# ("DiskSizeBytes: Gets the size of the disk in bytes. This field is read
+# only." vs. "DiskSizeGB: ... indicates the size of the disk to create.").
+# IMDS does not expose this exact platform value for non-Ultra data disks
+# (only diskSizeGB; diskCapacityBytes is documented as populated only for
+# Ultra Disks -- https://learn.microsoft.com/en-us/azure/virtual-machines/instance-metadata-service
+# -- and was confirmed empty/absent for the real managed disks this script
+# targets), so the guest's own Get-Disk.Size is the only available
+# corroboration, and real evidence from the two named v2 VMs shows it can
+# legitimately be a small amount SMALLER than the nominal
+# diskSizeGB-derived byte count: observed ~19.67 ppm (0.00197%) for the
+# APP data disk (137436250112 vs nominal 137438953472 bytes) and ~5.05 ppm
+# (0.000505%) for each SQL disk (1099506078720 vs nominal 1099511627776;
+# 549753039360 vs nominal 549755813888). Microsoft does not publish an
+# exact formula for this platform-internal difference. This bound is
+# deliberately ONE-SIDED -- actual capacity is never expected to exceed
+# the nominal diskSizeGB-derived byte count, since Azure always rounds
+# UP to a billing tier, never down
+# (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types,
+# "Managed disk size") -- and is a small, FIXED proportion of the nominal
+# size (never an arbitrary broad absolute tolerance), calibrated with a
+# >2x safety margin above the worst value actually observed on these two
+# VMs. Size remains corroborating evidence only, never the sole
+# identifier, alongside the exact managed-disk resource ID, Azure LUN,
+# and (optionally) customer-attested UniqueId checks elsewhere in this
+# function.
+$script:ManagedDiskCapacityToleranceFraction = 0.0001
+
+function Test-ManagedDiskCapacityWithinTolerance {
+    <#
+        True when ActualBytes is at most NominalBytes, and no more than
+        $script:ManagedDiskCapacityToleranceFraction smaller than
+        NominalBytes. See the constant's own comment above for the exact
+        justification and real-evidence calibration.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [int64] $ActualBytes,
+        [Parameter(Mandatory = $true)] [int64] $NominalBytes
+    )
+    if ($ActualBytes -gt $NominalBytes) { return $false }
+    $toleranceBytes = [int64]([math]::Floor([double]$NominalBytes * $script:ManagedDiskCapacityToleranceFraction))
+    return ($NominalBytes - $ActualBytes) -le $toleranceBytes
 }
 
 # =============================================================================
@@ -395,6 +503,23 @@ function Get-ApprovedDiskPreparationAllowlist {
         Microsoft-documented guarantee for all Azure VMs; it is only ever
         used by Sql to positively verify the device at E: before moving it,
         never to identify a disk.
+
+        AttestedGuestUniqueId is a DELIBERATELY EMPTY, DISABLED-BY-DEFAULT
+        PROPOSAL (see docs/operations.md, "Customer-attested guest-disk-
+        UniqueId binding (proposed, disabled by default)"), left '' for
+        every disk below. If, and only if, every disk for a given target
+        is later deliberately, explicitly populated with the exact
+        Get-Disk.UniqueId a customer has independently confirmed for that
+        approved disk (e.g. via Get-LimsGuestDiskDiagnostics.ps1), that
+        target switches to an alternate guest-disk-identification mode
+        (Test-AttestedGuestUniqueIdBindingConfiguration,
+        Select-NonOsNonTemporaryDiskCandidates -SkipTemporaryDiskExclusion,
+        Resolve-ApprovedDiskTarget -AttestedGuestUniqueId) that disambiguates
+        each approved LUN by its attested UniqueId instead of by excluding
+        the temporary disk by size -- never as a REPLACEMENT for the exact
+        managed-disk-resource-ID/LUN checks, which still apply unchanged.
+        Leaving this '' (as below) keeps every target on the default,
+        fully-automatic identification path.
     #>
     return @{
         App = [pscustomobject]@{
@@ -406,12 +531,13 @@ function Get-ApprovedDiskPreparationAllowlist {
             ExpectedOpticalDriveName = ''
             Disks                    = @(
                 [pscustomobject]@{
-                    Lun                 = 0
-                    DiskName            = 'appdata-vm-lims-dev-v2-westeu-001'
-                    SizeBytes           = [int64]128 * 1024 * 1024 * 1024
-                    DriveLetter         = 'A'
-                    FileSystemLabel     = 'LIMS-App'
-                    AllocationUnitBytes = 4096
+                    Lun                   = 0
+                    DiskName              = 'appdata-vm-lims-dev-v2-westeu-001'
+                    SizeBytes             = [int64]128 * 1024 * 1024 * 1024
+                    DriveLetter           = 'A'
+                    FileSystemLabel       = 'LIMS-App'
+                    AllocationUnitBytes   = 4096
+                    AttestedGuestUniqueId = ''
                 }
             )
         }
@@ -424,24 +550,74 @@ function Get-ApprovedDiskPreparationAllowlist {
             ExpectedOpticalDriveName = 'Microsoft Virtual DVD-ROM'
             Disks                    = @(
                 [pscustomobject]@{
-                    Lun                 = 0
-                    DiskName            = 'sqldata-vm-lims-dev-v2-westeu-002'
-                    SizeBytes           = [int64]1024 * 1024 * 1024 * 1024
-                    DriveLetter         = 'E'
-                    FileSystemLabel     = 'SQL-Data'
-                    AllocationUnitBytes = 65536
+                    Lun                   = 0
+                    DiskName              = 'sqldata-vm-lims-dev-v2-westeu-002'
+                    SizeBytes             = [int64]1024 * 1024 * 1024 * 1024
+                    DriveLetter           = 'E'
+                    FileSystemLabel       = 'SQL-Data'
+                    AllocationUnitBytes   = 65536
+                    AttestedGuestUniqueId = ''
                 }
                 [pscustomobject]@{
-                    Lun                 = 1
-                    DiskName            = 'sqllog-vm-lims-dev-v2-westeu-002'
-                    SizeBytes           = [int64]512 * 1024 * 1024 * 1024
-                    DriveLetter         = 'F'
-                    FileSystemLabel     = 'SQL-Logs'
-                    AllocationUnitBytes = 65536
+                    Lun                   = 1
+                    DiskName              = 'sqllog-vm-lims-dev-v2-westeu-002'
+                    SizeBytes             = [int64]512 * 1024 * 1024 * 1024
+                    DriveLetter           = 'F'
+                    FileSystemLabel       = 'SQL-Logs'
+                    AllocationUnitBytes   = 65536
+                    AttestedGuestUniqueId = ''
                 }
             )
         }
     }
+}
+
+function Test-AttestedGuestUniqueIdBindingConfiguration {
+    <#
+        Pure validation of the OPTIONAL, disabled-by-default
+        customer-attested guest-disk-UniqueId binding proposal (see
+        Get-ApprovedDiskPreparationAllowlist's AttestedGuestUniqueId
+        comment and docs/operations.md). This binding is ADDITIONAL
+        verification only, layered on top of (never a replacement for)
+        the exact managed-disk-resource-ID + Azure LUN checks already
+        performed in Resolve-ApprovedDiskTarget -- a UniqueId is never, by
+        itself, treated as proof of the Azure resource relationship.
+
+        Returns IsAttestedMode=$true only when EVERY disk for this target
+        carries a non-empty, and mutually unique, AttestedGuestUniqueId
+        (an explicit, deliberate, all-or-nothing-per-VM opt-in). Returns
+        IsAttestedMode=$false with no error when NONE do (today's actual
+        state for every real allowlist entry -- this proposal is
+        disabled by default). Any OTHER configuration -- some but not all
+        disks attested (a "missing" binding), or the same attested
+        UniqueId reused across more than one disk for the same target (a
+        "duplicate" binding) -- is a hard configuration error that blocks
+        the whole target's plan rather than silently choosing a mode or
+        falling back.
+    #>
+    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Disks)
+
+    $diskArray = @($Disks)
+    $withAttested = @($diskArray | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.AttestedGuestUniqueId) })
+
+    if ($withAttested.Count -eq 0) {
+        return [pscustomobject]@{ IsAttestedMode = $false; Error = $null }
+    }
+    if ($withAttested.Count -ne $diskArray.Count) {
+        return [pscustomobject]@{
+            IsAttestedMode = $false
+            Error          = "Inconsistent customer-attested guest UniqueId binding configuration: $($withAttested.Count) of $($diskArray.Count) approved disk(s) carry an AttestedGuestUniqueId; either all or none must be configured for a given target (missing binding)."
+        }
+    }
+    $dupGroups = @($withAttested | Group-Object { [string]$_.AttestedGuestUniqueId } | Where-Object { $_.Count -gt 1 })
+    if ($dupGroups.Count -gt 0) {
+        return [pscustomobject]@{
+            IsAttestedMode = $false
+            Error          = 'Duplicate customer-attested guest UniqueId configured for more than one approved disk on the same target; each attested UniqueId must be unique (duplicate binding).'
+        }
+    }
+
+    return [pscustomobject]@{ IsAttestedMode = $true; Error = $null }
 }
 
 function Test-TargetIdentityMatchesAllowlist {
@@ -567,6 +743,22 @@ function Select-NonOsNonTemporaryDiskCandidates {
         lookup failed") is never allowed to become a data-disk candidate --
         it cannot be correlated to an Azure LUN at all, so admitting it
         would risk an unverifiable mapping.
+
+        DEFECT FIX (previously accepted a "zero matches" result as "no
+        temporary disk present"): when IMDS reports a NONZERO
+        resourceDisk.size (i.e., the platform itself asserts this VM has a
+        temporary disk), failing to find EXACTLY ONE non-OS disk whose
+        reported size matches it is now ALSO a hard failure -- a nonzero
+        platform claim that cannot be positively, unambiguously resolved
+        against any guest disk must never be silently treated as "nothing
+        to exclude," since that would risk admitting the real, unexcluded
+        temporary disk as a data-disk candidate. On the two real LIMS
+        WS2025 DEV v2 VMs this correctly, permanently blocks this
+        identification path (see Get-ImdsResourceDiskSizeBytes's own
+        comment) -- see
+        Test-AttestedGuestUniqueIdBindingConfiguration/-SkipTemporaryDiskExclusion
+        below for the disabled-by-default alternate path proposed for
+        exactly this situation.
     #>
     param(
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDiskInventory,
@@ -574,7 +766,22 @@ function Select-NonOsNonTemporaryDiskCandidates {
         # NOT typed [int64], so AllowNull lets the "IMDS did not report it at
         # all" case flow through as $null rather than crashing on parameter
         # binding.
-        [Parameter(Mandatory = $true)] [AllowNull()] $ImdsResourceDiskSizeBytes
+        [Parameter(Mandatory = $true)] [AllowNull()] $ImdsResourceDiskSizeBytes,
+        # Activates the OPTIONAL, disabled-by-default customer-attested
+        # guest-disk-UniqueId binding proposal (see
+        # Test-AttestedGuestUniqueIdBindingConfiguration and
+        # Resolve-ApprovedDiskTarget's own -AttestedGuestUniqueId
+        # parameter). When $true, temporary-disk exclusion by size is
+        # skipped entirely here -- NOT because identity verification is
+        # weakened, but because every approved disk is instead positively
+        # disambiguated by its own attested UniqueId later in
+        # Resolve-ApprovedDiskTarget, which makes excluding the temporary
+        # disk here unnecessary (it simply will never match any approved
+        # LUN+UniqueId pair). Always $false unless the caller has already
+        # confirmed (via Test-AttestedGuestUniqueIdBindingConfiguration)
+        # that every disk for this target carries a valid attested
+        # binding.
+        [Parameter(Mandatory = $false)] [bool] $SkipTemporaryDiskExclusion = $false
     )
 
     $osDisks = @($GuestDiskInventory | Where-Object { $_.IsBoot -or $_.IsSystem })
@@ -598,10 +805,28 @@ function Select-NonOsNonTemporaryDiskCandidates {
         }
     }
 
+    if ($SkipTemporaryDiskExclusion) {
+        return [pscustomobject]@{
+            Candidates = $nonOsDisks
+            Error      = $null
+        }
+    }
+
     if ($null -eq $ImdsResourceDiskSizeBytes) {
         return [pscustomobject]@{
             Candidates = @()
             Error      = 'IMDS did not report compute.storageProfile.resourceDisk.size; cannot positively establish whether a temporary/resource disk is present to exclude it.'
+        }
+    }
+    if ([int64]$ImdsResourceDiskSizeBytes -lt 0) {
+        # A negative value is contradictory/malformed metadata, never
+        # IMDS's own documented "no temp disk" value (which is exactly
+        # zero -- see Get-ImdsResourceDiskSizeBytes's own comment). Must
+        # be a hard failure, not silently treated as "no temporary disk
+        # to exclude."
+        return [pscustomobject]@{
+            Candidates = @()
+            Error      = "IMDS reported a negative compute.storageProfile.resourceDisk.size-derived byte count ($ImdsResourceDiskSizeBytes bytes); this is contradictory metadata, not a valid 'no temporary disk' value (which is documented as exactly zero), so no disk is treated as a safe data-disk candidate until this is understood."
         }
     }
 
@@ -610,6 +835,12 @@ function Select-NonOsNonTemporaryDiskCandidates {
         # Up to 64 MiB tolerance for the usual kB/geometry rounding between
         # IMDS's reported size and Get-Disk's own figure.
         $temporaryDisks = @($nonOsDisks | Where-Object { [math]::Abs([int64]$_.SizeBytes - [int64]$ImdsResourceDiskSizeBytes) -le 67108864 })
+        if ($temporaryDisks.Count -eq 0) {
+            return [pscustomobject]@{
+                Candidates = @()
+                Error      = "IMDS reports a nonzero temporary disk size ($ImdsResourceDiskSizeBytes bytes) but no non-OS Windows disk's reported size matches it; cannot positively identify and exclude the temporary disk, so no disk is treated as a safe data-disk candidate until this is resolved (see docs/operations.md's customer-attested-binding proposal and Get-LimsGuestDiskDiagnostics.ps1 for the read-only evidence needed to review it)."
+            }
+        }
         if ($temporaryDisks.Count -gt 1) {
             return [pscustomobject]@{
                 Candidates = @()
@@ -639,6 +870,22 @@ function Resolve-ApprovedDiskTarget {
         reason string) set -- never throws, so callers can continue
         collecting every error for the whole VM before deciding anything is
         Blocked.
+
+        -AttestedGuestUniqueId (optional, '' by default) activates the
+        OPTIONAL, disabled-by-default customer-attested guest-disk-UniqueId
+        binding proposal for THIS disk (see
+        Get-ApprovedDiskPreparationAllowlist's AttestedGuestUniqueId
+        comment and Test-AttestedGuestUniqueIdBindingConfiguration). When
+        non-empty, the guest disk at the approved LUN must ALSO carry this
+        exact UniqueId -- disambiguating cleanly even when a LUN number
+        numerically collides between the real target disk and an
+        unrelated disk (e.g. the temporary disk on a different SCSI
+        controller reusing the same raw LUN number). This is ADDITIONAL
+        verification layered on top of (never a replacement for) every
+        check below -- the managed-disk resource ID, LUN, capacity, state,
+        and UniqueId-non-empty checks all still apply unchanged; a
+        UniqueId is never, by itself, treated as proof of the Azure
+        resource relationship.
     #>
     param(
         [Parameter(Mandatory = $true)] $ExpectedDisk,
@@ -649,7 +896,8 @@ function Resolve-ApprovedDiskTarget {
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $ImdsDataDisks,
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $CandidateGuestDisks,
         [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,
-        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName
+        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $AttestedGuestUniqueId = ''
     )
 
     $lun = [int]$ExpectedDisk.Lun
@@ -680,13 +928,30 @@ function Resolve-ApprovedDiskTarget {
         $imdsSizeBytes = [int64]$imdsDisk.diskSizeGB * 1024 * 1024 * 1024
     }
     $expectedSizeBytes = [int64]$ExpectedDisk.SizeBytes
-    if (-not $imdsSizeBytes -or [math]::Abs($imdsSizeBytes - $expectedSizeBytes) -gt 1048576) {
-        return [pscustomobject]@{ Target = $null; Error = "LUN $lun capacity mismatch: IMDS reports approximately $imdsSizeBytes bytes, expected $expectedSizeBytes bytes." }
+    if (-not $imdsSizeBytes -or -not (Test-ManagedDiskCapacityWithinTolerance -ActualBytes $imdsSizeBytes -NominalBytes $expectedSizeBytes)) {
+        return [pscustomobject]@{ Target = $null; Error = "LUN $lun capacity mismatch: IMDS reports approximately $imdsSizeBytes bytes, expected $expectedSizeBytes bytes (outside the documented, evidence-calibrated tolerance -- see Test-ManagedDiskCapacityWithinTolerance)." }
     }
 
-    $guestMatches = @($CandidateGuestDisks | Where-Object { [int]$_.ScsiLogicalUnit -eq $lun })
-    if ($guestMatches.Count -ne 1) {
-        return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolves to $($guestMatches.Count) non-OS/non-temporary Windows disk device(s) after exclusion; an unambiguous one-to-one mapping is required." }
+    if ([string]::IsNullOrWhiteSpace($AttestedGuestUniqueId)) {
+        $guestMatches = @($CandidateGuestDisks | Where-Object { [int]$_.ScsiLogicalUnit -eq $lun })
+        if ($guestMatches.Count -ne 1) {
+            return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolves to $($guestMatches.Count) non-OS/non-temporary Windows disk device(s) after exclusion; an unambiguous one-to-one mapping is required." }
+        }
+    }
+    else {
+        # Customer-attested guest-disk-UniqueId binding mode (see this
+        # function's own .DESCRIPTION/-AttestedGuestUniqueId comment
+        # above): the guest LUN match AND the attested UniqueId must BOTH
+        # agree on the same disk -- this correctly disambiguates even when
+        # an unrelated disk (e.g. the temporary disk on a different SCSI
+        # controller) numerically shares the same raw guest LUN value,
+        # and also catches a stale/incorrect attestation (a disk at the
+        # right LUN but the wrong UniqueId is rejected exactly like a
+        # disk at the wrong LUN).
+        $guestMatches = @($CandidateGuestDisks | Where-Object { [int]$_.ScsiLogicalUnit -eq $lun -and [string]$_.UniqueId -eq $AttestedGuestUniqueId })
+        if ($guestMatches.Count -ne 1) {
+            return [pscustomobject]@{ Target = $null; Error = "LUN $lun with a customer-attested guest UniqueId configured resolves to $($guestMatches.Count) Windows disk device(s) matching both that LUN and that UniqueId; refusing to proceed without an unambiguous attested-identity match." }
+        }
     }
     $guestDisk = $guestMatches[0]
 
@@ -702,8 +967,8 @@ function Resolve-ApprovedDiskTarget {
     if ([string]$guestDisk.OperationalStatus -ne 'Online') {
         return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolved to Windows disk $($guestDisk.Number), whose operational status is '$($guestDisk.OperationalStatus)' (expected 'Online'); refusing to proceed." }
     }
-    if ([math]::Abs([int64]$guestDisk.SizeBytes - $expectedSizeBytes) -gt 1048576) {
-        return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolved to Windows disk $($guestDisk.Number), whose reported size ($($guestDisk.SizeBytes) bytes) does not match the expected $expectedSizeBytes bytes." }
+    if (-not (Test-ManagedDiskCapacityWithinTolerance -ActualBytes ([int64]$guestDisk.SizeBytes) -NominalBytes $expectedSizeBytes)) {
+        return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolved to Windows disk $($guestDisk.Number), whose reported size ($($guestDisk.SizeBytes) bytes) does not match the expected $expectedSizeBytes bytes (outside the documented, evidence-calibrated tolerance -- see Test-ManagedDiskCapacityWithinTolerance)." }
     }
     if ([string]::IsNullOrWhiteSpace([string]$guestDisk.UniqueId)) {
         return [pscustomobject]@{ Target = $null; Error = "LUN $lun resolved to Windows disk $($guestDisk.Number), which reported no stable UniqueId; refusing to proceed without one to re-validate against immediately before mutation." }
@@ -1097,6 +1362,17 @@ function Get-GuestDiskPreparationPlan {
     }
     $allowlistEntry = $allowlist[$Target]
 
+    # Validate the OPTIONAL, disabled-by-default customer-attested
+    # guest-disk-UniqueId binding configuration for this target BEFORE any
+    # guest/IMDS query -- an inconsistent (mixed or duplicate) hardcoded
+    # allowlist configuration is a static defect in the allowlist itself,
+    # independent of any caller/guest state, and blocks exactly like any
+    # other allowlist-agreement failure.
+    $attestedBindingConfig = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $allowlistEntry.Disks
+    if ($attestedBindingConfig.Error) {
+        return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = @($attestedBindingConfig.Error); DiskPlans = @(); DvdPlan = $dvdPlan }
+    }
+
     $allowlistAgreementError = Test-TargetIdentityMatchesAllowlist -Target $Target `
         -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `
         -ExpectedVmName $ExpectedVmName -ExpectedComputerName $ExpectedComputerName `
@@ -1114,7 +1390,8 @@ function Get-GuestDiskPreparationPlan {
     }
 
     $imdsResourceDiskSizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $ImdsCompute
-    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $GuestDiskInventory -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes
+    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $GuestDiskInventory `
+        -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes -SkipTemporaryDiskExclusion $attestedBindingConfig.IsAttestedMode
     if ($candidateResult.Error) {
         $blockingErrors += $candidateResult.Error
         return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = $blockingErrors; DiskPlans = @(); DvdPlan = $dvdPlan }
@@ -1138,9 +1415,20 @@ function Get-GuestDiskPreparationPlan {
     $diskPlans = @()
     if ($blockingErrors.Count -eq 0) {
         foreach ($expectedDisk in $ExpectedDisks) {
+            # Looked up from the fixed ALLOWLIST's own Disks (never from
+            # caller-supplied $ExpectedDisks, which carries no
+            # AttestedGuestUniqueId field at all by design) -- the
+            # attested binding is a deliberate, hardcoded, reviewed
+            # code-level opt-in, never something a caller/Bicep parameter
+            # can supply or influence.
+            $allowlistDiskForLun = $allowlistEntry.Disks | Where-Object { [int]$_.Lun -eq [int]$expectedDisk.Lun } | Select-Object -First 1
+            $attestedGuestUniqueId = ''
+            if ($allowlistDiskForLun) { $attestedGuestUniqueId = [string]$allowlistDiskForLun.AttestedGuestUniqueId }
+
             $resolution = Resolve-ApprovedDiskTarget -ExpectedDisk $expectedDisk -ImdsDataDisks $imdsDataDisks `
                 -CandidateGuestDisks $candidateResult.Candidates `
-                -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName
+                -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `
+                -AttestedGuestUniqueId $attestedGuestUniqueId
             if ($resolution.Error) {
                 $blockingErrors += $resolution.Error
             }
@@ -1569,8 +1857,21 @@ function Assert-DiskReadyForDestructiveStage {
         Throws (via Assert-GuestDiskPreparationFailure) on any mismatch --
         never retries, never rolls back a prior successful step in this same
         invocation.
+
+        -Target is used ONLY to look up the SAME fixed allowlist entry's
+        own AttestedGuestUniqueId configuration (never caller-supplied) so
+        the customer-attested-binding proposal, if active for this VM, is
+        honored consistently in every immediate pre-mutation re-check --
+        never silently falling back to the default/automatic
+        identification path merely because this is a later re-check rather
+        than the first plan build. By the time this function is ever
+        called, the caller's own whole-VM preflight has already confirmed
+        this target's attested-binding configuration is valid (not mixed
+        or duplicate) -- this function trusts that, it does not re-validate
+        it.
     #>
     param(
+        [Parameter(Mandatory = $true)] [ValidateSet('App', 'Sql')] [string] $Target,
         [Parameter(Mandatory = $true)] [ValidateSet('Initialize', 'NewPartition', 'Format')] [string] $Stage,
         [Parameter(Mandatory = $true)] $DiskPlan,
         [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,
@@ -1581,6 +1882,14 @@ function Assert-DiskReadyForDestructiveStage {
     $originalTarget = $DiskPlan.Target
     $expectedDisk = $DiskPlan.ExpectedDisk
 
+    $allowlistEntry = (Get-ApprovedDiskPreparationAllowlist)[$Target]
+    $attestedBindingConfig = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $allowlistEntry.Disks
+    $attestedGuestUniqueId = ''
+    if ($attestedBindingConfig.IsAttestedMode) {
+        $allowlistDiskForLun = $allowlistEntry.Disks | Where-Object { [int]$_.Lun -eq [int]$originalTarget.Lun } | Select-Object -First 1
+        if ($allowlistDiskForLun) { $attestedGuestUniqueId = [string]$allowlistDiskForLun.AttestedGuestUniqueId }
+    }
+
     $imdsCompute = Get-ImdsComputeMetadataAdapter
     $imdsDataDisks = @()
     if ($imdsCompute.storageProfile -and $imdsCompute.storageProfile.dataDisks) {
@@ -1589,13 +1898,15 @@ function Assert-DiskReadyForDestructiveStage {
     $imdsResourceDiskSizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $imdsCompute
 
     $freshGuestDiskInventory = @(Get-GuestDiskInventoryAdapter)
-    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $freshGuestDiskInventory -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes
+    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $freshGuestDiskInventory `
+        -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes -SkipTemporaryDiskExclusion $attestedBindingConfig.IsAttestedMode
     if ($candidateResult.Error) {
         Assert-GuestDiskPreparationFailure "Immediate pre-mutation re-check ($Stage) failed: $($candidateResult.Error)"
     }
 
     $resolution = Resolve-ApprovedDiskTarget -ExpectedDisk $expectedDisk -ImdsDataDisks $imdsDataDisks `
-        -CandidateGuestDisks $candidateResult.Candidates -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName
+        -CandidateGuestDisks $candidateResult.Candidates -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `
+        -AttestedGuestUniqueId $attestedGuestUniqueId
     if ($resolution.Error) {
         Assert-GuestDiskPreparationFailure "Immediate pre-mutation re-check ($Stage) failed: $($resolution.Error)"
     }
@@ -1792,7 +2103,7 @@ function Invoke-GuestDiskPreparation {
         # this pscustomobject into that string slot instead of erroring.
         $diskTarget = $diskPlan.Target
 
-        Assert-DiskReadyForDestructiveStage -Stage 'Initialize' -DiskPlan $diskPlan `
+        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'Initialize' -DiskPlan $diskPlan `
             -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName
         Write-Output "Disk $($diskTarget.DiskNumber) (LUN $($diskTarget.Lun), $($diskTarget.DiskName)) is RAW with no partitions -- initializing."
         Initialize-ApprovedDiskAdapter -DiskNumber $diskTarget.DiskNumber
@@ -1803,11 +2114,11 @@ function Invoke-GuestDiskPreparation {
             Assert-GuestDiskPreparationFailure "Disk $($diskTarget.DiskNumber) shows unexpected partition(s) immediately after GPT initialization; stopping for manual review rather than proceeding."
         }
 
-        Assert-DiskReadyForDestructiveStage -Stage 'NewPartition' -DiskPlan $diskPlan `
+        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'NewPartition' -DiskPlan $diskPlan `
             -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName
         $newPartition = New-ApprovedPartitionAdapter -DiskNumber $diskTarget.DiskNumber -DriveLetter $diskTarget.DriveLetter
 
-        Assert-DiskReadyForDestructiveStage -Stage 'Format' -DiskPlan $diskPlan `
+        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'Format' -DiskPlan $diskPlan `
             -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `
             -NewPartitionNumber $newPartition.PartitionNumber
         $null = Format-ApprovedVolumeAdapter -DiskNumber $diskTarget.DiskNumber -PartitionNumber $newPartition.PartitionNumber `
