@@ -321,10 +321,18 @@ BeforeAll {
     # IsSystem), Temporary (excluded by its size matching IMDS's own
     # reported resourceDisk.size), and the one approved APP data disk at
     # LUN 0, RAW, no partitions.
+    #
+    # The data disk's UniqueId is read directly from the real,
+    # live allowlist's own populated AttestedGuestUniqueId value (not a
+    # separate hardcoded literal) -- the real App allowlist entry is now
+    # fully attested (see Get-ApprovedDiskPreparationAllowlist), so every
+    # fixture built from it must present a guest disk whose UniqueId
+    # actually matches that binding, exactly as the real guest would, for
+    # Resolve-ApprovedDiskTarget's attested-UniqueId check to succeed.
     function New-AppRawGuestFixture {
         $osDisk = New-FakeOsDisk
         $tempDisk = New-FakeTempDisk
-        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -PartitionStyle 'RAW' `
+        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId $script:AllowedApp.Disks[0].AttestedGuestUniqueId -PartitionStyle 'RAW' `
             -SizeBytes $script:AllowedApp.Disks[0].SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
         return [pscustomobject]@{
             Disks         = @($osDisk, $tempDisk, $dataDisk)
@@ -343,12 +351,20 @@ BeforeAll {
     # LOG's Azure LUN), SQL DATA at LUN 0 and SQL LOG at LUN 1 (both RAW, no
     # partitions), plus an empty, unlabelled virtual DVD-ROM device and
     # volume at E: (positively verified) and Z: free.
+    # The DATA and LOG disks' UniqueIds are read directly from the real,
+    # live allowlist's own populated AttestedGuestUniqueId values (not
+    # separate hardcoded literals) -- the real Sql allowlist entry is now
+    # fully attested and complete (see Get-ApprovedDiskPreparationAllowlist),
+    # so every fixture built from it must present guest disks whose
+    # UniqueIds actually match those bindings for Resolve-ApprovedDiskTarget's
+    # attested-UniqueId check to succeed, including LOG's attested UniqueId
+    # disambiguating it from the Temporary disk's colliding guest LUN.
     function New-SqlRawGuestFixture {
         $osDisk = New-FakeOsDisk
         $tempDisk = New-FakeTempDisk
-        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId 'sql-data-uid' -PartitionStyle 'RAW' `
+        $dataDisk = New-FakeGuestDisk -Number 2 -UniqueId $script:AllowedSql.Disks[0].AttestedGuestUniqueId -PartitionStyle 'RAW' `
             -SizeBytes $script:AllowedSql.Disks[0].SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
-        $logDisk = New-FakeGuestDisk -Number 3 -UniqueId 'sql-log-uid' -PartitionStyle 'RAW' `
+        $logDisk = New-FakeGuestDisk -Number 3 -UniqueId $script:AllowedSql.Disks[1].AttestedGuestUniqueId -PartitionStyle 'RAW' `
             -SizeBytes $script:AllowedSql.Disks[1].SizeBytes -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 1
         return [pscustomobject]@{
             Disks         = @($osDisk, $tempDisk, $dataDisk, $logDisk)
@@ -404,6 +420,24 @@ BeforeAll {
         $script:simulatedDvdVolumes = $Fixture.DvdVolumes
         $script:simulatedOpticalDrives = $Fixture.OpticalDrives
         $script:simulatedExpectedSizeByDisk = @{ 2 = $script:AllowedApp.Disks[0].SizeBytes }
+    }
+
+    # Real APP customer evidence fixture (real IMDS resourceDisk.size
+    # discrepancy, real observed byte capacities, and the real attested
+    # UniqueId) -- defined here in BeforeAll, not inside a Describe body,
+    # for the same Pester v5 Discovery/Run-time visibility reason as
+    # Set-AppFixture/Set-SqlFixture below.
+    function New-RealAppEvidenceFixture {
+        $appExpected = $script:AllowedApp.Disks[0]
+        $osDisk = New-FakeOsDisk -Number 0
+        $realTempDisk = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiTargetId 0 -ScsiLogicalUnit 1
+        $realAppDataDisk = New-FakeGuestDisk -Number 2 -UniqueId $appExpected.AttestedGuestUniqueId -SizeBytes 137436250112 -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
+        $realImds = New-FakeImdsCompute -ResourceDiskSizeBytes ([int64]201728 * 1024) -DataDisks @(
+            (New-FakeImdsDataDisk -Lun $appExpected.Lun -DiskName $appExpected.DiskName -SizeBytes $appExpected.SizeBytes -UseDiskSizeGB)
+        )
+        return [pscustomobject]@{
+            Disks = @($osDisk, $realTempDisk, $realAppDataDisk); Partitions = @(); Volumes = @(); DvdVolumes = @(); OpticalDrives = @(); Imds = $realImds
+        }
     }
 
     function Set-SqlFixture {
@@ -717,7 +751,7 @@ Describe 'Test-ManagedDiskCapacityWithinTolerance' {
 # =============================================================================
 
 Describe 'Test-AttestedGuestUniqueIdBindingConfiguration' {
-    It 'reports disabled (IsAttestedMode=$false, no error) when every disk has an empty AttestedGuestUniqueId -- today''s actual real allowlist state' {
+    It 'reports disabled (IsAttestedMode=$false, no error) when every disk has an empty AttestedGuestUniqueId -- the synthetic/disabled-path shape, no longer today''s actual real allowlist state (see the dedicated real-allowlist and unbound-path tests below)' {
         $disks = @(
             [pscustomobject]@{ Lun = 0; AttestedGuestUniqueId = '' }
             [pscustomobject]@{ Lun = 1; AttestedGuestUniqueId = '' }
@@ -763,9 +797,53 @@ Describe 'Test-AttestedGuestUniqueIdBindingConfiguration' {
         $result.Error | Should -BeNullOrEmpty
     }
 
-    It 'confirms the REAL fixed allowlist is today entirely in disabled (non-attested) mode for both App and Sql' {
-        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedApp.Disks).IsAttestedMode | Should -BeFalse
-        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedSql.Disks).IsAttestedMode | Should -BeFalse
+    It 'confirms the REAL fixed allowlist is now in attested mode for both App and Sql, with every binding complete and mutually unique' {
+        # As of this commit, every real disk descriptor (App's one disk;
+        # Sql's DATA and LOG disks) carries a populated, reviewed,
+        # customer-supplied AttestedGuestUniqueId -- see "BINDING
+        # PROVENANCE" in Get-ApprovedDiskPreparationAllowlist. This is no
+        # longer the disabled/unbound default; the separate synthetic
+        # disabled-path tests above and the explicit "unbound allowlist"
+        # fixtures later in this file are what retain coverage of the
+        # disabled/unbound behavior itself.
+        $appResult = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedApp.Disks
+        $appResult.IsAttestedMode | Should -BeTrue
+        $appResult.Error | Should -BeNullOrEmpty
+
+        $sqlResult = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $script:AllowedSql.Disks
+        $sqlResult.IsAttestedMode | Should -BeTrue
+        $sqlResult.Error | Should -BeNullOrEmpty
+    }
+
+    It 'confirms the three real attested UniqueIds are the exact customer-supplied values and are mutually unique' {
+        $script:AllowedApp.Disks[0].AttestedGuestUniqueId | Should -Be '60022480D1B07E6ACD98417F86591F4B'
+        $script:AllowedSql.Disks[0].AttestedGuestUniqueId | Should -Be '60022480FC5A2FF57B5FE802967E448E'
+        $script:AllowedSql.Disks[1].AttestedGuestUniqueId | Should -Be '60022480042D640894BBE41BA513DCFC'
+
+        $allThree = @(
+            $script:AllowedApp.Disks[0].AttestedGuestUniqueId
+            $script:AllowedSql.Disks[0].AttestedGuestUniqueId
+            $script:AllowedSql.Disks[1].AttestedGuestUniqueId
+        )
+        ($allThree | Select-Object -Unique).Count | Should -Be 3
+    }
+
+    It 'builds a synthetic UNBOUND (empty AttestedGuestUniqueId) allowlist shape proving the disabled path is still exercised, separately from the now-attested real allowlist' {
+        # Retained per explicit instruction: do not silently delete negative
+        # coverage of the disabled/unbound mode just because the real
+        # allowlist itself is no longer in that mode.
+        $unboundAppDisks = $script:AllowedApp.Disks | ForEach-Object {
+            $clone = $_.PSObject.Copy()
+            $clone.AttestedGuestUniqueId = ''
+            $clone
+        }
+        $unboundSqlDisks = $script:AllowedSql.Disks | ForEach-Object {
+            $clone = $_.PSObject.Copy()
+            $clone.AttestedGuestUniqueId = ''
+            $clone
+        }
+        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $unboundAppDisks).IsAttestedMode | Should -BeFalse
+        (Test-AttestedGuestUniqueIdBindingConfiguration -Disks $unboundSqlDisks).IsAttestedMode | Should -BeFalse
     }
 }
 
@@ -984,6 +1062,53 @@ Describe 'Resolve-ApprovedDiskTarget' {
                 -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName -AttestedGuestUniqueId 'app-data-uid'
             $result.Error | Should -Not -BeNullOrEmpty
             $result.Target | Should -BeNullOrEmpty
+        }
+
+        It 'a correct attested UniqueId does NOT bypass the guest disk actually being reported at the wrong (unapproved) LUN' {
+            # The candidate disk's own UniqueId correctly matches the
+            # attested value, but it is reported at ScsiLogicalUnit=5, not
+            # the approved LUN (0) -- the attested-UniqueId check is
+            # layered ON TOP OF, never instead of, the LUN match.
+            $wrongLunCandidate = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -PartitionStyle 'RAW' `
+                -SizeBytes $script:expectedDisk.SizeBytes -ScsiLogicalUnit 5
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $script:expectedDisk -ImdsDataDisks @($script:goodImdsDisks) `
+                -CandidateGuestDisks @($wrongLunCandidate) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId `
+                -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName -AttestedGuestUniqueId 'app-data-uid'
+            $result.Error | Should -Not -BeNullOrEmpty
+            $result.Target | Should -BeNullOrEmpty
+        }
+
+        It 'a correct attested UniqueId does NOT bypass a size mismatch against the fixed allowlist''s expected SizeBytes' {
+            $wrongSizeCandidate = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -PartitionStyle 'RAW' `
+                -SizeBytes ([int64]1 * 1024 * 1024 * 1024) -ScsiLogicalUnit 0
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $script:expectedDisk -ImdsDataDisks @($script:goodImdsDisks) `
+                -CandidateGuestDisks @($wrongSizeCandidate) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId `
+                -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName -AttestedGuestUniqueId 'app-data-uid'
+            $result.Error | Should -Not -BeNullOrEmpty
+            $result.Target | Should -BeNullOrEmpty
+        }
+
+        It 'a correct attested UniqueId does NOT bypass the disk being offline' {
+            $offlineAttestedCandidate = New-FakeGuestDisk -Number 2 -UniqueId 'app-data-uid' -PartitionStyle 'RAW' `
+                -SizeBytes $script:expectedDisk.SizeBytes -ScsiLogicalUnit 0 -IsOffline $true
+            $result = Resolve-ApprovedDiskTarget -ExpectedDisk $script:expectedDisk -ImdsDataDisks @($script:goodImdsDisks) `
+                -CandidateGuestDisks @($offlineAttestedCandidate) -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId `
+                -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName -AttestedGuestUniqueId 'app-data-uid'
+            $result.Error | Should -Not -BeNullOrEmpty
+            $result.Target | Should -BeNullOrEmpty
+        }
+
+        It 'a correct attested UniqueId does NOT bypass a mismatched/wrong VM identity (IMDS VM name) checked earlier in the pipeline' {
+            # Resolve-ApprovedDiskTarget itself never receives the VM name
+            # (that independent check lives in Test-TargetIdentityMatchesAllowlist,
+            # evaluated before any disk correlation runs) -- this is
+            # exercised end-to-end instead, confirming attested binding
+            # never short-circuits that earlier, independent identity gate.
+            $fixture = New-AppRawGuestFixture
+            $fixture.Imds.name = 'vm-wrong-identity-001'
+            $plan = Invoke-PlanFromFixture -Target 'App' -Fixture $fixture
+            $plan.Blocked | Should -BeTrue
+            $plan.DiskPlans.Count | Should -Be 0
         }
     }
 }
@@ -1447,25 +1572,58 @@ Describe 'Get-GuestDiskPreparationPlan' {
         $plan.Blocked | Should -BeTrue
     }
 
-    # ---- Whole-plan test using the REAL customer evidence end-to-end:
-    #      the real IMDS resourceDisk.size discrepancy must block the
-    #      ENTIRE plan with zero disk plans, never partially succeed. ----
+    # ---- Whole-plan tests using the REAL customer evidence end-to-end. ----
+    #
+    # Two distinct, deliberately separate scenarios, both built from the
+    # exact same real IMDS/guest evidence (resourceDisk.size="201728" vs.
+    # the real ~150 GiB temporary disk -- a discrepancy this suite never
+    # claims is resolved, repaired, or reinterpreted):
+    #
+    #   (a) UNBOUND (synthetic, AttestedGuestUniqueId forced empty): the
+    #       default/automatic identification path still fails safely on
+    #       this real, unresolved IMDS discrepancy -- retained as explicit
+    #       negative coverage of the disabled/unbound path, per the task's
+    #       instruction not to silently delete it.
+    #   (b) ATTESTED (the real, actual allowlist, now fully bound): the
+    #       customer-attested UniqueId path resolves the real target
+    #       correctly WITHOUT depending on, changing, or pretending to
+    #       repair that same discrepant IMDS metadata -- size remains
+    #       corroborating evidence only; the exact resource ID + LUN +
+    #       attested UniqueId bindings are what actually establish the
+    #       selected target.
 
-    It 'blocks the whole plan with zero DiskPlans using the real APP customer evidence (IMDS resourceDisk.size="201728" vs the real ~150 GiB temporary disk)' {
-        $appExpected = $script:AllowedApp.Disks[0]
-        $osDisk = New-FakeOsDisk -Number 0
-        $realTempDisk = New-FakeGuestDisk -Number 1 -UniqueId 'real-temp-uid' -SizeBytes 161059207680 -ScsiBus 0 -ScsiPort 0 -ScsiTargetId 0 -ScsiLogicalUnit 1
-        $realAppDataDisk = New-FakeGuestDisk -Number 2 -UniqueId '60022480D1B07E6ACD98417F86591F4B' -SizeBytes 137436250112 -ScsiBus 0 -ScsiPort 1 -ScsiTargetId 0 -ScsiLogicalUnit 0
-        $realImds = New-FakeImdsCompute -ResourceDiskSizeBytes ([int64]201728 * 1024) -DataDisks @(
-            (New-FakeImdsDataDisk -Lun $appExpected.Lun -DiskName $appExpected.DiskName -SizeBytes $appExpected.SizeBytes -UseDiskSizeGB)
-        )
-        $fixture = [pscustomobject]@{
-            Disks = @($osDisk, $realTempDisk, $realAppDataDisk); Partitions = @(); Volumes = @(); DvdVolumes = @(); OpticalDrives = @(); Imds = $realImds
+    It 'blocks the whole plan with zero DiskPlans on the UNBOUND/synthetic path using the real APP customer evidence (IMDS resourceDisk.size="201728" vs the real ~150 GiB temporary disk)' {
+        $fixture = New-RealAppEvidenceFixture
+        # Get-GuestDiskPreparationPlan re-fetches Get-ApprovedDiskPreparationAllowlist
+        # itself internally (this is the actual source of truth it uses for
+        # the attested-binding decision and per-LUN resolution -- the
+        # caller's own -ExpectedDisks parameter is used only for the
+        # separate caller-vs-allowlist agreement check). Mocking it here to
+        # force App's own one disk back to an empty/unbound
+        # AttestedGuestUniqueId is therefore the correct, and only, way to
+        # exercise the disabled/unbound path -- this is the separate
+        # synthetic negative-path case retained per the task's instruction,
+        # never the real (now-bound) allowlist.
+        Mock Get-ApprovedDiskPreparationAllowlist {
+            $unboundDisk = $script:AllowedApp.Disks[0].PSObject.Copy()
+            $unboundDisk.AttestedGuestUniqueId = ''
+            $unboundApp = $script:AllowedApp.PSObject.Copy()
+            $unboundApp.Disks = @($unboundDisk)
+            return @{ App = $unboundApp; Sql = $script:AllowedSql }
         }
         $plan = Invoke-PlanFromFixture -Target 'App' -Fixture $fixture
         $plan.Blocked | Should -BeTrue
         $plan.DiskPlans.Count | Should -Be 0
         $plan.Errors.Count | Should -BeGreaterThan 0
+    }
+
+    It 'resolves the exact bound APP disk via the ATTESTED path using the real, actual (now-bound) allowlist, despite the same unresolved real IMDS resourceDisk.size="201728" discrepancy' {
+        $fixture = New-RealAppEvidenceFixture
+        $plan = Invoke-PlanFromFixture -Target 'App' -Fixture $fixture
+        $plan.Blocked | Should -BeFalse
+        $plan.DiskPlans.Count | Should -Be 1
+        $plan.DiskPlans[0].Target.DiskNumber | Should -Be 2
+        $plan.DiskPlans[0].Plan.Action | Should -Be 'Initialize'
     }
 
     It 'resolves the case-insensitively matching, uppercase-reported SQL resource group exactly as the lowercase allowlist value' {
@@ -1495,16 +1653,30 @@ Describe 'Get-GuestDiskPreparationPlan' {
         $plan.DiskPlans.Count | Should -Be 0
     }
 
-    It 'successfully resolves BOTH SQL disks via the attested-binding path when the allowlist is deliberately, fully, and uniquely attested, correctly disambiguating the real temp-disk/SQL-LOG LUN collision' {
-        $attestedSql = $script:AllowedSql.PSObject.Copy()
+    It 'successfully resolves BOTH SQL disks via the attested-binding path when the allowlist is deliberately, fully, and uniquely attested with DIFFERENT synthetic UniqueIds than the real allowlist, correctly disambiguating the real temp-disk/SQL-LOG LUN collision' {
+        # Deliberately uses its OWN synthetic UniqueId values (distinct from
+        # the real allowlist's populated AttestedGuestUniqueId values) to
+        # prove the attested-binding mechanism itself resolves correctly
+        # for ANY complete, mutually unique configuration -- not only
+        # coincidentally for the one specific real binding already covered
+        # by the "confirms the REAL fixed allowlist..." and
+        # "builds a correct, unblocked plan..." tests elsewhere in this
+        # file. The guest fixture's disk UniqueIds are overridden here to
+        # match this test's own synthetic attested configuration.
         $attestedDisk0 = $script:AllowedSql.Disks[0].PSObject.Copy()
-        $attestedDisk0.AttestedGuestUniqueId = 'sql-data-uid'
+        $attestedDisk0.AttestedGuestUniqueId = 'synthetic-sql-data-uid'
         $attestedDisk1 = $script:AllowedSql.Disks[1].PSObject.Copy()
-        $attestedDisk1.AttestedGuestUniqueId = 'sql-log-uid'
+        $attestedDisk1.AttestedGuestUniqueId = 'synthetic-sql-log-uid'
+        $attestedSql = $script:AllowedSql.PSObject.Copy()
         $attestedSql.Disks = @($attestedDisk0, $attestedDisk1)
         Mock Get-ApprovedDiskPreparationAllowlist { @{ App = $script:AllowedApp; Sql = $attestedSql } }
 
         $fixture = New-SqlRawGuestFixture
+        $fixture.Disks = @($fixture.Disks | ForEach-Object {
+                if ($_.Number -eq 2) { $_.UniqueId = 'synthetic-sql-data-uid' }
+                if ($_.Number -eq 3) { $_.UniqueId = 'synthetic-sql-log-uid' }
+                $_
+            })
         $plan = Invoke-PlanFromFixture -Target 'Sql' -Fixture $fixture
         $plan.Blocked | Should -BeFalse
         $plan.DiskPlans.Count | Should -Be 2
@@ -1600,6 +1772,32 @@ Describe 'Invoke-GuestDiskPreparation' {
                 -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName `
                 -ExpectedVmName $script:AllowedApp.VmName -ExpectedComputerName $script:AllowedApp.ComputerName `
                 -ExpectedDisksJson (ConvertTo-ExpectedDisksJson -Disks $script:AllowedApp.Disks) -DvdLetterMoveTarget ''
+            Should -Invoke Move-DvdRomLetterAdapter -Times 0
+        }
+    }
+
+    Context 'Apply mode, APP, second (idempotent) run with a valid, already-completed A: layout' {
+        BeforeEach {
+            $fixture = New-AppRawGuestFixture
+            $dataPair = New-FakeFormattedPartitionAndVolume -DiskNumber 2 -DriveLetter 'A' -SizeBytes $script:AllowedApp.Disks[0].SizeBytes -FileSystemLabel 'LIMS-App' -AllocationUnitSize 4096
+            $fixture.Disks = @($fixture.Disks | ForEach-Object {
+                    if ($_.Number -eq 2) { $_.PartitionStyle = 'GPT' }
+                    $_
+                })
+            $fixture.Partitions = @($dataPair.Partition)
+            $fixture.Volumes = @($dataPair.Volume)
+            Set-AppFixture -Fixture $fixture
+        }
+
+        It 'performs zero mutations of any kind and completes successfully (a valid, already-correct volume is never reformatted, and this script never inspects or touches any files already on it)' {
+            { Invoke-GuestDiskPreparation -Target 'App' -Mode 'Apply' `
+                    -ExpectedSubscriptionId $script:AllowedApp.SubscriptionId -ExpectedResourceGroupName $script:AllowedApp.ResourceGroupName `
+                    -ExpectedVmName $script:AllowedApp.VmName -ExpectedComputerName $script:AllowedApp.ComputerName `
+                    -ExpectedDisksJson (ConvertTo-ExpectedDisksJson -Disks $script:AllowedApp.Disks) -DvdLetterMoveTarget '' } | Should -Not -Throw
+
+            Should -Invoke Initialize-ApprovedDiskAdapter -Times 0
+            Should -Invoke New-ApprovedPartitionAdapter -Times 0
+            Should -Invoke Format-ApprovedVolumeAdapter -Times 0
             Should -Invoke Move-DvdRomLetterAdapter -Times 0
         }
     }

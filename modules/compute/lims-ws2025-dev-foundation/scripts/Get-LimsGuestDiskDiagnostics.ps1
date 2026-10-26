@@ -149,13 +149,14 @@ Write-Section 'Win32_CDROMDrive (https://learn.microsoft.com/en-us/windows/win32
 Get-CimInstance -ClassName Win32_CDROMDrive | Select-Object DeviceID, Name, Drive, MediaLoaded, SCSIBus, SCSIPort, SCSITargetId, SCSILogicalUnit |
     Format-Table -AutoSize | Out-String -Width 4096 | Write-Output
 
-Write-Section 'Non-OS disk UniqueId + SCSI addressing (needed ONLY if deliberately enabling the proposed, disabled-by-default customer-attested-binding mode)'
-Write-Output 'Initialize-LimsGuestDataDisks.ps1 defines an OPTIONAL, DISABLED-BY-DEFAULT AttestedGuestUniqueId field per approved disk descriptor in Get-ApprovedDiskPreparationAllowlist.'
-Write-Output 'It is left empty ("") for every disk today -- automatic identification remains the default path. If, and only if, a human reviewer deliberately decides to enable that proposal for a'
-Write-Output 'specific approved disk, the exact Get-Disk.UniqueId values below (joined with each disk''s SCSI bus/port/target/LUN, to help a reviewer tell which physical disk is which) are exactly'
-Write-Output 'what would need to be copied into that disk''s AttestedGuestUniqueId allowlist field, after independently confirming (e.g. against the Azure portal/CLI disk resource) that the disk'
-Write-Output 'carrying that UniqueId really is the intended managed disk. A UniqueId alone is never treated as proof of the Azure resource relationship by that logic -- it is layered on top of,'
-Write-Output 'never a replacement for, the existing exact managed-disk resource ID and LUN checks.'
+Write-Section 'Non-OS disk UniqueId + SCSI addressing (used to populate, or re-verify, the customer-attested-binding AttestedGuestUniqueId field)'
+Write-Output 'Initialize-LimsGuestDataDisks.ps1 defines an AttestedGuestUniqueId field per approved disk descriptor in Get-ApprovedDiskPreparationAllowlist. For the real APP and SQL disks, this'
+Write-Output 'field is now populated and active (see that function''s own "BINDING PROVENANCE" comment) -- this is exactly the kind of output that was reviewed and copied in to populate it. If a'
+Write-Output 'disk is ever replaced, recreated, or otherwise needs its binding re-verified, the exact Get-Disk.UniqueId values below (joined with each disk''s SCSI bus/port/target/LUN, to help a'
+Write-Output 'reviewer tell which physical disk is which) are exactly what would need to be copied into that disk''s AttestedGuestUniqueId allowlist field, after independently confirming (e.g.'
+Write-Output 'against the Azure portal/CLI disk resource) that the disk carrying that UniqueId really is the intended managed disk. A UniqueId alone is never treated as proof of the Azure resource'
+Write-Output 'relationship by that logic -- it is layered on top of, never a replacement for, the existing exact managed-disk resource ID and LUN checks, and this script never performs that'
+Write-Output 'confirmation automatically.'
 try {
     $nonOsDisksForAttestation = @(Get-Disk | Where-Object { -not ($_.IsBoot -or $_.IsSystem) })
     if ($nonOsDisksForAttestation.Count -eq 0) {
