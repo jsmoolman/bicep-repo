@@ -121,8 +121,38 @@ steps:
         fi
 
         builtParams=$(az bicep build-params --file "${{ parameters.parametersFile }}" --stdout)
-        sqlVmResourceGroupResourceId=$(echo "$builtParams" | jq -r '.parameters.sqlVmResourceGroupResourceId.value')
-        storageResourceGroupResourceId=$(echo "$builtParams" | jq -r '.parameters.storageResourceGroupResourceId.value')
+
+        # az bicep build-params --stdout wraps the compiled parameters document as
+        # a JSON-encoded STRING under the top-level "parametersJson" key (alongside
+        # "templateJson" and "templateSpecId") -- it is not the parameters document
+        # itself. Reading .parameters directly off that outer object (as a prior
+        # version of this guard did) silently resolves to null for both
+        # resource-group IDs below, because no such top-level key exists. Decode
+        # parametersJson with fromjson before extracting any value from it.
+        compiledParameters=$(echo "$builtParams" | jq -e -r '.parametersJson | fromjson') || {
+          echo "ERROR: could not decode the 'parametersJson' field from the 'az bicep build-params --stdout' output for ${{ parameters.parametersFile }} -- it was missing, null, or not valid JSON." >&2
+          exit 1
+        }
+
+        # jq -e with explicit non-empty-string validation: a missing, null, or
+        # non-string parameter value fails this guard right here with a clear
+        # parsing error, rather than silently reaching the subscription-prefix
+        # comparisons below with an empty string.
+        sqlVmResourceGroupResourceId=$(echo "$compiledParameters" | jq -e -r '
+          .parameters.sqlVmResourceGroupResourceId.value
+          | if (type == "string" and length > 0) then . else error("sqlVmResourceGroupResourceId is missing, null, or not a non-empty string") end
+        ') || {
+          echo "ERROR: could not extract a non-empty sqlVmResourceGroupResourceId value from the compiled ${{ parameters.parametersFile }} parameters (see jq error above). Refusing to proceed with an unresolved cross-subscription guard." >&2
+          exit 1
+        }
+
+        storageResourceGroupResourceId=$(echo "$compiledParameters" | jq -e -r '
+          .parameters.storageResourceGroupResourceId.value
+          | if (type == "string" and length > 0) then . else error("storageResourceGroupResourceId is missing, null, or not a non-empty string") end
+        ') || {
+          echo "ERROR: could not extract a non-empty storageResourceGroupResourceId value from the compiled ${{ parameters.parametersFile }} parameters (see jq error above). Refusing to proceed with an unresolved cross-subscription guard." >&2
+          exit 1
+        }
 
         echo "sqlVmResourceGroupResourceId    : $sqlVmResourceGroupResourceId"
         echo "storageResourceGroupResourceId  : $storageResourceGroupResourceId"
