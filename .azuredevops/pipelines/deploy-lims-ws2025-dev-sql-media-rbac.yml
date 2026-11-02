@@ -1,0 +1,246 @@
+# =============================================================================
+# Deploy LIMS WS2025 DEV v2 SQL Installation-Media Container RBAC
+# =============================================================================
+# Purpose:
+#   Grants the existing LIMS WS2025 DEV v2 SQL virtual machine's existing
+#   system-assigned managed identity (vm-lims-dev-v2-westeu-002) exactly one
+#   built-in Storage Blob Data Reader role assignment
+#   (2a2b9908-6ea1-4ae2-8e65-a410df84e7d1), scoped to exactly the existing
+#   mssql-2022-source blob container inside the existing salimsmgmtwe
+#   storage account — never storage-account, resource-group, or subscription
+#   scope. Approved under the narrow LIMS WS2025 DEV v2 SQL installation-
+#   media container RBAC exception recorded in docs/scope.md.
+#
+#   Deliberately cross-subscription: the SQL VM lives in the DEV subscription
+#   (read-only identity lookup only — nothing is ever deployed there); the
+#   role assignment is deployed only into the MGMT subscription hosting the
+#   storage account. Both the identity lookup and the role-assignment target
+#   are explicitly, separately scoped Bicep modules — see
+#   src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep.
+#
+# What this pipeline does NOT do:
+#   - No media listing, download, or any other data-plane access to the
+#     container's contents.
+#   - No SQL Server Setup, installation, configuration, or any other guest
+#     execution on either LIMS WS2025 DEV v2 VM.
+#   - No remediation of any kind.
+#   - No change to the SQL VM's identity, the storage account, the
+#     container, or any other existing resource's configuration.
+#   - No account key, connection string, SAS token, or additional identity
+#     infrastructure of any kind.
+#   - No change to any foundation resource, existing RBAC assignment,
+#     networking, or v1 LIMS resource.
+#
+# Explicit cross-subscription guards:
+#   This pipeline independently re-verifies, via the Azure CLI (duplicating,
+#   not merely trusting, the fail-closed verification already built into
+#   resolve-sql-vm-identity.bicep), that the parameter file's
+#   sqlVmResourceGroupResourceId resolves to the DEV subscription and that
+#   storageResourceGroupResourceId resolves to the MGMT subscription — never
+#   the reverse, and never the same subscription for both. This check runs
+#   before any Bicep build, what-if, or deploy step below.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline" with
+# an explicit what-if (default) or deploy action. Kept independently runnable
+# from every other LIMS WS2025 DEV v2 pipeline so this narrow, one-off RBAC
+# grant can be reviewed and deployed separately.
+#
+# No admin credentials: this deployment creates only one role assignment, so
+# no VM admin username/password are mapped here.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: action
+    displayName: Action to perform
+    type: string
+    default: what-if
+    values:
+      - what-if
+      - deploy
+
+  - name: serviceConnection
+    displayName: Azure DevOps service connection — its underlying credential must already have Reader access to the SQL VM in the DEV subscription AND Microsoft.Authorization/roleAssignments/write at the mssql-2022-source container scope in the MGMT subscription (e.g. Owner or User Access Administrator there); no broader permission is required or granted by this pipeline. The same existing service connection is reused for both subscriptions — no new service connection is created. No default; the real value is customer-specific configuration.
+    type: string
+
+  - name: devSubscriptionId
+    displayName: Expected DEV subscription ID hosting the SQL VM (guard only — compared against the parameter file's sqlVmResourceGroupResourceId; never deployed into)
+    type: string
+    default: '8ebb26a1-674a-40d1-97f8-e0a237e288a6'
+
+  - name: mgmtSubscriptionId
+    displayName: Expected MGMT subscription ID hosting the installation-media storage account (guard only, AND the subscription this pipeline's deployment job itself targets)
+    type: string
+    default: 'cd9bed50-c972-49d0-83b0-b97bf801c804'
+
+  - name: parametersFile
+    displayName: Path to the project-specific Bicep parameter file
+    type: string
+    default: 'config/nfi/lims/compute/lims-ws2025-dev-sql-media-rbac.bicepparam'
+
+  - name: location
+    displayName: Deployment location (subscription-scope deployment metadata location)
+    type: string
+    default: 'westeurope'
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Explicit cross-subscription guard (DEV VM lookup vs MGMT deployment target)'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        if [[ -z "${DEV_SUBSCRIPTION_ID:-}" || -z "${MGMT_SUBSCRIPTION_ID:-}" ]]; then
+          echo "ERROR: devSubscriptionId/mgmtSubscriptionId pipeline parameters are empty" >&2
+          exit 1
+        fi
+        if [[ "${DEV_SUBSCRIPTION_ID,,}" == "${MGMT_SUBSCRIPTION_ID,,}" ]]; then
+          echo "ERROR: devSubscriptionId and mgmtSubscriptionId must not be the same subscription for this cross-subscription composition." >&2
+          exit 1
+        fi
+
+        builtParams=$(az bicep build-params --file "${{ parameters.parametersFile }}" --stdout)
+        sqlVmResourceGroupResourceId=$(echo "$builtParams" | jq -r '.parameters.sqlVmResourceGroupResourceId.value')
+        storageResourceGroupResourceId=$(echo "$builtParams" | jq -r '.parameters.storageResourceGroupResourceId.value')
+
+        echo "sqlVmResourceGroupResourceId    : $sqlVmResourceGroupResourceId"
+        echo "storageResourceGroupResourceId  : $storageResourceGroupResourceId"
+
+        shopt -s nocasematch
+        if [[ "$sqlVmResourceGroupResourceId" != "/subscriptions/${DEV_SUBSCRIPTION_ID}/"* ]]; then
+          echo "ERROR: sqlVmResourceGroupResourceId ('$sqlVmResourceGroupResourceId') does not start with the expected DEV subscription ('$DEV_SUBSCRIPTION_ID'). Refusing to proceed — this guard exists specifically to catch a DEV/MGMT parameter mix-up before any deployment action." >&2
+          exit 1
+        fi
+        if [[ "$storageResourceGroupResourceId" != "/subscriptions/${MGMT_SUBSCRIPTION_ID}/"* ]]; then
+          echo "ERROR: storageResourceGroupResourceId ('$storageResourceGroupResourceId') does not start with the expected MGMT subscription ('$MGMT_SUBSCRIPTION_ID'). Refusing to proceed — this guard exists specifically to catch a DEV/MGMT parameter mix-up before any deployment action." >&2
+          exit 1
+        fi
+        shopt -u nocasematch
+
+        echo "Guard passed: SQL VM lookup targets DEV ($DEV_SUBSCRIPTION_ID); role-assignment deployment targets MGMT ($MGMT_SUBSCRIPTION_ID)."
+    env:
+      DEV_SUBSCRIPTION_ID: ${{ parameters.devSubscriptionId }}
+      MGMT_SUBSCRIPTION_ID: ${{ parameters.mgmtSubscriptionId }}
+
+  - task: AzureCLI@2
+    displayName: 'Bicep build and lint validation'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        echo "== bicep build: modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep =="
+        az bicep build --file "modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep" --stdout > /dev/null
+        echo "== bicep build: modules/compute/lims-ws2025-dev-sql-media-rbac/main.bicep =="
+        az bicep build --file "modules/compute/lims-ws2025-dev-sql-media-rbac/main.bicep" --stdout > /dev/null
+        echo "== bicep build: src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep =="
+        az bicep build --file "src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep" --stdout > /dev/null
+        echo "== bicep lint: src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep =="
+        az bicep lint --file "src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep"
+        echo "== bicep build-params: ${{ parameters.parametersFile }} =="
+        az bicep build-params --file "${{ parameters.parametersFile }}" --stdout > /dev/null
+
+  - ${{ if eq(parameters.action, 'what-if') }}:
+      - task: AzureCLI@2
+        displayName: 'az deployment sub what-if'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${MGMT_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: MGMT_SUBSCRIPTION_ID is empty - map the mgmtSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$MGMT_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${MGMT_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested MGMT subscription '$MGMT_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription (deployment job home — MGMT): $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            echo "NOTE: what-if previews exactly one Microsoft.Authorization/roleAssignments"
+            echo "resource, scoped to the mssql-2022-source container in the MGMT"
+            echo "subscription. The DEV-side identity lookup (resolve-sql-vm-identity)"
+            echo "deploys zero resources and is not expected to appear as a create/modify"
+            echo "in this what-if output — only as a nested, no-op deployment resource."
+            echo "A mismatch between the live SQL VM identity and expectedSqlVmPrincipalId"
+            echo "fails this what-if closed rather than silently previewing the wrong"
+            echo "principal."
+
+            az deployment sub what-if \
+              --name "lims-ws2025-dev-sql-media-rbac-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}"
+        env:
+          MGMT_SUBSCRIPTION_ID: ${{ parameters.mgmtSubscriptionId }}
+
+  - ${{ if eq(parameters.action, 'deploy') }}:
+      - task: AzureCLI@2
+        name: deploySqlMediaRbac
+        displayName: 'az deployment sub create'
+        inputs:
+          azureSubscription: ${{ parameters.serviceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+
+            if [[ -z "${MGMT_SUBSCRIPTION_ID:-}" ]]; then
+              echo "ERROR: MGMT_SUBSCRIPTION_ID is empty - map the mgmtSubscriptionId pipeline parameter via this task's env section" >&2
+              exit 1
+            fi
+            az account set --subscription "$MGMT_SUBSCRIPTION_ID"
+            selectedSubscriptionId=$(az account show --query id --output tsv)
+            selectedSubscriptionName=$(az account show --query name --output tsv)
+            if [[ "${selectedSubscriptionId,,}" != "${MGMT_SUBSCRIPTION_ID,,}" ]]; then
+              echo "ERROR: selected subscription '$selectedSubscriptionId' does not match requested MGMT subscription '$MGMT_SUBSCRIPTION_ID'" >&2
+              exit 1
+            fi
+            echo "Selected subscription (deployment job home — MGMT): $selectedSubscriptionName ($selectedSubscriptionId)"
+
+            outputs=$(az deployment sub create \
+              --name "lims-ws2025-dev-sql-media-rbac-$(Build.BuildId)" \
+              --location "${{ parameters.location }}" \
+              --parameters "${{ parameters.parametersFile }}" \
+              --query properties.outputs \
+              --output json)
+
+            verifiedSqlVmPrincipalId=$(echo "$outputs" | jq -r '.verifiedSqlVmPrincipalId.value')
+            roleAssignmentId=$(echo "$outputs"         | jq -r '.roleAssignmentId.value')
+            containerResourceId=$(echo "$outputs"      | jq -r '.containerResourceId.value')
+            devSubscriptionIdOut=$(echo "$outputs"     | jq -r '.devSubscriptionId.value')
+            mgmtSubscriptionIdOut=$(echo "$outputs"    | jq -r '.mgmtSubscriptionId.value')
+
+            echo "========================================="
+            echo "LIMS WS2025 DEV v2 SQL installation-media container RBAC deployed"
+            echo "========================================="
+            echo "  Verified SQL VM principalId : $verifiedSqlVmPrincipalId"
+            echo "  Role assignment ID          : $roleAssignmentId"
+            echo "  Container scope             : $containerResourceId"
+            echo "  DEV subscription (lookup)   : $devSubscriptionIdOut"
+            echo "  MGMT subscription (target)  : $mgmtSubscriptionIdOut"
+            echo ""
+            echo "Reminder: this deployment grants read access to the container only."
+            echo "It does not list, download, or otherwise access the media's contents,"
+            echo "and performs no SQL Setup or guest execution. See docs/operations.md"
+            echo "for the customer's own next steps using this access."
+        env:
+          MGMT_SUBSCRIPTION_ID: ${{ parameters.mgmtSubscriptionId }}
