@@ -12,11 +12,21 @@
 #   media container RBAC exception recorded in docs/scope.md.
 #
 #   Deliberately cross-subscription: the SQL VM lives in the DEV subscription
-#   (read-only identity lookup only — nothing is ever deployed there); the
-#   role assignment is deployed only into the MGMT subscription hosting the
-#   storage account. Both the identity lookup and the role-assignment target
-#   are explicitly, separately scoped Bicep modules — see
+#   (read-only identity lookup only — no workload resource is created or
+#   modified there); the one workload resource (the role assignment) is
+#   created only in the MGMT subscription hosting the storage account. The
+#   DEV-side lookup still creates/updates a Microsoft.Resources/deployments
+#   record in that resource group, as any nested module deployment does -
+#   this is not the same claim as "nothing is deployed there." Both the
+#   identity lookup and the role-assignment target are explicitly, separately
+#   scoped Bicep modules — see
 #   src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep.
+#
+#   Permissions: the Azure DevOps service connection reused below already has
+#   customer-confirmed Owner access across all LIMS subscriptions. That
+#   existing access covers both the DEV deployment-record creation and the
+#   MGMT role-assignment creation described above — this pipeline requires
+#   and grants no new permission.
 #
 # What this pipeline does NOT do:
 #   - No media listing, download, or any other data-plane access to the
@@ -63,7 +73,7 @@ parameters:
       - deploy
 
   - name: serviceConnection
-    displayName: Azure DevOps service connection — its underlying credential must already have Reader access to the SQL VM in the DEV subscription AND Microsoft.Authorization/roleAssignments/write at the mssql-2022-source container scope in the MGMT subscription (e.g. Owner or User Access Administrator there); no broader permission is required or granted by this pipeline. The same existing service connection is reused for both subscriptions — no new service connection is created. No default; the real value is customer-specific configuration.
+    displayName: Azure DevOps service connection — its underlying managed identity already has customer-confirmed Owner access across all LIMS subscriptions, which covers both the DEV deployment-record creation and the MGMT role-assignment creation performed by this pipeline. This is a record of existing, already-confirmed access; this pipeline does not request, grant, or change any permission. The same existing service connection is reused for both subscriptions — no new service connection is created. No default; the real value is customer-specific configuration.
     type: string
 
   - name: devSubscriptionId
@@ -176,14 +186,22 @@ steps:
             fi
             echo "Selected subscription (deployment job home — MGMT): $selectedSubscriptionName ($selectedSubscriptionId)"
 
-            echo "NOTE: what-if previews exactly one Microsoft.Authorization/roleAssignments"
-            echo "resource, scoped to the mssql-2022-source container in the MGMT"
-            echo "subscription. The DEV-side identity lookup (resolve-sql-vm-identity)"
-            echo "deploys zero resources and is not expected to appear as a create/modify"
-            echo "in this what-if output — only as a nested, no-op deployment resource."
-            echo "A mismatch between the live SQL VM identity and expectedSqlVmPrincipalId"
-            echo "fails this what-if closed rather than silently previewing the wrong"
-            echo "principal."
+            echo "NOTE: the role assignment's principalId is the output of the separate"
+            echo "DEV-side identity-resolution module (resolve-sql-vm-identity), not a"
+            echo "literal value in this template. az deployment sub what-if can leave a"
+            echo "cross-module output dependency like this unresolved, or omit the"
+            echo "downstream Microsoft.Authorization/roleAssignments resource from its"
+            echo "diff entirely as a result — an incomplete, partial, or apparently"
+            echo "empty what-if result is NOT proof that no change would occur. Review"
+            echo "the full raw output below, including any unresolved-expression or"
+            echo "'Unsupported' entries, rather than relying on a short summary."
+            echo ""
+            echo "This what-if preview limitation does not affect actual deployment: the"
+            echo "fail-closed identity verification inside resolve-sql-vm-identity.bicep"
+            echo "(comparing the live SQL VM identity.principalId against"
+            echo "expectedSqlVmPrincipalId and failing the deployment closed on any"
+            echo "mismatch) is unchanged and still applies in full when this pipeline is"
+            echo "run with the deploy action below."
 
             az deployment sub what-if \
               --name "lims-ws2025-dev-sql-media-rbac-$(Build.BuildId)" \
