@@ -81,8 +81,51 @@ Describe 'ConvertFrom-BlobListingXml (pure)' {
         @($result.Blobs).Count | Should -Be 0
     }
 
-    It 'throws on malformed XML' {
-        { ConvertFrom-BlobListingXml -XmlText 'not xml at all <<<' } | Should -Throw
+    It 'strips a leading UTF-8 BOM (U+FEFF) before parsing a page that still carries an XML declaration, and pagination still works' {
+        # Reproduces the live-incident fixture shape exactly: a literal
+        # BOM character surviving ahead of the <?xml ... ?> declaration
+        # once the response body has already been decoded to a string.
+        $bomChar = [char]0xFEFF
+        $xml = $bomChar + (New-BlobListingXmlPage -Blobs @(
+                @{ Name = 'SETUP.EXE'; Length = 1024 }
+                @{ Name = 'x64/setup.exe'; Length = 2048 }
+            ) -NextMarker 'marker-after-bom-page')
+
+        $result = ConvertFrom-BlobListingXml -XmlText $xml
+
+        $result.Blobs.Count | Should -Be 2
+        $result.Blobs[0].Name | Should -Be 'SETUP.EXE'
+        $result.Blobs[0].Length | Should -Be 1024
+        $result.Blobs[1].Length | Should -Be 2048
+        $result.NextMarker | Should -Be 'marker-after-bom-page'
+    }
+
+    It 'fails closed on a well-formed but unexpected root element, instead of silently returning zero blobs' {
+        # A well-formed Azure error response (e.g. ContainerNotFound) has a
+        # different root element -- this must be an explicit, diagnosable
+        # failure, never silently treated as "a normal page with zero
+        # blobs and no NextMarker".
+        $xml = '<?xml version="1.0" encoding="utf-8"?><Error><Code>ContainerNotFound</Code><Message>The specified container does not exist.</Message></Error>'
+        { ConvertFrom-BlobListingXml -XmlText $xml } | Should -Throw -ExpectedMessage '*EnumerationResults*'
+    }
+
+    It 'throws on malformed XML with a short diagnostic (exception type and line/position) that never echoes the raw response body' {
+        $sensitiveMarker = 'SENSITIVE-RAW-RESPONSE-MARKER-must-never-appear-in-any-error-message'
+        $malformedXml = "not xml at all <<< $sensitiveMarker"
+
+        $caught = $null
+        try {
+            ConvertFrom-BlobListingXml -XmlText $malformedXml
+        }
+        catch {
+            $caught = $_
+        }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Match 'XmlException'
+        $caught.Exception.Message | Should -Match 'line \d+, position \d+'
+        $caught.Exception.Message | Should -Not -Match ([regex]::Escape($sensitiveMarker))
+        $caught.Exception.Message | Should -Not -Match ([regex]::Escape($malformedXml))
     }
 }
 
@@ -306,6 +349,22 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
         $plan.Blocked | Should -BeTrue
         $plan.Errors -join ' ' | Should -Match 'traversal'
         Should -Invoke Get-FreeBytesOnDriveAdapter -Times 0
+    }
+
+    It 'blocks the plan on a malformed-XML listing page fixture, before any write/download adapter is ever reached, and never leaks the raw response' {
+        Mock New-StagingDirectoryAdapter { }
+        Mock Invoke-BlobDownloadToFileAdapter { }
+        $sensitiveMarker = 'SENSITIVE-RAW-RESPONSE-MARKER-must-never-appear-in-a-blocked-plan-error'
+        Mock Invoke-BlobContainerListPageAdapter {
+            return "not xml at all <<< $sensitiveMarker"
+        }
+
+        { Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig } |
+            Should -Throw -ExpectedMessage '*XmlException*'
+
+        Should -Invoke Get-FreeBytesOnDriveAdapter -Times 0
+        Should -Invoke New-StagingDirectoryAdapter -Times 0
+        Should -Invoke Invoke-BlobDownloadToFileAdapter -Times 0
     }
 
     It 'blocks the plan when a destination directory is an existing junction/symlink' {

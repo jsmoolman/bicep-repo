@@ -168,16 +168,59 @@ function ConvertFrom-BlobListingXml {
         Parses ONE page of an Azure Blob "List Blobs" REST response
         (EnumerationResults XML) into a plain array of {Name, Length} blob
         entries plus the page's own NextMarker ('' when there is no further
-        page). Never calls a real cmdlet -- [xml] parsing is pure .NET XML
+        page). Never calls a real cmdlet -- XML parsing is pure .NET XML
         parsing, available and pure on any platform.
+
+        A UTF-8 BOM (U+FEFF) sometimes survives as a literal leading
+        character once the response body has already been decoded to a
+        .NET string -- at that point it is ordinary string content, not an
+        encoding marker a byte-stream-based parser would silently consume,
+        so it is stripped here before parsing, the same way the diagnostic
+        used while investigating the live failure stripped it.
+
+        Deliberately uses XmlDocument.LoadXml() rather than the PowerShell
+        [xml] cast operator: a failed [xml] cast wraps the real parser
+        exception in a PSInvalidCastException whose own Message embeds the
+        entire input value being cast -- i.e. the full raw response body --
+        which is exactly what must never reach the pipeline log. A failed
+        LoadXml() call is instead wrapped by PowerShell in a
+        MethodInvocationException (calling any .NET method directly, as
+        opposed to a cmdlet, gets this treatment) whose InnerException is
+        the real XmlException -- unwrapped below to report its type and,
+        for well-formedness errors, LineNumber/LinePosition. Neither
+        exception's own Message nor the response body is ever
+        interpolated into this function's own failure message.
     #>
     param([Parameter(Mandatory = $true)] [string] $XmlText)
 
+    $cleanedXmlText = $XmlText.TrimStart([char]0xFEFF)
+
+    $doc = New-Object System.Xml.XmlDocument
     try {
-        $doc = [xml]$XmlText
+        $doc.LoadXml($cleanedXmlText)
     }
     catch {
-        Assert-LimsSqlMediaStagingFailure "Blob listing page could not be parsed as XML: $($_.Exception.Message)"
+        # A direct .NET method call (LoadXml(), as opposed to a cmdlet)
+        # that throws has PowerShell wrap the real exception in a
+        # MethodInvocationException -- unwrap one level so the reported
+        # type/line/position describe the actual XmlException, not just
+        # PowerShell's own invocation wrapper.
+        $reportedException = $_.Exception
+        if ($reportedException.InnerException) { $reportedException = $reportedException.InnerException }
+        $exceptionTypeName = $reportedException.GetType().FullName
+        $positionSuffix = ''
+        if ($reportedException -is [System.Xml.XmlException]) {
+            $xmlException = [System.Xml.XmlException]$reportedException
+            if ($xmlException.LineNumber -gt 0 -or $xmlException.LinePosition -gt 0) {
+                $positionSuffix = " at line $($xmlException.LineNumber), position $($xmlException.LinePosition)"
+            }
+        }
+        Assert-LimsSqlMediaStagingFailure "Blob listing page could not be parsed as XML ($exceptionTypeName$positionSuffix)."
+    }
+
+    if (-not $doc.DocumentElement -or $doc.DocumentElement.LocalName -ne 'EnumerationResults') {
+        $actualRoot = if ($doc.DocumentElement) { $doc.DocumentElement.LocalName } else { '<none>' }
+        Assert-LimsSqlMediaStagingFailure "Blob listing page root element was '$actualRoot', expected 'EnumerationResults'."
     }
 
     $blobs = @()
