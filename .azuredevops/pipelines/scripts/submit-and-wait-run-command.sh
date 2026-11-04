@@ -25,8 +25,18 @@
 #   RESOURCE_GROUP              Pinned resource group of the target VM.
 #   VM_NAME                     Pinned name of the target VM.
 #   SCRIPT_TO_SUBMIT            Repository-relative path to the script to
-#                                submit (loaded via the "@<path>" az CLI
-#                                file-content convention).
+#                                submit. Its contents are read directly by
+#                                this script and passed to `az vm
+#                                run-command create --script` as a single
+#                                literal argument -- never via the
+#                                "@<path>" az CLI file-content convention,
+#                                which sends the literal path string "as
+#                                is" for this command (there is no file
+#                                on the guest, or on the Azure control
+#                                plane's side, for "@<path>" to resolve
+#                                against) and was observed to make
+#                                PowerShell reject the literal "@..."
+#                                text itself as invalid syntax on line 1.
 #   RUN_COMMAND_NAME            Name for the ad hoc runCommands resource.
 #   GUEST_TIMEOUT_SECONDS       Passed to `az vm run-command create
 #                                --timeout-in-seconds` -- the guest script's
@@ -95,6 +105,26 @@ print_retention_guidance() {
   echo "  az vm run-command show --subscription $DEV_SUBSCRIPTION_ID --resource-group $RESOURCE_GROUP --vm-name $VM_NAME --name $RUN_COMMAND_NAME --instance-view"
 }
 
+# Read the pinned script's content into a Bash variable up front -- before
+# anything is recorded or submitted -- so a read failure or an empty file
+# is caught while nothing has happened yet (no run-command resource
+# created, no pipeline variables set for cleanup to act on). This also
+# means the real script content, not a path string, is what gets passed
+# to `az vm run-command create --script` below: the previous "@<path>"
+# convention sent that literal path text to Azure, which is not a
+# supported way to reference a file for this command and made PowerShell
+# reject the literal "@..." text as invalid syntax on line 1 in the
+# guest. The script body itself is never echoed anywhere below, to keep
+# it out of pipeline logs.
+if ! script_content=$(cat -- "$SCRIPT_TO_SUBMIT"); then
+  echo "ERROR: failed to read script content from '$SCRIPT_TO_SUBMIT'; nothing has been submitted." >&2
+  exit 2
+fi
+if [[ -z "$script_content" ]]; then
+  echo "ERROR: script content read from '$SCRIPT_TO_SUBMIT' is empty; nothing has been submitted." >&2
+  exit 2
+fi
+
 # Retain-by-default: set together, before submission is even attempted,
 # so that any interruption after this point -- a lost `create` response,
 # a cancelled job, an agent disconnect -- leaves the pipeline variable's
@@ -110,7 +140,7 @@ if ! az vm run-command create \
   --resource-group "$RESOURCE_GROUP" \
   --vm-name "$VM_NAME" \
   --name "$RUN_COMMAND_NAME" \
-  --script "@${SCRIPT_TO_SUBMIT}" \
+  --script "$script_content" \
   --timeout-in-seconds "$GUEST_TIMEOUT_SECONDS" \
   --no-wait; then
   echo "ERROR: 'az vm run-command create' itself failed, or its response was lost -- whether Azure actually accepted this submission cannot be determined, so it is treated as indeterminate rather than 'nothing was created'." >&2
