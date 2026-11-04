@@ -31,8 +31,15 @@
 #   Guest copy is delivered through the same
 #   scripts/submit-and-wait-run-command.sh / scripts/cleanup-run-command.sh
 #   mechanism the SQL provision pipeline uses. The guest script is
-#   concatenated with the mapping file first so the guest independently
-#   re-verifies destination identity against that same mapping.
+#   concatenated with the mapping and safety files first so the guest
+#   independently re-verifies destination identity against that same
+#   mapping. Stage and cleanup stay blocked until
+#   WindowsReparseValidationStatus is Passed in the mapping.
+#
+#   migrationRunId is passed only through task environment values and is
+#   validated as a numeric Azure DevOps Build.BuildId before it is
+#   published or used. Plan is read-only, including when the Disk
+#   Encryption Set pin is missing (report live DES, then fail).
 #
 #   Permissions: the Azure DevOps service connection reused below already
 #   has customer-confirmed Owner access across all LIMS subscriptions.
@@ -114,6 +121,8 @@ variables:
     value: 'operations/compute/lims-app-data-disk-migration/Invoke-LimsAppDataDiskMigration.ps1'
   - name: mappingScriptPath
     value: 'operations/compute/lims-app-data-disk-migration/LimsAppDataDiskMigration.Mapping.ps1'
+  - name: safetyScriptPath
+    value: 'operations/compute/lims-app-data-disk-migration/LimsAppDataDiskMigration.Safety.ps1'
   - name: guestCopyScriptPath
     value: 'operations/compute/lims-app-data-disk-migration/Copy-LimsAppDataDiskContents.ps1'
   - name: guestTimeoutSeconds
@@ -136,24 +145,31 @@ jobs:
     steps:
       - checkout: self
 
-      - bash: |
-          set -euo pipefail
-          action='${{ parameters.action }}'
-          supplied='${{ parameters.migrationRunId }}'
-          if [[ "$action" == "cleanup" ]]; then
-            if [[ -z "$supplied" ]]; then
-              echo "ERROR: parameters.migrationRunId is required for cleanup — pass the Build.BuildId of the stage run that created the temporary disk." >&2
+      - pwsh: |
+          $ErrorActionPreference = 'Stop'
+          Set-StrictMode -Version Latest
+          . $env:LIMS_APP_MIG_SAFETY_SCRIPT
+          $resolved = Resolve-LimsAppMigPipelineRunId -Action $env:LIMS_APP_MIG_ACTION -SuppliedRunId $env:LIMS_APP_MIG_RUN_ID_INPUT -BuildId $env:LIMS_APP_MIG_BUILD_ID
+          if (-not $resolved.Accepted) {
+            Write-Error $resolved.Reason
+            exit 1
+          }
+          $runId = [string]$resolved.RunId
+          if (-not [string]::IsNullOrEmpty($runId)) {
+            $safe = Test-LimsAppMigPipelineSafeValue -Name 'effectiveMigrationRunId' -Value $runId
+            if (-not $safe.Accepted) {
+              Write-Error $safe.Reason
               exit 1
-            fi
-            runId="$supplied"
-          elif [[ -n "$supplied" ]]; then
-            runId="$supplied"
-          else
-            runId="$(Build.BuildId)"
-          fi
-          echo "Effective migration run ID: $runId (action=$action)"
-          echo "##vso[task.setvariable variable=effectiveMigrationRunId]$runId"
+            }
+          }
+          Write-Output "Effective migration run ID: '$runId' (action=$($env:LIMS_APP_MIG_ACTION))"
+          Write-Output "##vso[task.setvariable variable=effectiveMigrationRunId]$runId"
         displayName: 'Resolve migration run ID'
+        env:
+          LIMS_APP_MIG_ACTION: ${{ parameters.action }}
+          LIMS_APP_MIG_RUN_ID_INPUT: ${{ parameters.migrationRunId }}
+          LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
+          LIMS_APP_MIG_SAFETY_SCRIPT: $(safetyScriptPath)
 
       - task: AzureCLI@2
         displayName: '${{ parameters.action }}: control-plane ${{ parameters.action }} against the reviewed ${{ parameters.environment }} mapping'
@@ -162,19 +178,32 @@ jobs:
           scriptType: pscore
           scriptLocation: scriptPath
           scriptPath: $(controlPlaneScriptPath)
-          arguments: '-Action ${{ parameters.action }} -EnvironmentName ${{ parameters.environment }} -MigrationRunId $(effectiveMigrationRunId) -CaptureMode ${{ parameters.captureMode }} -DeleteSnapshot:$${{ parameters.deleteSnapshot }}'
+        env:
+          LIMS_APP_MIG_ACTION: ${{ parameters.action }}
+          LIMS_APP_MIG_ENVIRONMENT: ${{ parameters.environment }}
+          LIMS_APP_MIG_RUN_ID: $(effectiveMigrationRunId)
+          LIMS_APP_MIG_CAPTURE_MODE: ${{ parameters.captureMode }}
+          LIMS_APP_MIG_DELETE_SNAPSHOT: '${{ parameters.deleteSnapshot }}'
+          LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
 
       - ${{ if eq(parameters.action, 'stage') }}:
           - bash: |
               set -euo pipefail
-              output="$(Agent.TempDirectory)/lims-app-mig-guest-$(effectiveMigrationRunId).ps1"
+              output="${AGENT_TEMPDIRECTORY}/lims-app-mig-guest-${EFFECTIVE_MIGRATION_RUN_ID}.ps1"
               bash .azuredevops/pipelines/scripts/prepare-lims-app-migration-guest-script.sh \
-                "$(mappingScriptPath)" \
-                "$(guestCopyScriptPath)" \
-                "$output"
-              echo "##vso[task.setvariable variable=guestScriptToSubmit]$output"
-              echo "Prepared guest script at $output"
-            displayName: 'stage: concatenate reviewed mapping into the guest copy script'
+                "${MAPPING_SCRIPT_PATH}" \
+                "${SAFETY_SCRIPT_PATH}" \
+                "${GUEST_COPY_SCRIPT_PATH}" \
+                "${output}"
+              echo "##vso[task.setvariable variable=guestScriptToSubmit]${output}"
+              echo "Prepared guest script at ${output}"
+            displayName: 'stage: concatenate reviewed mapping and safety functions into the guest copy script'
+            env:
+              EFFECTIVE_MIGRATION_RUN_ID: $(effectiveMigrationRunId)
+              AGENT_TEMPDIRECTORY: $(Agent.TempDirectory)
+              MAPPING_SCRIPT_PATH: $(mappingScriptPath)
+              SAFETY_SCRIPT_PATH: $(safetyScriptPath)
+              GUEST_COPY_SCRIPT_PATH: $(guestCopyScriptPath)
 
           - task: AzureCLI@2
             displayName: 'stage: submit guest copy script via Managed Run Command and wait for a terminal execution state'
@@ -188,18 +217,22 @@ jobs:
               RESOURCE_GROUP: $(limsAppMigResourceGroupName)
               VM_NAME: $(limsAppMigDestinationVmName)
               SCRIPT_TO_SUBMIT: $(guestScriptToSubmit)
-              RUN_COMMAND_NAME: 'migrate-lims-app-data-$(effectiveMigrationRunId)'
+              RUN_COMMAND_NAME: $(limsAppMigGuestCommandName)
               GUEST_TIMEOUT_SECONDS: $(guestTimeoutSeconds)
               POLL_DEADLINE_SECONDS: $(pollDeadlineSeconds)
               STARTUP_MAX_RETRIES: $(startupMaxRetries)
               STARTUP_RETRY_INTERVAL_SECONDS: $(startupRetryIntervalSeconds)
               NORMAL_POLL_INTERVAL_SECONDS: $(normalPollIntervalSeconds)
               RUN_COMMAND_PARAMETERS: |
-                EnvironmentName=${{ parameters.environment }}
+                EnvironmentName=$(limsAppMigEnvironmentName)
                 MigrationRunId=$(effectiveMigrationRunId)
                 ExpectedTemporaryLun=$(limsAppMigTemporaryLun)
                 ExpectedTemporaryDiskName=$(limsAppMigTemporaryDiskName)
-                CaptureMode=${{ parameters.captureMode }}
+                ExpectedTemporaryDiskResourceId=$(limsAppMigTemporaryDiskId)
+                ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
+                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryDiskUniqueId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                CaptureMode=$(limsAppMigCaptureMode)
 
           - task: AzureCLI@2
             displayName: 'stage: record copy result on the destination VM'
@@ -210,13 +243,22 @@ jobs:
               scriptLocation: inlineScript
               inlineScript: |
                 $ErrorActionPreference = 'Stop'
-                if ([string]::IsNullOrWhiteSpace('$(limsAppMigTemporaryDiskId)')) {
+                if ([string]::IsNullOrWhiteSpace($env:LIMS_APP_MIG_TEMP_DISK_ID)) {
                   Write-Output 'No temporary disk was recorded; skipping copy-status tag update.'
                   exit 0
                 }
                 $copyStatus = 'Failed'
-                if ('$(Agent.JobStatus)' -eq 'Succeeded') { $copyStatus = 'Succeeded' }
-                & '$(controlPlaneScriptPath)' -Action stage -EnvironmentName '${{ parameters.environment }}' -MigrationRunId '$(effectiveMigrationRunId)' -CaptureMode '${{ parameters.captureMode }}' -CopyStatus $copyStatus
+                if ($env:AGENT_JOBSTATUS -eq 'Succeeded') { $copyStatus = 'Succeeded' }
+                $env:LIMS_APP_MIG_ACTION = 'stage'
+                $env:LIMS_APP_MIG_COPY_STATUS = $copyStatus
+                & $env:LIMS_APP_MIG_CONTROL_PLANE
+            env:
+              LIMS_APP_MIG_TEMP_DISK_ID: $(limsAppMigTemporaryDiskId)
+              LIMS_APP_MIG_RUN_ID: $(effectiveMigrationRunId)
+              LIMS_APP_MIG_ENVIRONMENT: $(limsAppMigEnvironmentName)
+              LIMS_APP_MIG_CAPTURE_MODE: $(limsAppMigCaptureMode)
+              LIMS_APP_MIG_CONTROL_PLANE: $(controlPlaneScriptPath)
+              AGENT_JOBSTATUS: $(Agent.JobStatus)
 
       - ${{ if eq(parameters.action, 'stage') }}:
           - task: AzureCLI@2

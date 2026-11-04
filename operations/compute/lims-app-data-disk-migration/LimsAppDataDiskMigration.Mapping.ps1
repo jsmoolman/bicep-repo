@@ -46,6 +46,9 @@ function New-DisabledLimsAppDataDiskMigrationEnvironment {
         ExcludeRelativePaths            = @('lv89\sdmshome')
         ReservedDriveLetters            = @('A', 'C', 'D')
         RobocopyLogDirectory            = 'C:\LimsAppMigration\logs'
+        DestinationAttestedGuestUniqueId = ''
+        GuestCommandNamePrefix          = ''
+        WindowsReparseValidationStatus  = 'BlockedPendingValidation'
     }
 }
 
@@ -84,6 +87,11 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             ExcludeRelativePaths            = @('lv89\sdmshome')
             ReservedDriveLetters            = @('A', 'C', 'D')
             RobocopyLogDirectory            = 'C:\LimsAppMigration\logs'
+            DestinationAttestedGuestUniqueId = '60022480D1B07E6ACD98417F86591F4B'
+            GuestCommandNamePrefix          = 'migrate-lims-app-data'
+            # Stage/cleanup stay blocked until a real Windows Robocopy
+            # reparse-point test has been reviewed. Plan remains enabled.
+            WindowsReparseValidationStatus  = 'BlockedPendingValidation'
         }
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'tst')
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'acc')
@@ -105,11 +113,22 @@ function Get-LimsAppDataDiskMigrationEnvironment {
 
 function Get-LimsAppDataDiskMigrationLockTagKeys {
     return [pscustomobject]@{
-        RunId         = 'limsAppMigLockRunId'
-        SnapshotId    = 'limsAppMigSnapshotId'
-        TempDiskId    = 'limsAppMigTempDiskId'
-        CaptureMode   = 'limsAppMigCaptureMode'
-        CopyStatus    = 'limsAppMigCopyStatus'
-        TemporaryLun  = 'limsAppMigTemporaryLun'
+        RunId           = 'limsAppMigLockRunId'
+        SnapshotId      = 'limsAppMigSnapshotId'
+        TempDiskId      = 'limsAppMigTempDiskId'
+        TempDiskUniqueId = 'limsAppMigTempDiskUid'
+        DestDiskUniqueId = 'limsAppMigDestDiskUid'
+        CaptureMode     = 'limsAppMigCaptureMode'
+        CopyStatus      = 'limsAppMigCopyStatus'
+        TemporaryLun    = 'limsAppMigTemporaryLun'
+        GuestCommand    = 'limsAppMigGuestCommand'
     }
+}
+
+function Get-LimsAppDataDiskMigrationRunCommandName {
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId
+    )
+    return "$($Environment.GuestCommandNamePrefix)-$MigrationRunId"
 }

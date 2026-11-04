@@ -40,6 +40,18 @@ param(
     [string] $ExpectedTemporaryDiskName = '',
 
     [Parameter(Mandatory = $false)]
+    [string] $ExpectedTemporaryDiskResourceId = '',
+
+    [Parameter(Mandatory = $false)]
+    [string] $ExpectedDestinationDiskResourceId = '',
+
+    [Parameter(Mandatory = $false)]
+    [string] $ExpectedTemporaryDiskUniqueId = '',
+
+    [Parameter(Mandatory = $false)]
+    [string] $ExpectedDestinationDiskUniqueId = '',
+
+    [Parameter(Mandatory = $false)]
     [string] $CaptureMode = 'unspecified'
 )
 
@@ -47,17 +59,27 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
 # <LIMS_APP_MIG_MAPPING_INJECT>
+# <LIMS_APP_MIG_SAFETY_INJECT>
 
 function Import-LimsAppDataDiskMigrationMapping {
-    if (Get-Command Get-LimsAppDataDiskMigrationEnvironmentMapping -ErrorAction SilentlyContinue) {
-        return
+    if (-not (Get-Command Get-LimsAppDataDiskMigrationEnvironmentMapping -ErrorAction SilentlyContinue)) {
+        $adjacent = Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Mapping.ps1'
+        if (Test-Path -LiteralPath $adjacent) {
+            . $adjacent
+        }
+        else {
+            throw [System.InvalidOperationException]::new('The reviewed environment mapping was not loaded. Submit this script together with LimsAppDataDiskMigration.Mapping.ps1 (the pipeline concatenates them at the mapping-inject marker).')
+        }
     }
-    $adjacent = Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Mapping.ps1'
-    if (Test-Path -LiteralPath $adjacent) {
-        . $adjacent
-        return
+    if (-not (Get-Command Resolve-GuestDiskIdentity -ErrorAction SilentlyContinue)) {
+        $safety = Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Safety.ps1'
+        if (Test-Path -LiteralPath $safety) {
+            . $safety
+        }
+        else {
+            throw [System.InvalidOperationException]::new('Safety functions were not loaded. Submit this script together with LimsAppDataDiskMigration.Safety.ps1.')
+        }
     }
-    throw [System.InvalidOperationException]::new('The reviewed environment mapping was not loaded. Submit this script together with LimsAppDataDiskMigration.Mapping.ps1 (the pipeline concatenates them at the mapping-inject marker).')
 }
 
 function Assert-LimsAppMigCopyFailure {
@@ -68,13 +90,6 @@ function Assert-LimsAppMigCopyFailure {
 # =============================================================================
 # PURE DECISION LOGIC
 # =============================================================================
-
-function Get-ResourceNameFromId {
-    param([Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ResourceId)
-    if ([string]::IsNullOrWhiteSpace($ResourceId)) { return '' }
-    $parts = @($ResourceId.Trim().TrimEnd('/') -split '/')
-    return $parts[-1]
-}
 
 function Test-VolumeRequiresInitializationOrFormat {
     <#
@@ -207,47 +222,6 @@ function New-RobocopyArgumentList {
     return $arguments
 }
 
-function Get-ImdsDataDiskByNameAndLun {
-    param(
-        [Parameter(Mandatory = $true)] $ImdsCompute,
-        [Parameter(Mandatory = $true)] [string] $ExpectedDiskName,
-        [Parameter(Mandatory = $true)] [int] $ExpectedLun
-    )
-
-    if (-not $ImdsCompute.storageProfile -or -not $ImdsCompute.storageProfile.dataDisks) {
-        return [pscustomobject]@{ Matches = $false; Disk = $null; Reason = 'IMDS compute document has no storageProfile.dataDisks.' }
-    }
-
-    $diskMatches = @()
-    foreach ($disk in @($ImdsCompute.storageProfile.dataDisks)) {
-        $name = [string]$disk.name
-        if ([string]::IsNullOrWhiteSpace($name) -and $disk.managedDisk -and $disk.managedDisk.id) {
-            $name = Get-ResourceNameFromId -ResourceId ([string]$disk.managedDisk.id)
-        }
-        $lun = [int]$disk.lun
-        if ($name -eq $ExpectedDiskName -and $lun -eq $ExpectedLun) {
-            $diskMatches += $disk
-        }
-    }
-
-    if ($diskMatches.Count -eq 0) {
-        return [pscustomobject]@{ Matches = $false; Disk = $null; Reason = "IMDS has no data disk named '$ExpectedDiskName' at LUN $ExpectedLun." }
-    }
-    if ($diskMatches.Count -gt 1) {
-        return [pscustomobject]@{ Matches = $false; Disk = $null; Reason = "IMDS reports more than one data disk named '$ExpectedDiskName' at LUN $ExpectedLun." }
-    }
-    return [pscustomobject]@{ Matches = $true; Disk = $diskMatches[0]; Reason = $null }
-}
-
-function Test-DiskLocationMatchesLun {
-    param(
-        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Location,
-        [Parameter(Mandatory = $true)] [int] $ExpectedLun
-    )
-    if ([string]::IsNullOrWhiteSpace($Location)) { return $false }
-    return [bool]($Location -match ("LUN\s+$ExpectedLun(?:\D|$)"))
-}
-
 # =============================================================================
 # ADAPTERS
 # =============================================================================
@@ -275,6 +249,108 @@ function Get-ImdsComputeMetadataAdapter {
 
 function Get-DisksAdapter {
     return @(Get-Disk)
+}
+
+function Get-GuestDiskInventoryAdapter {
+    $disks = @(Get-DisksAdapter)
+    $diskDrives = @(Get-CimInstance -ClassName Win32_DiskDrive)
+    $diskDrivesByIndex = @{}
+    foreach ($dd in $diskDrives) { $diskDrivesByIndex[[int]$dd.Index] = $dd }
+    $result = @()
+    foreach ($disk in $disks) {
+        $dd = $null
+        if ($diskDrivesByIndex.ContainsKey([int]$disk.Number)) { $dd = $diskDrivesByIndex[[int]$disk.Number] }
+        $result += [pscustomobject]@{
+            Number          = [int]$disk.Number
+            UniqueId        = [string]$disk.UniqueId
+            IsBoot          = [bool]$disk.IsBoot
+            IsSystem        = [bool]$disk.IsSystem
+            IsOffline       = [bool]$disk.IsOffline
+            IsReadOnly      = [bool]$disk.IsReadOnly
+            PartitionStyle  = [string]$disk.PartitionStyle
+            SizeBytes       = [int64]$disk.Size
+            ScsiLogicalUnit = if ($dd) { [int]$dd.SCSILogicalUnit } else { -1 }
+            Location        = [string]$disk.Location
+        }
+    }
+    return $result
+}
+
+function Get-GuestPartitionInventoryAdapter {
+    return @(Get-Partition | ForEach-Object {
+            [pscustomobject]@{
+                DiskNumber      = [int]$_.DiskNumber
+                PartitionNumber = [int]$_.PartitionNumber
+                DriveLetter     = if ($_.DriveLetter) { [string]$_.DriveLetter } else { '' }
+                IsSystem        = [bool]$_.IsSystem
+                IsBoot          = [bool]$_.IsBoot
+            }
+        })
+}
+
+function Get-LogicalDiskDriveTypeAdapter {
+    param([Parameter(Mandatory = $true)] [string] $DriveLetter)
+    $letter = $DriveLetter.Trim().TrimEnd(':')
+    $disk = Get-CimInstance -ClassName Win32_LogicalDisk -Filter "DeviceID='$letter`:'" -ErrorAction SilentlyContinue
+    if ($disk) { return [int]$disk.DriveType }
+    return $null
+}
+
+function Test-PathIsReparsePointAdapter {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return $false }
+    $item = Get-Item -LiteralPath $Path -Force
+    return [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+}
+
+function Get-PathTargetAdapter {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return '' }
+    $item = Get-Item -LiteralPath $Path -Force
+    if ($item.PSObject.Properties['Target'] -and $item.Target) {
+        return [string](@($item.Target)[0])
+    }
+    return ''
+}
+
+function Get-ChildEntriesAdapter {
+    param([Parameter(Mandatory = $true)] [string] $Path)
+    if (-not (Test-Path -LiteralPath $Path)) { return @() }
+    return @(Get-ChildItem -LiteralPath $Path -Force -ErrorAction SilentlyContinue)
+}
+
+function Get-ReparseRelativePathsUnderRoot {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Root,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $ExcludeRelativePaths
+    )
+
+    $exclude = @{}
+    foreach ($rel in @($ExcludeRelativePaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($rel)) {
+            $exclude[$rel.Trim().TrimStart('\').ToLowerInvariant()] = $true
+        }
+    }
+
+    $found = @()
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($Root)
+    while ($queue.Count -gt 0) {
+        $current = [string]$queue.Dequeue()
+        foreach ($entry in @(Get-ChildEntriesAdapter -Path $current)) {
+            $full = [string]$entry.FullName
+            $relative = ConvertTo-RelativeWindowsPath -Root $Root -FullPath $full
+            $isReparse = [bool]($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            $excludeHit = $exclude.ContainsKey($relative.ToLowerInvariant())
+            if ($isReparse) {
+                $found += $relative
+                continue
+            }
+            if ($excludeHit) { continue }
+            if ($entry.PSIsContainer) { $queue.Enqueue($full) }
+        }
+    }
+    return $found
 }
 
 function Get-PartitionsAdapter {
@@ -346,20 +422,6 @@ function Invoke-RobocopyAdapter {
     return [int]$process.ExitCode
 }
 
-function Get-ItemSizeBytesAdapter {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-    if (-not (Test-Path -LiteralPath $Path)) { return [int64]0 }
-    $item = Get-Item -LiteralPath $Path -Force -ErrorAction SilentlyContinue
-    if ($item.PSIsContainer) {
-        $sum = [int64]0
-        Get-ChildItem -LiteralPath $Path -Recurse -Force -ErrorAction SilentlyContinue | ForEach-Object {
-            if (-not $_.PSIsContainer) { $sum += [int64]$_.Length }
-        }
-        return $sum
-    }
-    return [int64]$item.Length
-}
-
 # =============================================================================
 # ORCHESTRATION
 # =============================================================================
@@ -381,8 +443,9 @@ function Assert-CopyTargetIdentity {
     if ($CallerTemporaryLun -ne [int]$Environment.PreferredTemporaryLun) {
         Assert-LimsAppMigCopyFailure "Caller temporary LUN $CallerTemporaryLun does not match the mapped preferred temporary LUN $($Environment.PreferredTemporaryLun)."
     }
-    if ($CallerTemporaryDiskName -notlike "$($Environment.TemporaryDiskNamePrefix)-*-tmp") {
-        Assert-LimsAppMigCopyFailure "Caller temporary disk name '$CallerTemporaryDiskName' does not match the mapped prefix '$($Environment.TemporaryDiskNamePrefix)'."
+    $expectedTempName = "$($Environment.TemporaryDiskNamePrefix)-tmp"
+    if ($CallerTemporaryDiskName -ne $expectedTempName) {
+        Assert-LimsAppMigCopyFailure "Caller temporary disk name '$CallerTemporaryDiskName' does not match the environment lock disk '$expectedTempName'."
     }
 
     $actualComputerName = Get-ActualComputerNameAdapter
@@ -409,50 +472,67 @@ function Assert-CopyTargetIdentity {
     return $imdsCompute
 }
 
-function Resolve-TemporaryDiskNumber {
+function Assert-ResolvedDiskIdentities {
     param(
+        [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] $ImdsCompute,
-        [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskName,
-        [Parameter(Mandatory = $true)] [int] $ExpectedTemporaryLun
+        [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskResourceId,
+        [Parameter(Mandatory = $true)] [int] $ExpectedTemporaryLun,
+        [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskUniqueId,
+        [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskResourceId,
+        [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskUniqueId
     )
 
-    $imdsDisk = Get-ImdsDataDiskByNameAndLun -ImdsCompute $ImdsCompute -ExpectedDiskName $ExpectedTemporaryDiskName -ExpectedLun $ExpectedTemporaryLun
-    if (-not $imdsDisk.Matches) {
-        Assert-LimsAppMigCopyFailure $imdsDisk.Reason
+    if ([string]::IsNullOrWhiteSpace($ExpectedTemporaryDiskResourceId) -or [string]::IsNullOrWhiteSpace($ExpectedDestinationDiskResourceId)) {
+        Assert-LimsAppMigCopyFailure 'Guest copy requires the exact Azure managed-disk resource IDs for the temporary snapshot disk and the destination A: disk. Name, LUN, letter, or label alone is insufficient.'
     }
 
-    $candidates = @()
-    foreach ($disk in @(Get-DisksAdapter)) {
-        if ($disk.IsBoot -or $disk.IsSystem) { continue }
-        if (Test-DiskLocationMatchesLun -Location ([string]$disk.Location) -ExpectedLun $ExpectedTemporaryLun) {
-            $candidates += $disk
-        }
-    }
-    if ($candidates.Count -eq 0) {
-        Assert-LimsAppMigCopyFailure "No guest disk reports Location LUN $ExpectedTemporaryLun. Refusing to guess the temporary snapshot disk."
-    }
-    if ($candidates.Count -gt 1) {
-        Assert-LimsAppMigCopyFailure "More than one guest disk reports Location LUN $ExpectedTemporaryLun. Refusing to guess."
-    }
-    return $candidates[0]
-}
+    $guestDisks = @(Get-GuestDiskInventoryAdapter)
+    $partitions = @(Get-GuestPartitionInventoryAdapter)
 
-function Assert-DestinationVolumeMatchesMapping {
-    param([Parameter(Mandatory = $true)] $Environment, [Parameter(Mandatory = $true)] $ImdsCompute)
-
-    $imdsDest = Get-ImdsDataDiskByNameAndLun -ImdsCompute $ImdsCompute -ExpectedDiskName $Environment.DestinationDataDiskName -ExpectedLun ([int]$Environment.DestinationDataDiskLun)
-    if (-not $imdsDest.Matches) {
-        Assert-LimsAppMigCopyFailure "Destination volume mapping failed: $($imdsDest.Reason)"
+    $destUnique = $ExpectedDestinationDiskUniqueId
+    if ([string]::IsNullOrWhiteSpace($destUnique)) { $destUnique = $Environment.DestinationAttestedGuestUniqueId }
+    $dest = Resolve-GuestDiskIdentity -ImdsCompute $ImdsCompute -GuestDisks $guestDisks -ExpectedManagedDiskId $ExpectedDestinationDiskResourceId -ExpectedLun ([int]$Environment.DestinationDataDiskLun) -ExpectedUniqueId $destUnique -Role 'Destination A:'
+    if (-not $dest.Resolved) {
+        Assert-LimsAppMigCopyFailure $dest.Reason
     }
 
     $volume = Get-VolumeAdapter -DriveLetter $Environment.DestinationDriveLetter
-    if ($null -eq $volume) {
-        Assert-LimsAppMigCopyFailure "Destination volume $($Environment.DestinationDriveLetter): was not found."
+    $label = $null
+    if ($volume) { $label = [string]$volume.FileSystemLabel }
+    $letterProof = Test-DriveLetterOnResolvedDisk -DriveLetter $Environment.DestinationDriveLetter -ExpectedDiskNumber ([int]$dest.Disk.Number) -Partitions $partitions -ExpectedLabel $Environment.DestinationVolumeLabel -VolumeLabel $label -Role 'Destination A:'
+    if (-not $letterProof.Matches) {
+        Assert-LimsAppMigCopyFailure $letterProof.Reason
     }
-    if ([string]$volume.FileSystemLabel -ne $Environment.DestinationVolumeLabel) {
-        Assert-LimsAppMigCopyFailure "Destination volume $($Environment.DestinationDriveLetter): label '$($volume.FileSystemLabel)' does not match '$($Environment.DestinationVolumeLabel)'."
+
+    $temp = Resolve-GuestDiskIdentity -ImdsCompute $ImdsCompute -GuestDisks $guestDisks -ExpectedManagedDiskId $ExpectedTemporaryDiskResourceId -ExpectedLun $ExpectedTemporaryLun -ExpectedUniqueId $ExpectedTemporaryDiskUniqueId -Role 'Temporary snapshot disk'
+    if (-not $temp.Resolved) {
+        Assert-LimsAppMigCopyFailure $temp.Reason
     }
-    return $volume
+
+    return [pscustomobject]@{
+        DestinationDisk      = $dest.Disk
+        DestinationPartition = $letterProof.Partition
+        DestinationVolume    = $volume
+        TemporaryDisk        = $temp.Disk
+    }
+}
+
+function Assert-GuestDiskStillMatches {
+    param(
+        [Parameter(Mandatory = $true)] $Disk,
+        [Parameter(Mandatory = $true)] [string] $Role
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Disk.UniqueId)) {
+        Assert-LimsAppMigCopyFailure "$Role Windows disk $($Disk.Number) has an empty UniqueId. Refusing to change disk state."
+    }
+    $live = @(Get-GuestDiskInventoryAdapter | Where-Object {
+            $_.Number -eq $Disk.Number -and (Test-NormalizedUniqueIdEquals -Left ([string]$_.UniqueId) -Right ([string]$Disk.UniqueId))
+        })
+    if ($live.Count -ne 1) {
+        Assert-LimsAppMigCopyFailure "$Role UniqueId '$($Disk.UniqueId)' is no longer uniquely Windows disk $($Disk.Number). Refusing to change disk state. Evidence needed: Get-Disk UniqueId still matching the resolved managed disk."
+    }
+    return $live[0]
 }
 
 function Set-TemporarySnapshotVolumePresented {
@@ -461,10 +541,10 @@ function Set-TemporarySnapshotVolumePresented {
         [Parameter(Mandatory = $true)] $Environment
     )
 
+    $Disk = Assert-GuestDiskStillMatches -Disk $Disk -Role 'Temporary snapshot disk'
     if ($Disk.IsOffline -or $Disk.IsReadOnly) {
         Set-DiskOnlineWritableAdapter -DiskNumber ([int]$Disk.Number)
-        $refreshed = @(Get-DisksAdapter | Where-Object { $_.Number -eq $Disk.Number })
-        if ($refreshed.Count -eq 1) { $Disk = $refreshed[0] }
+        $Disk = Assert-GuestDiskStillMatches -Disk $Disk -Role 'Temporary snapshot disk after Set-Disk'
     }
 
     $partitions = @(Get-PartitionsAdapter -DiskNumber ([int]$Disk.Number) | Where-Object { -not $_.IsSystem -and -not $_.IsBoot })
@@ -494,6 +574,7 @@ function Set-TemporarySnapshotVolumePresented {
             Assert-LimsAppMigCopyFailure $selection.Reason
         }
         $dataPartition = $partitions | Select-Object -First 1
+        $null = Assert-GuestDiskStillMatches -Disk $Disk -Role 'Temporary snapshot disk before Set-Partition'
         Set-PartitionDriveLetterAdapter -DiskNumber ([int]$Disk.Number) -PartitionNumber ([int]$dataPartition.PartitionNumber) -DriveLetter $selection.Letter
         $letter = $selection.Letter
         $volume = Get-VolumeAdapter -DriveLetter $letter
@@ -512,15 +593,37 @@ function Get-CopyByteRequirement {
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $ExcludeRelativePaths
     )
 
-    $total = Get-ItemSizeBytesAdapter -Path $SourceRoot
-    foreach ($relative in @($ExcludeRelativePaths)) {
-        if (-not [string]::IsNullOrWhiteSpace($relative)) {
-            $excludedPath = Join-WindowsPath -BasePath $SourceRoot -ChildPath $relative
-            $total -= Get-ItemSizeBytesAdapter -Path $excludedPath
+    $exclude = @{}
+    foreach ($rel in @($ExcludeRelativePaths)) {
+        if (-not [string]::IsNullOrWhiteSpace($rel)) {
+            $exclude[$rel.Trim().TrimStart('\').ToLowerInvariant()] = $true
         }
     }
-    if ($total -lt 0) { $total = [int64]0 }
-    return [int64]$total
+
+    $total = [int64]0
+    $queue = New-Object System.Collections.Queue
+    $queue.Enqueue($SourceRoot)
+    while ($queue.Count -gt 0) {
+        $current = [string]$queue.Dequeue()
+        foreach ($entry in @(Get-ChildEntriesAdapter -Path $current)) {
+            $full = [string]$entry.FullName
+            $relative = ConvertTo-RelativeWindowsPath -Root $SourceRoot -FullPath $full
+            if ($exclude.ContainsKey($relative.ToLowerInvariant())) { continue }
+            $isReparse = [bool]($entry.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+            if ($isReparse) { continue }
+            if ($entry.PSIsContainer) {
+                $queue.Enqueue($full)
+            }
+            else {
+                $length = [int64]0
+                if ($entry.PSObject.Properties['Length'] -and $null -ne $entry.Length) {
+                    $length = [int64]$entry.Length
+                }
+                $total += $length
+            }
+        }
+    }
+    return $total
 }
 
 function Write-LimsAppDataDiskCopySummary {
@@ -542,26 +645,69 @@ function Write-LimsAppDataDiskCopySummary {
     Write-Output '===================================================='
 }
 
+function Assert-CopyRootsAndReparsePolicy {
+    param(
+        [Parameter(Mandatory = $true)] [string] $SourceRoot,
+        [Parameter(Mandatory = $true)] [string] $DestinationRoot,
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [string[]] $ExcludeRelativePaths
+    )
+
+    foreach ($root in @($SourceRoot, $DestinationRoot)) {
+        $driveType = Get-LogicalDiskDriveTypeAdapter -DriveLetter $root.Substring(0, 1)
+        $isReparse = Test-PathIsReparsePointAdapter -Path $root
+        $target = Get-PathTargetAdapter -Path $root
+        $local = Test-CopyRootIsLocalVolume -RootPath $root -RootTarget $target -DriveType $driveType -IsReparsePoint $isReparse
+        if (-not $local.Local) {
+            Assert-LimsAppMigCopyFailure $local.Reason
+        }
+    }
+
+    $sourceReparse = @(Get-ReparseRelativePathsUnderRoot -Root $SourceRoot -ExcludeRelativePaths $ExcludeRelativePaths)
+    $destReparse = @(Get-ReparseRelativePathsUnderRoot -Root $DestinationRoot -ExcludeRelativePaths $ExcludeRelativePaths)
+    $policy = Test-ReparsePointPolicy -SourceReparseRelativePaths $sourceReparse -DestinationReparseRelativePaths $destReparse -ExcludeRelativePaths $ExcludeRelativePaths
+    if (-not $policy.Accepted) {
+        Assert-LimsAppMigCopyFailure $policy.Reason
+    }
+}
+
 function Invoke-LimsAppDataDiskContentsCopy {
     param(
         [Parameter(Mandatory = $true)] [string] $EnvironmentName,
         [Parameter(Mandatory = $true)] [string] $MigrationRunId,
         [Parameter(Mandatory = $true)] [int] $ExpectedTemporaryLun,
         [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskName,
+        [Parameter(Mandatory = $false)] [string] $ExpectedTemporaryDiskResourceId = '',
+        [Parameter(Mandatory = $false)] [string] $ExpectedDestinationDiskResourceId = '',
+        [Parameter(Mandatory = $false)] [string] $ExpectedTemporaryDiskUniqueId = '',
+        [Parameter(Mandatory = $false)] [string] $ExpectedDestinationDiskUniqueId = '',
         [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified'
     )
 
-    if ([string]::IsNullOrWhiteSpace($MigrationRunId)) {
-        Assert-LimsAppMigCopyFailure 'MigrationRunId is required.'
+    $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
+    if (-not $runIdCheck.Accepted) {
+        Assert-LimsAppMigCopyFailure $runIdCheck.Reason
     }
 
     Import-LimsAppDataDiskMigrationMapping
     $environment = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName $EnvironmentName
     $imdsCompute = Assert-CopyTargetIdentity -Environment $environment -CallerEnvironmentName $EnvironmentName -CallerTemporaryLun $ExpectedTemporaryLun -CallerTemporaryDiskName $ExpectedTemporaryDiskName
 
-    $destinationVolume = Assert-DestinationVolumeMatchesMapping -Environment $environment -ImdsCompute $imdsCompute
-    $tempDisk = Resolve-TemporaryDiskNumber -ImdsCompute $imdsCompute -ExpectedTemporaryDiskName $ExpectedTemporaryDiskName -ExpectedTemporaryLun $ExpectedTemporaryLun
-    $presented = Set-TemporarySnapshotVolumePresented -Disk $tempDisk -Environment $environment
+    if ([string]::IsNullOrWhiteSpace($ExpectedDestinationDiskResourceId)) {
+        $ExpectedDestinationDiskResourceId = "/subscriptions/$($environment.SubscriptionId)/resourceGroups/$($environment.ResourceGroupName)/providers/Microsoft.Compute/disks/$($environment.DestinationDataDiskName)"
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedDestinationDiskUniqueId)) {
+        $ExpectedDestinationDiskUniqueId = $environment.DestinationAttestedGuestUniqueId
+    }
+
+    $identities = Assert-ResolvedDiskIdentities -Environment $environment -ImdsCompute $imdsCompute -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId
+
+    $presented = Set-TemporarySnapshotVolumePresented -Disk $identities.TemporaryDisk -Environment $environment
+
+    $identities = Assert-ResolvedDiskIdentities -Environment $environment -ImdsCompute $imdsCompute -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId
+    $sourceLetterProof = Test-DriveLetterOnResolvedDisk -DriveLetter $presented.DriveLetter -ExpectedDiskNumber ([int]$identities.TemporaryDisk.Number) -Partitions @(Get-GuestPartitionInventoryAdapter) -ExpectedLabel $null -VolumeLabel $null -Role 'Temporary snapshot volume'
+    if (-not $sourceLetterProof.Matches) {
+        Assert-LimsAppMigCopyFailure $sourceLetterProof.Reason
+    }
 
     $sourceRoot = "$($presented.DriveLetter):\"
     $destinationRoot = "$($environment.DestinationDriveLetter):\"
@@ -572,12 +718,14 @@ function Invoke-LimsAppDataDiskContentsCopy {
         Assert-LimsAppMigCopyFailure "Destination volume '$destinationRoot' is not reachable."
     }
 
+    Assert-CopyRootsAndReparsePolicy -SourceRoot $sourceRoot -DestinationRoot $destinationRoot -ExcludeRelativePaths @($environment.ExcludeRelativePaths)
+
     $logDirectory = $environment.RobocopyLogDirectory
     New-DirectoryAdapter -Path $logDirectory
-    $logPath = Join-Path $logDirectory "robocopy-$MigrationRunId.log"
+    $logPath = Join-WindowsPath -BasePath $logDirectory -ChildPath "robocopy-$MigrationRunId.log"
 
     $requiredBytes = Get-CopyByteRequirement -SourceRoot $sourceRoot -ExcludeRelativePaths @($environment.ExcludeRelativePaths)
-    $destinationFree = [int64]$destinationVolume.SizeRemaining
+    $destinationFree = [int64]$identities.DestinationVolume.SizeRemaining
     if (-not (Test-DestinationCapacitySufficient -RequiredBytes $requiredBytes -DestinationFreeBytes $destinationFree)) {
         Assert-LimsAppMigCopyFailure "Destination $($environment.DestinationDriveLetter): has $destinationFree bytes free, which is less than the $requiredBytes bytes required (after excluding $($environment.ExcludeRelativePaths -join ', ')). Refusing to copy."
     }
@@ -589,6 +737,13 @@ function Invoke-LimsAppDataDiskContentsCopy {
         Assert-LimsAppMigCopyFailure "Robocopy preview failed with exit code $previewExit. Full log: $logPath"
     }
 
+    $identities = Assert-ResolvedDiskIdentities -Environment $environment -ImdsCompute $imdsCompute -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId
+    $sourceLetterProof = Test-DriveLetterOnResolvedDisk -DriveLetter $presented.DriveLetter -ExpectedDiskNumber ([int]$identities.TemporaryDisk.Number) -Partitions @(Get-GuestPartitionInventoryAdapter) -ExpectedLabel $null -VolumeLabel $null -Role 'Temporary snapshot volume'
+    if (-not $sourceLetterProof.Matches) {
+        Assert-LimsAppMigCopyFailure $sourceLetterProof.Reason
+    }
+    Assert-CopyRootsAndReparsePolicy -SourceRoot $sourceRoot -DestinationRoot $destinationRoot -ExcludeRelativePaths @($environment.ExcludeRelativePaths)
+
     $copyArgs = New-RobocopyArgumentList -SourceRoot $sourceRoot -DestinationRoot $destinationRoot -LogPath $logPath -ExcludeRelativePaths @($environment.ExcludeRelativePaths)
     $copyExit = Invoke-RobocopyAdapter -Arguments $copyArgs
     $copyClass = Get-RobocopyCopyExitCodeClassification -ExitCode $copyExit
@@ -596,7 +751,7 @@ function Invoke-LimsAppDataDiskContentsCopy {
         Assert-LimsAppMigCopyFailure "Robocopy copy failed with exit code $copyExit. Full log: $logPath"
     }
 
-    $verifyLogPath = Join-Path $logDirectory "robocopy-$MigrationRunId.verify.log"
+    $verifyLogPath = Join-WindowsPath -BasePath $logDirectory -ChildPath "robocopy-$MigrationRunId.verify.log"
     $verifyArgs = New-RobocopyArgumentList -SourceRoot $sourceRoot -DestinationRoot $destinationRoot -LogPath $verifyLogPath -ExcludeRelativePaths @($environment.ExcludeRelativePaths) -ListOnly
     $verifyExit = Invoke-RobocopyAdapter -Arguments $verifyArgs
     $verifyClass = Get-RobocopyVerifyExitCodeClassification -ExitCode $verifyExit
@@ -627,7 +782,7 @@ function Invoke-LimsAppDataDiskContentsCopy {
 
 if ($env:LIMS_APP_MIG_COPY_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppDataDiskContentsCopy -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskName $ExpectedTemporaryDiskName -CaptureMode $CaptureMode | Out-Null
+        Invoke-LimsAppDataDiskContentsCopy -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskName $ExpectedTemporaryDiskName -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId -CaptureMode $CaptureMode | Out-Null
         exit 0
     }
     catch {
