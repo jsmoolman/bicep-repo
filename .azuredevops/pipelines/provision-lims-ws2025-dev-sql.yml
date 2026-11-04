@@ -44,6 +44,27 @@
 #   Command resource on the target VM in the DEV subscription -- this
 #   pipeline requires and grants no new permission.
 #
+#   Subscription is pinned explicitly, every call, never implicit. The
+#   DEV subscription ID is passed as a required environment variable
+#   into both scripts/submit-and-wait-run-command.sh (`create`/`show`)
+#   and scripts/cleanup-run-command.sh (`delete`), each of which passes
+#   it as an explicit `--subscription` on every `az` call -- never
+#   relying on `az account set`/the service connection's own default
+#   context, which could silently differ. Neither script contains an
+#   `az account set ... || true`-style fallback that could otherwise
+#   let a failed context switch fall through to whatever subscription
+#   happened to already be selected.
+#
+#   Cleanup is opt-in, not opt-out. scripts/cleanup-run-command.sh
+#   deletes the run-command resource this pipeline creates only once a
+#   terminal execution state has actually been observed -- the
+#   default, from the moment submission starts, is to retain it,
+#   including if the `create` call itself loses its response, the job
+#   is cancelled, or the agent is otherwise interrupted before any
+#   conclusive outcome can be recorded. See
+#   submit-and-wait-run-command.sh's own header comment for the exact
+#   `stagingIndeterminate` state machine both scripts rely on.
+#
 # What this pipeline does NOT do (for `stage-only`; see above for why an
 # `install` action is deliberately not implemented here yet):
 #   - No SQL Server Setup, installation, or configuration of any kind.
@@ -182,6 +203,7 @@ jobs:
               scriptLocation: scriptPath
               scriptPath: '.azuredevops/pipelines/scripts/submit-and-wait-run-command.sh'
             env:
+              DEV_SUBSCRIPTION_ID: $(devSubscriptionId)
               RESOURCE_GROUP: $(resourceGroupName)
               VM_NAME: $(vmName)
               SCRIPT_TO_SUBMIT: $(stagingScriptPath)
@@ -205,26 +227,11 @@ jobs:
         inputs:
           azureSubscription: ${{ parameters.serviceConnection }}
           scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -uo pipefail
-            if [[ -z "${RUNCOMMANDNAME:-}" ]]; then
-              echo "No Managed Run Command resource name was ever recorded this run; nothing to delete."
-              exit 0
-            fi
-            if [[ "${STAGINGINDETERMINATE:-false}" == "true" ]]; then
-              echo "The result for '$RUNCOMMANDNAME' could not be conclusively determined (see the previous step's error) -- it may still be executing. Deliberately NOT deleting it; inspect it manually with:"
-              echo "  az vm run-command show --resource-group $(resourceGroupName) --vm-name $(vmName) --name $RUNCOMMANDNAME --instance-view"
-              exit 0
-            fi
-            az account set --subscription "$(devSubscriptionId)" || true
-            az vm run-command delete \
-              --resource-group "$(resourceGroupName)" \
-              --vm-name "$(vmName)" \
-              --name "$RUNCOMMANDNAME" \
-              --yes \
-              --only-show-errors \
-              || echo "WARNING: failed to delete Managed Run Command resource '$RUNCOMMANDNAME' (non-fatal; this resource can be deleted manually later and never performs or re-performs any guest action by existing)."
+          scriptLocation: scriptPath
+          scriptPath: '.azuredevops/pipelines/scripts/cleanup-run-command.sh'
         env:
-          RUNCOMMANDNAME: $(runCommandName)
-          STAGINGINDETERMINATE: $(stagingIndeterminate)
+          DEV_SUBSCRIPTION_ID: $(devSubscriptionId)
+          RESOURCE_GROUP: $(resourceGroupName)
+          VM_NAME: $(vmName)
+          RUN_COMMAND_NAME: $(runCommandName)
+          STAGING_INDETERMINATE: $(stagingIndeterminate)
