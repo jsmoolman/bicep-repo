@@ -1,4 +1,4 @@
-<#
+﻿<#
     Pester tests for Install-LimsSqlServer.ps1.
 
     SCOPE. These tests run on Ubuntu CI (Pester on Linux; no real Windows
@@ -9,14 +9,16 @@
          Get-LimsSqlSetupExitCodeClassification,
          Get-LimsSqlExistingInstanceAssessmentDecision,
          Test-TcpIPAllConfigurationMatches,
+         Test-LimsSqlVerifiedAdministratorSession,
+         New-LimsSqlTempDbPreparationScriptContent,
          New-LimsSqlInstallConfigurationFileContent) -- called directly
          with plain fake data.
 
       2. The ORCHESTRATION functions (Assert-InstallTargetIdentity,
          Assert-SetupExecutableSignatureValid, Assert-RequiredVolumesPresent,
          Get-LimsSqlExistingInstanceAssessment, Invoke-LimsSqlServerSetup,
-         Set-LimsSqlServerTcpPort1433, Install-LimsSqlTempDbRecreationSafety,
-         Test-LimsSqlPostInstallState, Confirm-LimsSqlWindowsAdminAccessAndDisableSa,
+         Set-LimsSqlServerTcpPort1433, Install-LimsSqlTempDbStartupSequence,
+         Test-LimsSqlPostInstallState, Invoke-LimsSqlAdminVerificationAndSaDisableAttempt,
          Invoke-LimsSqlServerInstall) -- called for real, but with every
          *Adapter function (the only functions that would call a real
          cmdlet/network/registry/service/SQL/process) replaced with a
@@ -33,7 +35,18 @@
         closed without an automatic repair/reinstall attempt.
       - Setup exit-code classification, including 3010 ("reboot required")
         never being treated as a failure.
-      - The TempDB-on-temporary-disk recreation safety check.
+      - SYSTEM (or any identity not in the approved list) having sysadmin
+        access is INSUFFICIENT to authorize disabling sa -- sa is never
+        disabled in that case, and this is reported as
+        PendingManualOperatorVerification, never as a silent success.
+      - A session whose own connected identity genuinely matches an
+        approved Windows SQL administrator principal, and has sysadmin
+        access, is sufficient to verify and disable sa.
+      - The explicit, deterministic TempDB preparation-then-start
+        sequence, including a directory/ACL (icacls.exe) failure
+        correctly preventing the Database Engine from starting and
+        failing the whole install closed -- and that no step ever deletes
+        the live TempDB directory.
 
     PowerShell 5.1 guest-runtime compatibility is checked separately by
     PSScriptAnalyzer (see PSScriptAnalyzerSettings.psd1 in this same
@@ -134,6 +147,52 @@ Describe 'Test-TcpIPAllConfigurationMatches (pure)' {
     }
     It 'does not match when both values are null (never configured)' {
         Test-TcpIPAllConfigurationMatches -CurrentTcpPort $null -CurrentTcpDynamicPorts $null -DesiredPort 1433 | Should -Be $false
+    }
+}
+
+Describe 'Test-LimsSqlVerifiedAdministratorSession (pure)' {
+    It 'rejects SYSTEM (or any identity not in the approved list) even with sysadmin access -- sysadmin alone is never sufficient' {
+        Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity 'NT AUTHORITY\SYSTEM' -IsSysadmin $true -ApprovedPrincipals @('BUILTIN\Administrators', 'CONTOSO\jsmith') | Should -Be $false
+    }
+    It 'rejects an approved identity that does NOT have sysadmin access' {
+        Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity 'CONTOSO\jsmith' -IsSysadmin $false -ApprovedPrincipals @('CONTOSO\jsmith') | Should -Be $false
+    }
+    It 'rejects an empty connected identity' {
+        Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity '' -IsSysadmin $true -ApprovedPrincipals @('BUILTIN\Administrators') | Should -Be $false
+    }
+    It 'accepts a connected identity that exactly matches an approved principal and has sysadmin access' {
+        Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity 'CONTOSO\jsmith' -IsSysadmin $true -ApprovedPrincipals @('BUILTIN\Administrators', 'CONTOSO\jsmith') | Should -Be $true
+    }
+    It 'matches case-insensitively' {
+        Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity 'contoso\JSMITH' -IsSysadmin $true -ApprovedPrincipals @('CONTOSO\jsmith') | Should -Be $true
+    }
+}
+
+Describe 'New-LimsSqlTempDbPreparationScriptContent (pure)' {
+    BeforeAll {
+        $script:PrepScriptContent = New-LimsSqlTempDbPreparationScriptContent -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB'
+    }
+
+    It 'never deletes anything -- no Remove-Item or recursive-delete logic of any kind' {
+        $script:PrepScriptContent | Should -Not -Match 'Remove-Item'
+    }
+    It 'waits for the TempDB volume to become available before doing anything else' {
+        $script:PrepScriptContent | Should -Match "Test-Path -LiteralPath 'D:\\'"
+    }
+    It 'creates the TempDB directory only if missing (never unconditionally, never after a delete)' {
+        $script:PrepScriptContent | Should -Match "if \(-not \(Test-Path -LiteralPath 'D:\\MSSQL\\TempDB'\)\)"
+    }
+    It 'checks icacls.exe''s exit code and refuses to start the service on failure' {
+        $script:PrepScriptContent | Should -Match 'icacls\.exe'
+        $script:PrepScriptContent | Should -Match '\$LASTEXITCODE -ne 0'
+        $script:PrepScriptContent | Should -Match 'exit 1'
+    }
+    It 'only starts the Database Engine service, and strictly after the icacls.exe exit-code check, never before' {
+        $script:PrepScriptContent | Should -Match 'Start-Service'
+        $icaclsIndex = $script:PrepScriptContent.IndexOf('icacls.exe')
+        $startServiceIndex = $script:PrepScriptContent.IndexOf('Start-Service')
+        $icaclsIndex | Should -BeGreaterThan -1
+        $startServiceIndex | Should -BeGreaterThan $icaclsIndex
     }
 }
 
@@ -348,34 +407,46 @@ Describe 'Set-LimsSqlServerTcpPort1433 (orchestration, mocked adapters)' {
     }
 }
 
-Describe 'Install-LimsSqlTempDbRecreationSafety (orchestration, mocked adapters)' {
-    It 'registers the scheduled task, sets delayed start, and proves the recreation works' {
-        Mock Write-TextFileAdapter { }
-        Mock Register-TempDbRecreationScheduledTaskAdapter { }
-        Mock Set-ServiceDelayedAutoStartAdapter { }
-        Mock Stop-ServiceAdapter { }
-        Mock Remove-DirectoryRecursivelyAdapter { }
-        Mock Invoke-TempDbRecreationScriptAdapter { }
-        Mock Start-ServiceAndWaitRunningAdapter { return $true }
+Describe 'Install-LimsSqlTempDbStartupSequence (orchestration, mocked adapters)' {
+    It 'writes the preparation script, registers the AtStartup task, disables Windows auto-start, and smoke-tests the script without deleting TempDB' {
+        $script:writtenContent = $null
+        Mock Write-TextFileAdapter { param($Path, $Content) $script:writtenContent = $Content }
+        Mock Register-TempDbPreparationScheduledTaskAdapter { }
+        Mock Set-ServiceStartupTypeAdapter { }
+        Mock Invoke-TempDbPreparationScriptAdapter { }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
 
-        $result = Install-LimsSqlTempDbRecreationSafety -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB'
+        $result = Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB'
         $result | Should -Be $true
-        Should -Invoke Register-TempDbRecreationScheduledTaskAdapter -Times 1
-        Should -Invoke Set-ServiceDelayedAutoStartAdapter -Times 1
-        Should -Invoke Remove-DirectoryRecursivelyAdapter -Times 1 -ParameterFilter { $Path -eq 'D:\MSSQL\TempDB' }
-        Should -Invoke Invoke-TempDbRecreationScriptAdapter -Times 1
+        Should -Invoke Register-TempDbPreparationScheduledTaskAdapter -Times 1 -ParameterFilter { $TaskName -eq 'LIMS-SQL-TempDb-PrepareAndStart' }
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $Name -eq 'MSSQLSERVER' -and $StartupType -eq 'Disabled' }
+        Should -Invoke Invoke-TempDbPreparationScriptAdapter -Times 1
+        $script:writtenContent | Should -Not -Match 'Remove-Item'
+        $script:writtenContent | Should -Match 'icacls\.exe'
+        $script:writtenContent | Should -Match 'Start-Service'
     }
 
-    It 'throws if the service does not reach Running after the simulated recreation' {
+    It 'fails closed (and never claims SQL started) when the preparation script reports a directory or ACL failure' {
         Mock Write-TextFileAdapter { }
-        Mock Register-TempDbRecreationScheduledTaskAdapter { }
-        Mock Set-ServiceDelayedAutoStartAdapter { }
-        Mock Stop-ServiceAdapter { }
-        Mock Remove-DirectoryRecursivelyAdapter { }
-        Mock Invoke-TempDbRecreationScriptAdapter { }
-        Mock Start-ServiceAndWaitRunningAdapter { return $false }
+        Mock Register-TempDbPreparationScheduledTaskAdapter { }
+        Mock Set-ServiceStartupTypeAdapter { }
+        Mock Invoke-TempDbPreparationScriptAdapter {
+            Assert-LimsSqlInstallFailure "TempDB preparation script 'C:\SQLMedia\SQL2022\Start-LimsSqlServerAfterTempDbPreparation.ps1' exited with code 1."
+        }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
 
-        { Install-LimsSqlTempDbRecreationSafety -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB' } | Should -Throw -ExpectedMessage '*cannot be confirmed working*'
+        { Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB' } | Should -Throw -ExpectedMessage '*exited with code 1*'
+        Should -Invoke Get-ServiceStateAdapter -Times 0
+    }
+
+    It 'throws if the service is not Running after a successful preparation-script smoke test' {
+        Mock Write-TextFileAdapter { }
+        Mock Register-TempDbPreparationScheduledTaskAdapter { }
+        Mock Set-ServiceStartupTypeAdapter { }
+        Mock Invoke-TempDbPreparationScriptAdapter { }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
+
+        { Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB' } | Should -Throw -ExpectedMessage '*is not in the Running state*'
     }
 }
 
@@ -428,40 +499,67 @@ Describe 'Test-LimsSqlPostInstallState (orchestration, mocked adapters)' {
     }
 }
 
-Describe 'Confirm-LimsSqlWindowsAdminAccessAndDisableSa (orchestration, mocked adapters)' {
-    It 'throws without disabling sa when the current identity is not sysadmin' {
-        Mock Invoke-SqlWindowsAuthScalarAdapter { return 0 }
-        Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
-        { Confirm-LimsSqlWindowsAdminAccessAndDisableSa } | Should -Throw -ExpectedMessage '*does not have sysadmin access*'
-        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
-    }
-
-    It 'disables sa and verifies once sysadmin access is confirmed' {
-        $script:queryCount = 0
+Describe 'Invoke-LimsSqlAdminVerificationAndSaDisableAttempt (orchestration, mocked adapters)' {
+    It 'does NOT disable sa when the connected identity is SYSTEM even if it has sysadmin -- reports PendingManualOperatorVerification' {
         Mock Invoke-SqlWindowsAuthScalarAdapter {
             param($Query)
-            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
-            return 1
-        }
-        Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
-        $result = Confirm-LimsSqlWindowsAdminAccessAndDisableSa
-        $result | Should -Be $true
-        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 1 -ParameterFilter { $Query -like '*ALTER LOGIN*DISABLE*' }
-    }
-
-    It 'throws if sa does not report as disabled after the ALTER LOGIN statement' {
-        Mock Invoke-SqlWindowsAuthScalarAdapter {
-            param($Query)
+            if ($Query -like '*SYSTEM_USER*') { return 'NT AUTHORITY\SYSTEM' }
             if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
             return 0
         }
         Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
-        { Confirm-LimsSqlWindowsAdminAccessAndDisableSa } | Should -Throw -ExpectedMessage '*does not report as disabled*'
+
+        $result = Invoke-LimsSqlAdminVerificationAndSaDisableAttempt -ApprovedPrincipals @('BUILTIN\Administrators', 'CONTOSO\jsmith')
+        $result | Should -Be 'PendingManualOperatorVerification'
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
+    }
+
+    It 'does NOT disable sa when an approved identity is connected but does not have sysadmin' {
+        Mock Invoke-SqlWindowsAuthScalarAdapter {
+            param($Query)
+            if ($Query -like '*SYSTEM_USER*') { return 'CONTOSO\jsmith' }
+            if ($Query -like '*IS_SRVROLEMEMBER*') { return 0 }
+            return 0
+        }
+        Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
+
+        $result = Invoke-LimsSqlAdminVerificationAndSaDisableAttempt -ApprovedPrincipals @('CONTOSO\jsmith')
+        $result | Should -Be 'PendingManualOperatorVerification'
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
+    }
+
+    It 'disables sa from a verified session whose own identity matches an approved administrator and has sysadmin' {
+        Mock Invoke-SqlWindowsAuthScalarAdapter {
+            param($Query)
+            if ($Query -like '*SYSTEM_USER*') { return 'CONTOSO\jsmith' }
+            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
+            if ($Query -like '*is_disabled*') { return 1 }
+            return 0
+        }
+        Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
+
+        $result = Invoke-LimsSqlAdminVerificationAndSaDisableAttempt -ApprovedPrincipals @('BUILTIN\Administrators', 'CONTOSO\jsmith')
+        $result | Should -Be 'Completed'
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 1 -ParameterFilter { $Query -like '*ALTER LOGIN*DISABLE*' }
+    }
+
+    It 'throws if sa does not report as disabled after a verified administrator session issued ALTER LOGIN' {
+        Mock Invoke-SqlWindowsAuthScalarAdapter {
+            param($Query)
+            if ($Query -like '*SYSTEM_USER*') { return 'CONTOSO\jsmith' }
+            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
+            if ($Query -like '*is_disabled*') { return 0 }
+            return 0
+        }
+        Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
+
+        { Invoke-LimsSqlAdminVerificationAndSaDisableAttempt -ApprovedPrincipals @('CONTOSO\jsmith') } | Should -Throw -ExpectedMessage '*does not report as disabled*'
     }
 }
 
 Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters) -- fail before any mutation' {
     BeforeEach {
+        $script:sqlAssessed = $false
         Mock Test-CurrentIdentityIsAdministratorOrSystemAdapter { return $true }
         Mock Get-ActualComputerNameAdapter { return $script:TestConfig.ExpectedComputerName }
         Mock Get-ImdsComputeMetadataAdapter { return [pscustomobject]@{ subscriptionId = $script:TestConfig.ExpectedSubscriptionId; resourceGroupName = $script:TestConfig.ExpectedResourceGroupName; name = $script:TestConfig.ExpectedVmName } }
@@ -475,18 +573,32 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
         Mock Set-TcpIPAllRegistryValuesAdapter { }
         Mock Restart-ServiceAndWaitRunningAdapter { return $true }
         Mock Test-TcpPortOpenAdapter { return $true }
-        Mock Register-TempDbRecreationScheduledTaskAdapter { }
-        Mock Set-ServiceDelayedAutoStartAdapter { }
-        Mock Stop-ServiceAdapter { }
-        Mock Remove-DirectoryRecursivelyAdapter { }
-        Mock Invoke-TempDbRecreationScriptAdapter { }
-        Mock Start-ServiceAndWaitRunningAdapter { return $true }
+        Mock Register-TempDbPreparationScheduledTaskAdapter { }
+        Mock Set-ServiceStartupTypeAdapter { }
+        Mock Invoke-TempDbPreparationScriptAdapter { }
         Mock Invoke-SqlWindowsAuthNonQueryAdapter { }
+        Mock Get-ServiceStateAdapter {
+            param($Name)
+            if ($Name -eq $script:TestConfig.AgentServiceName) { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
+            if ($script:sqlAssessed) { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
+            $script:sqlAssessed = $true
+            return $null
+        }
+        # Default: Managed Run Command identity (SYSTEM) with sysadmin --
+        # insufficient to authorize disabling sa.
+        Mock Invoke-SqlWindowsAuthScalarAdapter {
+            param($Query)
+            if ($Query -like '*Edition*') { return 'Enterprise Edition (64-bit)' }
+            if ($Query -like '*Collation*') { return 'SQL_Latin1_General_CP1_CI_AS' }
+            if ($Query -like '*SYSTEM_USER*') { return 'NT AUTHORITY\SYSTEM' }
+            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
+            if ($Query -like '*is_disabled*') { return 0 }
+            return '16.0.1000.6'
+        }
     }
 
     It 'fails before any mutation when not running as SYSTEM/Administrator' {
         Mock Test-CurrentIdentityIsAdministratorOrSystemAdapter { return $false }
-        Mock Get-ServiceStateAdapter { return $null }
 
         { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `
                 -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
@@ -498,7 +610,6 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
     }
 
     It 'fails before any mutation when SaPassword is empty' {
-        Mock Get-ServiceStateAdapter { return $null }
         { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword '' `
                 -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
                 -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
@@ -507,7 +618,6 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
     }
 
     It 'fails before any mutation when the Windows SQL admin principals are empty, never guessing a default' {
-        Mock Get-ServiceStateAdapter { return $null }
         { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv '' -SaPassword 'x' `
                 -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
                 -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
@@ -517,7 +627,6 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
 
     It 'fails before any mutation on a hostname mismatch, never reaching the volume/instance checks' {
         Mock Get-ActualComputerNameAdapter { return 'wrong-hostname' }
-        Mock Get-ServiceStateAdapter { return $null }
         { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `
                 -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
                 -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
@@ -526,30 +635,52 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
         Should -Invoke Invoke-SqlSetupProcessAdapter -Times 0
     }
 
-    It 'runs Setup end-to-end on a fresh VM (NotInstalled) and reports success' {
-        Mock Get-ServiceStateAdapter {
-            param($Name)
-            if ($Name -eq $script:TestConfig.AgentServiceName) { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
-            return $null
-        }
-        Mock Invoke-SqlWindowsAuthScalarAdapter {
-            param($Query)
-            if ($Query -like '*Edition*') { return 'Enterprise Edition (64-bit)' }
-            if ($Query -like '*Collation*') { return 'SQL_Latin1_General_CP1_CI_AS' }
-            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
-            if ($Query -like '*is_disabled*') { return 1 }
-            return '16.0.1000.6'
-        }
-
+    It 'runs Setup end-to-end on a fresh VM (NotInstalled), reports SETUP COMPLETED, and leaves sa disable pending because the session is SYSTEM' {
         $result = Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'Sup3r$ecret!' `
             -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
             -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
 
         $result.Status | Should -Be 'Succeeded'
         $result.Edition | Should -Be 'Enterprise Edition (64-bit)'
-        $result.SaDisabled | Should -Be $true
-        $result.TempDbRecreationSafetyConfirmed | Should -Be $true
+        $result.TempDbStartupSequenceConfirmed | Should -Be $true
+        $result.SaDisableStatus | Should -Be 'PendingManualOperatorVerification'
         Should -Invoke Invoke-SqlSetupProcessAdapter -Times 1
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $StartupType -eq 'Disabled' }
+        Should -Invoke Register-TempDbPreparationScheduledTaskAdapter -Times 1
+    }
+
+    It 'disables sa end-to-end only when the connected identity is an approved administrator with sysadmin' {
+        Mock Invoke-SqlWindowsAuthScalarAdapter {
+            param($Query)
+            if ($Query -like '*Edition*') { return 'Enterprise Edition (64-bit)' }
+            if ($Query -like '*Collation*') { return 'SQL_Latin1_General_CP1_CI_AS' }
+            if ($Query -like '*SYSTEM_USER*') { return 'CONTOSO\jsmith' }
+            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
+            if ($Query -like '*is_disabled*') { return 1 }
+            return '16.0.1000.6'
+        }
+
+        $result = Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'CONTOSO\jsmith' -SaPassword 'x' `
+            -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
+            -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
+
+        $result.Status | Should -Be 'Succeeded'
+        $result.SaDisableStatus | Should -Be 'Completed'
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 1 -ParameterFilter { $Query -like '*ALTER LOGIN*DISABLE*' }
+    }
+
+    It 'fails the whole install (never reaching sa handling) when TempDB directory/ACL preparation fails' {
+        Mock Invoke-TempDbPreparationScriptAdapter {
+            Assert-LimsSqlInstallFailure "TempDB preparation script 'C:\SQLMedia\SQL2022\Start-LimsSqlServerAfterTempDbPreparation.ps1' exited with code 1."
+        }
+
+        { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `
+                -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
+                -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
+        } | Should -Throw -ExpectedMessage '*exited with code 1*'
+
+        Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
     }
 
     It 'reports an already-healthy matching instance as success WITHOUT re-running Setup (idempotent rerun)' {
@@ -558,20 +689,13 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
             if ($Name -eq $script:TestConfig.AgentServiceName) { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
             return [pscustomobject]@{ Status = 'Running'; StartType = 'Automatic' }
         }
-        Mock Invoke-SqlWindowsAuthScalarAdapter {
-            param($Query)
-            if ($Query -like '*Edition*') { return 'Enterprise Edition (64-bit)' }
-            if ($Query -like '*Collation*') { return 'SQL_Latin1_General_CP1_CI_AS' }
-            if ($Query -like '*IS_SRVROLEMEMBER*') { return 1 }
-            if ($Query -like '*is_disabled*') { return 1 }
-            return '16.0.1000.6'
-        }
 
         $result = Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `
             -DataPath 'E:\MSSQL\DATA' -LogPath 'F:\MSSQL\LOG' -TempDbPath 'D:\MSSQL\TempDB' `
             -TempDbFileCount 8 -TempDbFileSizeMB 1024 -TempDbFileGrowthMB 512 -TempDbLogSizeMB 1024 -TempDbLogGrowthMB 512
 
         $result.Status | Should -Be 'Succeeded'
+        $result.SaDisableStatus | Should -Be 'PendingManualOperatorVerification'
         Should -Invoke Invoke-SqlSetupProcessAdapter -Times 0
     }
 
@@ -591,7 +715,6 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
     }
 
     It 'stops cleanly (not as a hard failure) when Setup reports exit code 3010 (reboot required), never proceeding to post-install verification' {
-        Mock Get-ServiceStateAdapter { return $null }
         Mock Invoke-SqlSetupProcessAdapter { return 3010 }
 
         $result = Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `
@@ -601,12 +724,11 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
         $result.Status | Should -Be 'RebootRequired'
         $result.SetupExitCode | Should -Be 3010
         Should -Invoke Restart-ServiceAndWaitRunningAdapter -Times 0
-        Should -Invoke Register-TempDbRecreationScheduledTaskAdapter -Times 0
+        Should -Invoke Register-TempDbPreparationScheduledTaskAdapter -Times 0
         Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
     }
 
     It 'fails the whole run on a genuine Setup failure exit code' {
-        Mock Get-ServiceStateAdapter { return $null }
         Mock Invoke-SqlSetupProcessAdapter { return 1603 }
 
         { Invoke-LimsSqlServerInstall -WindowsSqlAdminPrincipalsCsv 'BUILTIN\Administrators' -SaPassword 'x' `

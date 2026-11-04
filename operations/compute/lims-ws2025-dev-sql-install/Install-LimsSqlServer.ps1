@@ -5,9 +5,17 @@
     (vm-lims-dev-v2-westeu-002), using the media already staged by
     Stage-LimsSqlInstallationMedia.ps1 at the pinned path
     C:\SQLMedia\SQL2022\SETUP.EXE, then hardens TCP 1433 as the only
-    listener, installs a reviewable mitigation for TempDB living on the
-    Azure temporary disk, confirms Windows administrator sysadmin access,
-    and disables the sa login. Narrowly scoped under the LIMS WS2025 DEV v2
+    listener and installs an explicit, deterministic TempDB-preparation-
+    then-start sequence for TempDB living on the Azure temporary disk.
+    Disabling the sa login is a separate, documented, operator-performed
+    post-install step (see docs/operations.md) -- this script only
+    attempts it itself if it can verify the session performing the
+    disable is actually connected as one of the explicitly approved
+    Windows SQL administrator principals (never merely "has sysadmin",
+    which the Managed Run Command automation identity commonly also
+    satisfies); delivered via Managed Run Command, that verification is
+    expected to fail every real run, by design, and the manual procedure
+    is what actually completes it. Narrowly scoped under the LIMS WS2025 DEV v2
     SQL Server 2022 installation exception in docs/scope.md -- this one
     script, this one VM, this one instance, this exact configuration; never
     a named instance, never any feature beyond the Database Engine, never
@@ -74,30 +82,55 @@
     ephemeral disk and is recreated empty on VM deallocation/reallocation;
     SQL Server does not create a missing TempDB directory itself, so a
     plain TempDB placement there would otherwise leave the Database Engine
-    unable to start after such an event. This script installs a Windows
-    Scheduled Task (AtStartup, running as SYSTEM) that recreates the
-    TempDB directory and grants the Database Engine's service account the
-    permissions it needs there, before the service starts (set to
-    Automatic, Delayed Start) -- and, once, during this same install run,
-    proves the mitigation actually works: stops the service, deletes the
-    TempDB directory to simulate a freshly recreated temporary disk,
-    re-runs the exact same recreation script the scheduled task will run
-    on a real reboot, restarts the service, and confirms it reaches
-    Running again.
+    unable to start after such an event. Rather than relying on the
+    Database Engine's own "Automatic (Delayed Start)" timing to race a
+    separate preparation task, this script disables the Database Engine
+    service's own startup type entirely and installs a single Windows
+    Scheduled Task (AtStartup, running as SYSTEM) that is the ONLY thing
+    that ever starts it after a reboot: the task's own script waits for
+    D: to become available, creates the TempDB directory if missing,
+    grants the Database Engine's service account the permissions it needs
+    there via icacls.exe (checking its exit code and refusing to proceed
+    on failure), and only then starts the service -- an explicit,
+    deterministic sequence, not a timing assumption. During install, this
+    script runs that exact same script once, non-destructively (it never
+    deletes the live TempDB directory or stops the running service -- the
+    directory-create and icacls grant are idempotent and safe to reapply
+    against a directory already in active use), as a smoke test that it
+    executes successfully in this environment. A true end-to-end test
+    (after a real reboot, and separately after a real Azure temporary-
+    disk recreation) is a documented, DEV-only, operator-performed manual
+    procedure -- see docs/operations.md.
 
-    ADMINISTRATOR ACCESS AND sa. Confirms an approved Windows
-    administrator principal has sysadmin access via a local Windows-
-    authenticated connection (IS_SRVROLEMEMBER('sysadmin')), and only then
-    disables the sa login (ALTER LOGIN [sa] DISABLE) using that same
-    connection -- the sa password supplied to Setup is never reused by
-    this script to connect to the instance afterward.
+    ADMINISTRATOR ACCESS AND sa. Managed Run Command always connects to
+    SQL as the automation identity (SYSTEM), which commonly already has
+    sysadmin access (e.g. via BUILTIN\Administrators membership in
+    SQLSYSADMINACCOUNTS) -- a successful IS_SRVROLEMEMBER('sysadmin')
+    check in that session proves the automation identity has access,
+    never that an approved human administrator does. This script
+    therefore only disables sa (ALTER LOGIN [sa] DISABLE) if it can
+    verify the CURRENT session's own connected identity (SYSTEM_USER)
+    exactly matches one of the explicitly approved Windows SQL
+    administrator principals supplied to this script, in addition to
+    sysadmin membership. Delivered via Managed Run Command, the connected
+    identity is always SYSTEM, which never matches an approved human
+    principal -- so this check is expected to fail, by design, on every
+    real run through this script's normal delivery mechanism, and sa
+    disabling is instead a separate, documented, operator-performed
+    post-install procedure (docs/operations.md, "SQL Server 2022
+    post-install administrator verification and sa disable") with exact
+    commands to verify identity and role, disable sa, and confirm
+    is_disabled = 1. This script always reports this step's status
+    (Completed/PendingManualOperatorVerification) rather than silently
+    assuming it is done. The sa password supplied to Setup is never
+    reused by this script to connect to the instance afterward.
 
     COMPACT OUTPUT. Only a short, compact summary (Setup exit code,
     reboot status, edition, product version, collation, Agent service
-    status, TCP 1433 confirmation, TempDB-recreation-safety confirmation,
-    sa-disabled confirmation) is ever written to the default output
-    stream. The sa password, the full Setup command line, and any raw
-    Setup log are never printed.
+    status, TCP 1433 confirmation, TempDB-startup-sequence confirmation,
+    sa-disable status) is ever written to the default output stream. The
+    sa password, the full Setup command line, and any raw Setup log are
+    never printed.
 
     TESTABILITY. Pure decision functions (ConfigurationFile.ini content
     construction, Windows-admin-principals CSV parsing, Setup exit-code
@@ -215,7 +248,8 @@ function Get-LimsSqlInstallFixedConfig {
         SqlServerRegistryInstanceKey = 'MSSQL16.MSSQLSERVER'
         TcpPort                    = 1433
         MinimumExpectedEdition     = 'Enterprise'
-        ScheduledTaskName          = 'LIMS-SQL-TempDb-Recreate'
+        ScheduledTaskName          = 'LIMS-SQL-TempDb-PrepareAndStart'
+        TempDbVolumeWaitTimeoutSeconds = 120
         SuccessExitCode            = 0
         RebootRequiredExitCode     = 3010
     }
@@ -296,6 +330,75 @@ function Test-TcpIPAllConfigurationMatches {
         [Parameter(Mandatory = $true)] [int] $DesiredPort
     )
     return ($CurrentTcpPort -eq [string]$DesiredPort) -and [string]::IsNullOrEmpty($CurrentTcpDynamicPorts)
+}
+
+function Test-LimsSqlVerifiedAdministratorSession {
+    <#
+        Pure decision: a session is a verified administrator session, for
+        the purpose of authorizing an sa-disable, only when BOTH its own
+        connected identity exactly (case-insensitively) matches one of the
+        explicitly approved Windows SQL administrator principals AND it
+        reports sysadmin membership. Sysadmin membership alone is
+        deliberately NOT sufficient -- Managed Run Command always connects
+        as the SYSTEM automation identity, which commonly inherits
+        sysadmin via BUILTIN\Administrators membership in
+        SQLSYSADMINACCOUNTS; that proves the automation identity has
+        access, never that an approved human administrator does.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $ConnectedIdentity,
+        [Parameter(Mandatory = $true)] [bool] $IsSysadmin,
+        [Parameter(Mandatory = $true)] [string[]] $ApprovedPrincipals
+    )
+    if (-not $IsSysadmin) { return $false }
+    if ([string]::IsNullOrWhiteSpace($ConnectedIdentity)) { return $false }
+    foreach ($approved in $ApprovedPrincipals) {
+        if ($ConnectedIdentity -ieq $approved) { return $true }
+    }
+    return $false
+}
+
+function New-LimsSqlTempDbPreparationScriptContent {
+    <#
+        Pure string construction of the one script that both the AtStartup
+        scheduled task and this script's own non-destructive smoke test
+        run. Deliberately an explicit, deterministic sequence, never a
+        timing assumption: wait for the TempDB volume to be available,
+        create the TempDB directory if missing, grant the Database
+        Engine's service account permissions there via icacls.exe,
+        checking its exit code and refusing to start the service if it
+        fails, and only then start the Database Engine -- the service's
+        own Windows startup type is set to Disabled by the caller, so this
+        script, run by the scheduled task, is the ONLY thing that ever
+        starts it after a reboot. This function never includes any
+        directory-deletion logic -- recreation is handled entirely by
+        "create if missing", never by first removing an existing
+        directory.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $Config,
+        [Parameter(Mandatory = $true)] [string] $TempDbPath
+    )
+    return @"
+`$ErrorActionPreference = 'Stop'
+`$volumeDeadline = (Get-Date).AddSeconds($($Config.TempDbVolumeWaitTimeoutSeconds))
+while (-not (Test-Path -LiteralPath '$($Config.ExpectedTempDbVolumeLetter):\')) {
+    if ((Get-Date) -ge `$volumeDeadline) {
+        Write-Error "Volume $($Config.ExpectedTempDbVolumeLetter): did not become available within $($Config.TempDbVolumeWaitTimeoutSeconds) seconds; refusing to start $($Config.InstanceName)."
+        exit 1
+    }
+    Start-Sleep -Seconds 2
+}
+if (-not (Test-Path -LiteralPath '$TempDbPath')) {
+    New-Item -ItemType Directory -Path '$TempDbPath' -Force | Out-Null
+}
+& icacls.exe '$TempDbPath' /grant '$($Config.SqlServiceAccount):(OI)(CI)F' | Out-Null
+if (`$LASTEXITCODE -ne 0) {
+    Write-Error "icacls.exe failed to grant $($Config.SqlServiceAccount) permissions on '$TempDbPath' (exit code `$LASTEXITCODE); refusing to start $($Config.InstanceName)."
+    exit 1
+}
+Start-Service -Name '$($Config.InstanceName)' -ErrorAction Stop
+"@
 }
 
 function New-LimsSqlInstallConfigurationFileContent {
@@ -417,39 +520,22 @@ function Get-ServiceStateAdapter {
     return [pscustomobject]@{ Status = [string]$service.Status; StartType = [string]$service.StartType }
 }
 
-function Set-ServiceDelayedAutoStartAdapter {
+function Set-ServiceStartupTypeAdapter {
     <#
-        Set-Service only supports Automatic/Manual/Disabled -- "Automatic
-        (Delayed Start)" has no PowerShell cmdlet and must be set via
-        sc.exe. The literal space after 'start=' is sc.exe's own required
-        syntax, not a typo -- passed here as separate argv elements, which
-        sc.exe accepts correctly.
+        Used to set the Database Engine's own Windows startup type to
+        Disabled, so Windows never starts it independently after a
+        reboot -- the AtStartup scheduled task registered by
+        Install-LimsSqlTempDbStartupSequence becomes the only thing that
+        ever starts it, removing any timing race between the two.
+        Disabled/Automatic/Manual are all natively supported by
+        Set-Service -- unlike "Automatic (Delayed Start)", no sc.exe
+        fallback is needed here.
     #>
-    param([Parameter(Mandatory = $true)] [string] $Name)
-    $null = & sc.exe config $Name start= delayed-auto
-    if ($LASTEXITCODE -ne 0) {
-        Assert-LimsSqlInstallFailure "Failed to configure delayed automatic start for service '$Name' (sc.exe exit code $LASTEXITCODE)."
-    }
-}
-
-function Stop-ServiceAdapter {
-    param([Parameter(Mandatory = $true)] [string] $Name)
-    Stop-Service -Name $Name -Force -ErrorAction Stop
-}
-
-function Start-ServiceAndWaitRunningAdapter {
     param(
         [Parameter(Mandatory = $true)] [string] $Name,
-        [Parameter(Mandatory = $false)] [int] $TimeoutSeconds = 180
+        [Parameter(Mandatory = $true)] [string] $StartupType
     )
-    Start-Service -Name $Name -ErrorAction Stop
-    $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-    while ((Get-Date) -lt $deadline) {
-        $service = Get-Service -Name $Name -ErrorAction SilentlyContinue
-        if ($service -and $service.Status -eq 'Running') { return $true }
-        Start-Sleep -Seconds 2
-    }
-    return $false
+    Set-Service -Name $Name -StartupType $StartupType -ErrorAction Stop
 }
 
 function Restart-ServiceAndWaitRunningAdapter {
@@ -470,13 +556,6 @@ function Restart-ServiceAndWaitRunningAdapter {
 function New-DirectoryAdapter {
     param([Parameter(Mandatory = $true)] [string] $Path)
     $null = New-Item -ItemType Directory -Path $Path -Force
-}
-
-function Remove-DirectoryRecursivelyAdapter {
-    param([Parameter(Mandatory = $true)] [string] $Path)
-    if (Test-Path -LiteralPath $Path) {
-        Remove-Item -LiteralPath $Path -Recurse -Force
-    }
 }
 
 function Write-TextFileAdapter {
@@ -503,15 +582,22 @@ function Invoke-SqlSetupProcessAdapter {
     return [int]$process.ExitCode
 }
 
-function Invoke-TempDbRecreationScriptAdapter {
+function Invoke-TempDbPreparationScriptAdapter {
+    <#
+        Runs the TempDB preparation-then-start script (the exact same
+        file the AtStartup scheduled task runs) and throws if it exits
+        non-zero -- covers a volume-wait timeout, an icacls.exe failure,
+        or a Start-Service failure, all of which the script itself
+        detects and reports via its own exit code.
+    #>
     param([Parameter(Mandatory = $true)] [string] $ScriptPath)
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $ScriptPath
     if ($LASTEXITCODE -ne 0) {
-        Assert-LimsSqlInstallFailure "TempDB recreation script '$ScriptPath' exited with code $LASTEXITCODE."
+        Assert-LimsSqlInstallFailure "TempDB preparation script '$ScriptPath' exited with code $LASTEXITCODE."
     }
 }
 
-function Register-TempDbRecreationScheduledTaskAdapter {
+function Register-TempDbPreparationScheduledTaskAdapter {
     param(
         [Parameter(Mandatory = $true)] [string] $TaskName,
         [Parameter(Mandatory = $true)] [string] $ScriptPath
@@ -759,45 +845,49 @@ function Set-LimsSqlServerTcpPort1433 {
     }
 }
 
-function Install-LimsSqlTempDbRecreationSafety {
+function Install-LimsSqlTempDbStartupSequence {
     <#
-        Writes one small recreation script (the single implementation of
-        "recreate the TempDB folder and grant the service account access
-        to it" -- never duplicated between the scheduled task and this
-        function's own verification below), registers it as an AtStartup
-        scheduled task, sets the Database Engine service to Automatic
-        (Delayed Start), then proves the mitigation works once during this
-        same run by simulating the Azure temporary disk being recreated
-        empty.
+        Writes the one TempDB preparation-then-start script (the single
+        implementation shared by the AtStartup scheduled task and this
+        function's own smoke test below -- never duplicated), registers
+        it as an AtStartup scheduled task, and disables the Database
+        Engine service's own Windows startup type so that scheduled task
+        is the ONLY thing that ever starts it after a reboot -- an
+        explicit, deterministic sequence (wait for the volume, create the
+        directory, apply the ACL and check icacls.exe's exit code, only
+        then start the service), never a "delayed start plus hope the
+        task wins the race" timing assumption.
+
+        Then runs that exact script once, as a non-destructive smoke
+        test: the directory-create and ACL-grant steps are idempotent and
+        safe to reapply against a directory already in active use, and
+        Start-Service against an already-Running service is a no-op --
+        this never deletes the live TempDB directory and never stops the
+        running instance. It only proves the script executes successfully
+        in this environment; it does NOT prove the real reboot/temporary-
+        disk-recreation sequence works end-to-end. See docs/operations.md
+        for the separate, documented, DEV-only manual procedure that does.
     #>
     param(
         [Parameter(Mandatory = $true)] $Config,
         [Parameter(Mandatory = $true)] [string] $TempDbPath
     )
 
-    $recreateScriptPath = Join-Path -Path (Split-Path -Path $Config.SetupExePath -Parent) -ChildPath 'Ensure-LimsSqlTempDbPath.ps1'
-    $recreateScriptContent = @"
-`$ErrorActionPreference = 'Stop'
-if (-not (Test-Path -LiteralPath '$TempDbPath')) {
-    New-Item -ItemType Directory -Path '$TempDbPath' -Force | Out-Null
-}
-& icacls.exe '$TempDbPath' /grant '$($Config.SqlServiceAccount):(OI)(CI)F' /T | Out-Null
-"@
-    Write-TextFileAdapter -Path $recreateScriptPath -Content $recreateScriptContent
-    Register-TempDbRecreationScheduledTaskAdapter -TaskName $Config.ScheduledTaskName -ScriptPath $recreateScriptPath
-    Set-ServiceDelayedAutoStartAdapter -Name $Config.InstanceName
+    $prepScriptPath = Join-Path -Path (Split-Path -Path $Config.SetupExePath -Parent) -ChildPath 'Start-LimsSqlServerAfterTempDbPreparation.ps1'
+    $prepScriptContent = New-LimsSqlTempDbPreparationScriptContent -Config $Config -TempDbPath $TempDbPath
+    Write-TextFileAdapter -Path $prepScriptPath -Content $prepScriptContent
+    Register-TempDbPreparationScheduledTaskAdapter -TaskName $Config.ScheduledTaskName -ScriptPath $prepScriptPath
+    Set-ServiceStartupTypeAdapter -Name $Config.InstanceName -StartupType 'Disabled'
 
-    # One-time, in-run proof: TempDB is always recreated fresh by SQL
-    # Server on every startup regardless (it is never carried across
-    # restarts), so deleting its directory here and letting the real
-    # recreation script rebuild it is a safe, accurate simulation of the
-    # Azure temporary disk being wiped and recreated.
-    Stop-ServiceAdapter -Name $Config.InstanceName
-    Remove-DirectoryRecursivelyAdapter -Path $TempDbPath
-    Invoke-TempDbRecreationScriptAdapter -ScriptPath $recreateScriptPath
-    $started = Start-ServiceAndWaitRunningAdapter -Name $Config.InstanceName
-    if (-not $started) {
-        Assert-LimsSqlInstallFailure 'SQL Server did not reach Running state after simulating Azure temporary-disk recreation and re-running the TempDB recreation script. The scheduled-task mitigation cannot be confirmed working.'
+    # Non-destructive smoke test. Invoke-TempDbPreparationScriptAdapter
+    # itself throws if the script exits non-zero (volume-wait timeout,
+    # icacls.exe failure, or Start-Service failure), so a failure here
+    # fails this function closed, before any post-install verification or
+    # administrator/sa handling is ever reached.
+    Invoke-TempDbPreparationScriptAdapter -ScriptPath $prepScriptPath
+    $serviceState = Get-ServiceStateAdapter -Name $Config.InstanceName
+    if (-not $serviceState -or $serviceState.Status -ne 'Running') {
+        Assert-LimsSqlInstallFailure "After running the TempDB preparation script as a smoke test, $($Config.InstanceName) is not in the Running state (status: $(if ($serviceState) { $serviceState.Status } else { '<service not found>' }))."
     }
     return $true
 }
@@ -827,24 +917,50 @@ function Test-LimsSqlPostInstallState {
     return [pscustomobject]@{ Edition = $edition; ProductVersion = $version; Collation = $collation; AgentStatus = $agentState.Status }
 }
 
-function Confirm-LimsSqlWindowsAdminAccessAndDisableSa {
-    $isSysadmin = $null
+function Invoke-LimsSqlAdminVerificationAndSaDisableAttempt {
+    <#
+        Only disables sa if THIS session's own connected identity can be
+        verified as one of the explicitly approved Windows SQL
+        administrator principals (never merely "has sysadmin" -- see
+        Test-LimsSqlVerifiedAdministratorSession). Delivered via Managed
+        Run Command, the connected identity is always the SYSTEM
+        automation identity, which never matches an approved human
+        principal, so this is expected to return
+        'PendingManualOperatorVerification' on every real run through this
+        script's normal delivery mechanism -- the documented,
+        operator-performed procedure in docs/operations.md ("SQL Server
+        2022 post-install administrator verification and sa disable") is
+        what actually completes it. This function still performs the real
+        check and the real disable itself (rather than skipping either
+        outright) so it remains correct in any future delivery context
+        where a session really is connected as an approved administrator,
+        and so this function alone is the single place that decides
+        whether sa is ever disabled.
+    #>
+    param([Parameter(Mandatory = $true)] [string[]] $ApprovedPrincipals)
+
+    $connectedIdentity = $null
+    $isSysadminRaw = $null
     try {
-        $isSysadmin = Invoke-SqlWindowsAuthScalarAdapter -Query "SELECT IS_SRVROLEMEMBER('sysadmin')"
+        $connectedIdentity = [string](Invoke-SqlWindowsAuthScalarAdapter -Query 'SELECT SYSTEM_USER')
+        $isSysadminRaw = Invoke-SqlWindowsAuthScalarAdapter -Query "SELECT IS_SRVROLEMEMBER('sysadmin')"
     }
     catch {
-        Assert-LimsSqlInstallFailure 'Unable to verify Windows administrator sysadmin access to the newly installed instance via a local Windows-authenticated connection.'
+        Assert-LimsSqlInstallFailure 'Unable to query the connected identity or sysadmin membership of the newly installed instance via a local Windows-authenticated connection.'
     }
-    if ([int]$isSysadmin -ne 1) {
-        Assert-LimsSqlInstallFailure 'The current Windows identity does not have sysadmin access to the newly installed instance; refusing to disable the sa login without first confirming administrator access through another path.'
+    $isSysadmin = ([int]$isSysadminRaw -eq 1)
+
+    if (-not (Test-LimsSqlVerifiedAdministratorSession -ConnectedIdentity $connectedIdentity -IsSysadmin $isSysadmin -ApprovedPrincipals $ApprovedPrincipals)) {
+        Write-Verbose "This session (connected identity: '$connectedIdentity') is not a verified approved-administrator session; sa will NOT be disabled automatically. Complete the documented manual post-install procedure instead."
+        return 'PendingManualOperatorVerification'
     }
 
     Invoke-SqlWindowsAuthNonQueryAdapter -Query 'ALTER LOGIN [sa] DISABLE'
     $saDisabled = Invoke-SqlWindowsAuthScalarAdapter -Query "SELECT is_disabled FROM sys.sql_logins WHERE name = 'sa'"
     if ([int]$saDisabled -ne 1) {
-        Assert-LimsSqlInstallFailure 'The sa login does not report as disabled after attempting to disable it.'
+        Assert-LimsSqlInstallFailure 'The sa login does not report as disabled after a verified administrator session attempted to disable it.'
     }
-    return $true
+    return 'Completed'
 }
 
 function Invoke-LimsSqlServerInstall {
@@ -919,9 +1035,9 @@ function Invoke-LimsSqlServerInstall {
     }
 
     Set-LimsSqlServerTcpPort1433 -Config $config
-    $tempDbSafetyConfirmed = Install-LimsSqlTempDbRecreationSafety -Config $config -TempDbPath $TempDbPath
+    $tempDbStartupSequenceConfirmed = Install-LimsSqlTempDbStartupSequence -Config $config -TempDbPath $TempDbPath
     $postInstall = Test-LimsSqlPostInstallState -Config $config
-    $saDisabled = Confirm-LimsSqlWindowsAdminAccessAndDisableSa
+    $saDisableStatus = Invoke-LimsSqlAdminVerificationAndSaDisableAttempt -ApprovedPrincipals $principalsResult.Principals
 
     return [pscustomobject]@{
         Status                          = 'Succeeded'
@@ -931,8 +1047,8 @@ function Invoke-LimsSqlServerInstall {
         Collation                       = $postInstall.Collation
         AgentServiceStatus              = $postInstall.AgentStatus
         Tcp1433Confirmed                = $true
-        TempDbRecreationSafetyConfirmed = $tempDbSafetyConfirmed
-        SaDisabled                      = $saDisabled
+        TempDbStartupSequenceConfirmed  = $tempDbStartupSequenceConfirmed
+        SaDisableStatus                 = $saDisableStatus
     }
 }
 
@@ -941,6 +1057,19 @@ function Write-LimsSqlServerInstallSummary {
         The ONLY place in this script that prints the final compact
         result to the default output stream. Never prints the sa
         password, the full Setup command line, or any raw Setup log.
+
+        Deliberately distinguishes three separate facts, never collapsed
+        into one ambiguous "SUCCESS": (1) Setup completion status itself
+        (REBOOT REQUIRED is a distinct literal marker line, matched
+        verbatim by provision-lims-ws2025-dev-sql.yml's own pipeline logic
+        to gate the SQL IaaS/Azure Hybrid Benefit registration step --
+        never change that one line's text without updating the pipeline
+        to match); (2) whether the TCP 1433 / TempDB-startup-sequence
+        hardening completed; and (3) whether administrator verification
+        and the sa disable are Completed or still Pending a manual
+        operator step -- this script never claims sa is disabled unless
+        Invoke-LimsSqlAdminVerificationAndSaDisableAttempt actually
+        verified and performed it.
     #>
     param([Parameter(Mandatory = $true)] $Summary)
 
@@ -948,19 +1077,24 @@ function Write-LimsSqlServerInstallSummary {
         Write-Output '===== LIMS SQL Server 2022 installation: REBOOT REQUIRED ====='
         Write-Output "Setup exit code : $($Summary.SetupExitCode)"
         Write-Output "$($Summary.Message)"
+        Write-Output 'Hardening (TCP 1433 / TempDB startup sequence): NOT YET PERFORMED -- resumes after reboot and rerun.'
+        Write-Output 'Administrator verification and sa disable: NOT APPLICABLE YET -- complete after a successful, non-reboot-pending rerun.'
         Write-Output '================================================================'
         return
     }
 
-    Write-Output '===== LIMS SQL Server 2022 installation: SUCCESS ====='
+    Write-Output '===== LIMS SQL Server 2022 installation: SETUP COMPLETED ====='
     Write-Output "Setup exit code          : $($Summary.SetupExitCode)"
     Write-Output "Edition                  : $($Summary.Edition)"
     Write-Output "Product version          : $($Summary.ProductVersion)"
     Write-Output "Collation                : $($Summary.Collation)"
     Write-Output "Agent service status     : $($Summary.AgentServiceStatus) (expected: not running)"
     Write-Output "TCP 1433 confirmed       : $($Summary.Tcp1433Confirmed)"
-    Write-Output "TempDB recreation safety : $($Summary.TempDbRecreationSafetyConfirmed)"
-    Write-Output "sa login disabled        : $($Summary.SaDisabled)"
+    Write-Output "Hardening                : COMPLETED (TCP 1433 confirmed: $($Summary.Tcp1433Confirmed); TempDB startup sequence confirmed: $($Summary.TempDbStartupSequenceConfirmed))"
+    Write-Output "Administrator verification and sa disable: $($Summary.SaDisableStatus)"
+    if ($Summary.SaDisableStatus -ne 'Completed') {
+        Write-Output "  -> The sa login remains ENABLED. Complete the documented manual procedure in docs/operations.md ('SQL Server 2022 post-install administrator verification and sa disable') to verify an approved Windows administrator's own identity and sysadmin membership, disable sa, and confirm is_disabled = 1."
+    }
     Write-Output '======================================================='
 }
 
