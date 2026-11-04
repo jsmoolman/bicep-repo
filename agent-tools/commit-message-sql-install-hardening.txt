@@ -1,0 +1,12 @@
+Require an approved administrator to disable sa, and start SQL only after TempDB prep
+
+Managed Run Command always connects as SYSTEM, so a sysadmin check in that
+session cannot authorize disabling sa. The guest script now requires the
+connected identity to match an approved Windows principal and reports
+PendingManualOperatorVerification otherwise; the operator signs in and
+completes the disable. TempDB on D: no longer races delayed-auto-start:
+MSSQLSERVER Windows startup is Disabled, an AtStartup task waits for D:,
+creates the directory, checks the icacls.exe exit code, and only then
+starts the engine. Recursive TempDB deletion is gone from install and
+rerun. Setup reboot-required resume, the pinned SQL v2 target, and Azure
+Update Manager servicing are unchanged.

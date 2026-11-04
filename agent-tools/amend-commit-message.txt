@@ -1,0 +1,44 @@
+Pin LF line endings for Azure Pipelines bash scripts via .gitattributes
+
+The customer's Ubuntu-hosted agent failed before submitting Managed Run
+Command, reported as caused by CRLF line endings in
+submit-and-wait-run-command.sh.
+
+Investigation of the actual git history found the committed blobs for
+both submit-and-wait-run-command.sh and cleanup-run-command.sh have been
+LF-only in every commit that touched them (fe3b3c0, 3d156bc, and this
+commit is byte-identical to 3d156bc for both files -- same blob hashes).
+core.autocrlf=true on this authoring machine was already normalizing
+CRLF to LF at commit time, as designed. The CRLF seen in this Windows
+working tree was a local checkout-time artifact of that same setting and
+never reflects what is actually stored or pushed.
+
+Because no .gitattributes rule existed, nothing *guaranteed* that every
+checkout -- including the customer's own agent/environment, whose local
+git line-ending configuration is not controlled by this repository --
+would materialize these files as LF on disk. That gap is the most
+plausible explanation for the customer-reported CRLF failure despite the
+repository's stored blobs already being LF.
+
+Fix: add .gitattributes (new file; no prior rules to preserve) with
+'.azuredevops/pipelines/scripts/*.sh text eol=lf', forcing LF on
+checkout for these paths regardless of the checking-out machine's
+core.autocrlf setting.
+
+Verification performed:
+- Confirmed via git cat-file -p that the committed blobs for both
+  scripts contain zero CR bytes in this commit and in every prior
+  commit that touched them.
+- Created a fresh, independent git worktree checkout of this commit and
+  confirmed the checked-out files on disk also contain zero CR bytes --
+  proving the eol=lf attribute enforces LF on checkout even though this
+  machine's core.autocrlf is true.
+- Ran 'bash -n' against both scripts from that fresh checkout: no syntax
+  errors.
+
+No change to script content/logic, pipeline definition, or staging
+script -- stage-only, provision-lims-ws2025-dev-sql.yml, and
+Stage-LimsSqlInstallationMedia.ps1 are unchanged. The two .sh files are
+byte-identical to the previous commit; only .gitattributes is new.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>

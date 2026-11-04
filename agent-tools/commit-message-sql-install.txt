@@ -1,0 +1,99 @@
+Add SQL Server 2022 installation capability (install action) for LIMS WS2025 DEV v2
+
+Scope decision (docs/scope.md, docs/operations.md):
+- Records a new, narrowly-scoped exception — "LIMS WS2025 DEV v2 — SQL
+  Server 2022 Enterprise Database Engine installation on the SQL VM" —
+  explicitly authorizing, for vm-lims-dev-v2-westeu-002 only: one guest
+  execution of the pinned, signed C:\SQLMedia\SQL2022\SETUP.EXE (Database
+  Engine only, default MSSQLSERVER instance, SQL_Latin1_General_CP1_CI_AS,
+  mixed mode, TCP 1433 only, the two default virtual service accounts,
+  SQL Agent installed-but-disabled, /UpdateEnabled=False), followed by
+  exactly one pipeline-side SQL IaaS Agent Extension registration
+  (LightWeight management mode, Azure Hybrid Benefit). Every prior
+  exception already explicitly excluded SQL Server installation; this is
+  the one, separate decision that authorizes it, scoped exactly to the
+  configuration described.
+- Documents the full explicit-inputs contract, exit-code/reboot handling,
+  TempDB-on-temporary-disk mitigation, and the SQL v2 patching handoff
+  runbook (update source check, Update Manager assessment, maintenance
+  schedule Updates-classification check, post-patch ProductVersion
+  comparison before first DB restore) in docs/operations.md.
+
+New: operations/compute/lims-ws2025-dev-sql-install/Install-LimsSqlServer.ps1
+- Standalone Windows PowerShell 5.1 script, same pure-logic/*Adapter/
+  orchestration structure as the staging script. Fails before any
+  mutation: re-verifies target identity, Setup.exe's Authenticode
+  signature, and E:/F:/D: volumes; validates an existing instance
+  (idempotent success) or stops on partial/unexpected state (never
+  auto-repairs). Builds its own ConfigurationFile.ini (never includes
+  SAPWD); the sa password is supplied to Setup only as a redacted
+  command-line argument, never logged or written to any file. Treats
+  exit code 0 as success and 3010 as "succeeded, reboot required" (a
+  known SQL Server 2022 first-run condition) — never a hard failure.
+  Hardens TCP 1433 as the only listener. Installs an AtStartup scheduled
+  task that recreates the TempDB directory before the Database Engine
+  starts (mitigating the Azure temporary disk D: being wiped on
+  deallocation/reallocation), and proves it once per run by simulating
+  that exact recreation. Verifies Windows administrator sysadmin access
+  before disabling the sa login. All explicit inputs (Windows SQL admin
+  principals, final data/log/TempDB paths, TempDB sizing) are caller-
+  supplied; never hardcoded or guessed.
+- Install-LimsSqlServer.Tests.ps1: 58 Pester tests covering every pure
+  function directly and every orchestration function with all *Adapter
+  functions mocked, including fail-before-any-mutation ordering, secret
+  handling (sa password/full Setup command line never logged, never
+  written to the ini), rerun-safety branching (NotInstalled / Healthy /
+  Partial), and exit-code classification (0 / 3010 / other).
+- PSScriptAnalyzerSettings.psd1: same Windows PowerShell 5.1 compatibility
+  checks as the staging script, plus a documented PSAvoidUsingPlainText-
+  ForPassword exclusion (Managed Run Command delivers every parameter,
+  protected or not, as a plain string process argument regardless of
+  declared type).
+
+Changed: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1
+- Pins the exact staged path C:\SQLMedia\SQL2022\SETUP.EXE in the final
+  verification (previously matched any file named SETUP.EXE anywhere
+  under the staging tree) — the install script's own signature check now
+  verifies this same exact pinned path.
+
+Changed: .azuredevops/pipelines/scripts/submit-and-wait-run-command.sh
+- Adds optional RUN_COMMAND_PARAMETERS / RUN_COMMAND_PROTECTED_PARAMETERS
+  environment variables, forwarded to `az vm run-command create
+  --parameters` / `--protected-parameters` as newline-separated
+  "name=value" pairs. Backward compatible: both default to empty, which
+  reproduces the exact prior stage-only behavior (neither flag passed).
+  Verified locally against a scripted fake `az` CLI (agent-tools/
+  fake-az-for-run-command-tests.sh + run-run-command-fixtures.ps1, 14
+  scenarios, all passing) including forwarding multiple parameters intact
+  and in order, and confirming a protected parameter's value never
+  appears in this script's own output.
+
+Changed: .azuredevops/pipelines/provision-lims-ws2025-dev-sql.yml
+- Adds the `install` action (stage-only remains the default) and nine new
+  install-only parameters: windowsSqlAdminPrincipalsCsv (required, no
+  default), sqlDataPath, sqlLogPath, sqlTempDbPath, and the five TempDB
+  sizing parameters.
+- Fails immediately, before any submission, if windowsSqlAdminPrincipalsCsv
+  is empty while action=install.
+- Reuses the pinned SQL v2 target and the shared submit-and-wait-run-
+  command.sh mechanism unchanged; forwards the install-only parameters as
+  --parameters and the sa password (from the new
+  lims-ws2025-dev-sql-install-secrets variable group, referenced only for
+  action=install) as --protected-parameters.
+- Captures whether the guest script reported "REBOOT REQUIRED" and gates
+  the new SQL IaaS/Azure Hybrid Benefit registration step
+  (`az sql vm create --sql-mgmt-type LightWeight --license-type AHUB`) on
+  a fully successful, non-reboot-pending install.
+
+Validation performed:
+- Full repo Pester suite: 263/263 passed (guest data-disk prep, media
+  staging, and the new install script).
+- PSScriptAnalyzer: no issues on both modified/new .ps1 files.
+- YAML syntax validated (js-yaml parse).
+- Shell fixture harness (agent-tools/run-run-command-fixtures.ps1): 14/14
+  scenarios passed, including the new --parameters/--protected-parameters
+  forwarding and backward-compatibility checks.
+- No real Azure VM, SQL Server Setup, or SQL IaaS registration execution
+  has occurred — the first real `install` run is for a human operator,
+  and exit code 3010 (reboot required) is expected on the very first
+  attempt against a fresh Windows Server 2025 image.

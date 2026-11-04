@@ -1,0 +1,978 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "7439546514991409551"
+    },
+    "description": "LIMS WS2025 Phase 1 compute foundation: creates the replacement APP and SQL virtual machines (Windows Server 2025 Datacenter, non-Azure Edition), their directly coupled NICs and managed disks, the Microsoft Entra sign-in extension, and the Azure Machine Configuration (Guest Configuration) extension (AzurePolicyforWindows — a prerequisite for the existing, separately-managed time-zone enforcement policy; see the LIMS WS2025 DEV v2 time-zone enforcement exception in docs/scope.md). Approved under the narrow LIMS WS2025 Phase 1 workload-infrastructure exception in docs/scope.md. Creates no VNet, subnet, NSG, Key Vault, Disk Encryption Set, Log Analytics workspace, DCR, Recovery Services Vault, or Entra group, and assigns only the two approved built-in VM-login roles to already-existing Entra groups (not an Entra ID mutation — see docs/scope.md). Installs no SQL Server and performs no application/data migration. Optionally (enableGuestDiskPreparation, default false, plus guestDiskPreparationExecutionTarget, default \"None\") also validates and/or initializes/partitions/formats/labels the APP application data disk and the two SQL data/log disks to their approved drive letters via a Run Command resource scoped to exactly these two VMs — see docs/operations.md for the full guest data-disk preparation behavioral contract, Validate/Apply modes, and customer opt-in sequence."
+  },
+  "parameters": {
+    "location": {
+      "type": "string",
+      "defaultValue": "westeurope",
+      "metadata": {
+        "description": "Azure region for the VMs, NICs, and disks. Must match the resource group region."
+      }
+    },
+    "subnetResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the existing subnet both NICs attach to. Referenced only as an ID string — no VNet/subnet resource is declared, read, or modified."
+      }
+    },
+    "diskEncryptionSetResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the existing Disk Encryption Set used for customer-managed-key SSE on every managed disk created here. Referenced only as an ID string — no Disk Encryption Set or Key Vault resource is declared, read, or modified."
+      }
+    },
+    "vmSize": {
+      "type": "string",
+      "defaultValue": "Standard_D4ads_v5",
+      "metadata": {
+        "description": "Azure VM size for both the APP and SQL virtual machines."
+      }
+    },
+    "imagePublisher": {
+      "type": "string",
+      "defaultValue": "MicrosoftWindowsServer",
+      "metadata": {
+        "description": "Marketplace image publisher. Defaults to the standard Windows Server publisher."
+      }
+    },
+    "imageOffer": {
+      "type": "string",
+      "defaultValue": "WindowsServer",
+      "metadata": {
+        "description": "Marketplace image offer. Defaults to the standard Windows Server offer."
+      }
+    },
+    "imageSku": {
+      "type": "string",
+      "defaultValue": "2025-datacenter-g2",
+      "metadata": {
+        "description": "Marketplace image SKU. Defaults to plain Windows Server 2025 Datacenter, Gen2, Desktop Experience — explicitly not an Azure Edition SKU."
+      }
+    },
+    "imageVersion": {
+      "type": "string",
+      "defaultValue": "latest",
+      "metadata": {
+        "description": "Marketplace image version."
+      }
+    },
+    "osDiskSizeGiB": {
+      "type": "int",
+      "defaultValue": 127,
+      "metadata": {
+        "description": "Size in GiB of both the APP and SQL OS disks. Explicitly set to preserve the current LIMS v1 OS disk size rather than relying on the Windows Server 2025 Marketplace image default."
+      }
+    },
+    "appVmName": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure resource name of the APP virtual machine, e.g. vm-lims-dev-v2-westeu-001."
+      }
+    },
+    "appComputerName": {
+      "type": "string",
+      "maxLength": 15,
+      "metadata": {
+        "description": "Windows computer name (NetBIOS, max 15 characters) of the APP virtual machine, e.g. lims-dev-v2-001."
+      }
+    },
+    "appNicName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the APP NIC."
+      }
+    },
+    "appOsDiskName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the APP OS disk."
+      }
+    },
+    "appDataDiskName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the APP application data disk (future A:)."
+      }
+    },
+    "appDataDiskSizeGiB": {
+      "type": "int",
+      "defaultValue": 128,
+      "metadata": {
+        "description": "Size in GiB of the APP application data disk."
+      }
+    },
+    "appDataDiskTier": {
+      "type": "string",
+      "defaultValue": "P10",
+      "metadata": {
+        "description": "Performance tier of the APP application data disk (e.g. P10, P15, P20...). Explicitly preserved so it is not reset to a default by redeployment (see docs/operations.md). This is the free-form disk.properties.tier value, not the disk SKU name — Premium_LRS is unaffected. Must match the baseline tier implied by appDataDiskSizeGiB per the Premium SSD size/tier table (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size); defaults to P10, the baseline tier for the current 128 GiB size. This module does not derive the tier from the size automatically — if appDataDiskSizeGiB ever changes, update this parameter to the matching tier yourself, otherwise the disk would be deployed below its size baseline (not supported) or burst-billed above it (a real cost/performance change, not a default)."
+      }
+    },
+    "sqlVmName": {
+      "type": "string",
+      "metadata": {
+        "description": "Azure resource name of the SQL virtual machine, e.g. vm-lims-dev-v2-westeu-002."
+      }
+    },
+    "sqlComputerName": {
+      "type": "string",
+      "maxLength": 15,
+      "metadata": {
+        "description": "Windows computer name (NetBIOS, max 15 characters) of the SQL virtual machine, e.g. lims-dev-v2-002."
+      }
+    },
+    "sqlNicName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the SQL NIC."
+      }
+    },
+    "sqlOsDiskName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the SQL OS disk."
+      }
+    },
+    "sqlDataDiskName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the SQL DATA disk."
+      }
+    },
+    "sqlDataDiskSizeGiB": {
+      "type": "int",
+      "defaultValue": 1024,
+      "metadata": {
+        "description": "Size in GiB of the SQL DATA disk."
+      }
+    },
+    "sqlDataDiskTier": {
+      "type": "string",
+      "defaultValue": "P30",
+      "metadata": {
+        "description": "Performance tier of the SQL DATA disk. Same purpose and constraints as appDataDiskTier. Defaults to P30, the baseline tier for the current 1024 GiB size (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size). Keep in sync with sqlDataDiskSizeGiB."
+      }
+    },
+    "sqlLogDiskName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the SQL LOG disk."
+      }
+    },
+    "sqlLogDiskSizeGiB": {
+      "type": "int",
+      "defaultValue": 512,
+      "metadata": {
+        "description": "Size in GiB of the SQL LOG disk."
+      }
+    },
+    "sqlLogDiskTier": {
+      "type": "string",
+      "defaultValue": "P20",
+      "metadata": {
+        "description": "Performance tier of the SQL LOG disk. Same purpose and constraints as appDataDiskTier. Defaults to P20, the baseline tier for the current 512 GiB size (https://learn.microsoft.com/en-us/azure/virtual-machines/disks-types#premium-ssd-size). Keep in sync with sqlLogDiskSizeGiB."
+      }
+    },
+    "adminUsername": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Local administrator username for both VMs — a deployment/break-glass account only. Normal personnel access is through Microsoft Entra sign-in (see appAdministratorLoginPrincipalIds etc. below), not this account."
+      }
+    },
+    "adminPassword": {
+      "type": "securestring",
+      "metadata": {
+        "description": "Local administrator password for both VMs. Never defaulted, never present in source or parameter files — supplied as a secure deployment-time value only."
+      }
+    },
+    "tags": {
+      "type": "object",
+      "defaultValue": {},
+      "metadata": {
+        "description": "Common tags applied to every resource in this module (e.g. environment, purpose). Each VM/disk additionally gets a role tag (application or sql) added internally — do not duplicate role here."
+      }
+    },
+    "appExistingUserAssignedIdentityResourceIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Full ARM resource IDs of existing user-assigned managed identities that must remain attached to the APP VM across redeployments (e.g. an existing Policy-managed monitoring/CTI identity such as Built-In-Identity-westeurope). This is NOT the same thing as modules/compute/lims-ws2025-dev-patch-policy's userAssignedIdentityResourceId parameter: that identity is referenced only by Microsoft.Authorization/policyAssignments resources for Policy remediation and is never attached to either VM, while this parameter is attached directly to the VM's own identity property. This module never creates a user-assigned identity, grants it any new permission, or attaches the deployment/remediation identity to a VM — it only preserves identities already attached to the VM from outside this module (e.g. by Azure Policy's own remediation). Supply only authoritative existing resource IDs — never guessed, inferred, or reconstructed (including from screenshots). The system-assigned identity is always retained regardless of this parameter's value. Empty (default) preserves the VM's original initial-creation identity shape (SystemAssigned only) — on an already-converged VM that already has a user-assigned identity attached from outside Bicep, leaving this parameter empty on redeployment does NOT preserve that identity: Azure resets an omitted identity.userAssignedIdentities property on redeployment (see docs/operations.md and docs/scope.md)."
+      }
+    },
+    "sqlExistingUserAssignedIdentityResourceIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Same purpose and constraints as appExistingUserAssignedIdentityResourceIds, applied to the SQL VM."
+      }
+    },
+    "appAdministratorLoginPrincipalIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the APP VM. Empty (default) creates no role assignment. Assigning an existing Entra principal to this built-in role is not an Entra ID mutation (see docs/scope.md, \"RBAC and Entra ID mutation are distinct\"), but it is still a deliberate, approved decision scoped to this workload only — populate only with existing group object IDs already authoritative outside this repository (never invented/guessed). The approved DEV mapping for this parameter is AZ-TC-LIMS-Infra, AZ-TC-LIMS-Func, AZ-TC-LIMS-App (see docs/scope.md and docs/operations.md)."
+      }
+    },
+    "appUserLoginPrincipalIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Existing Entra security group object IDs to grant Virtual Machine User Login on the APP VM. Same constraints as appAdministratorLoginPrincipalIds. No DEV User Login assignment is currently approved/required for this VM, so this is expected to stay empty for DEV."
+      }
+    },
+    "sqlAdministratorLoginPrincipalIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Existing Entra security group object IDs to grant Virtual Machine Administrator Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds. The approved DEV mapping for this parameter is AZ-TC-LIMS-Infra, AZ-TC-LIMS-App (see docs/scope.md and docs/operations.md)."
+      }
+    },
+    "sqlUserLoginPrincipalIds": {
+      "type": "array",
+      "defaultValue": [],
+      "metadata": {
+        "description": "Existing Entra security group object IDs to grant Virtual Machine User Login on the SQL VM. Same constraints as appAdministratorLoginPrincipalIds. No DEV User Login assignment is currently approved/required for this VM, so this is expected to stay empty for DEV."
+      }
+    },
+    "enableGuestDiskPreparation": {
+      "type": "bool",
+      "defaultValue": false,
+      "metadata": {
+        "description": "Opt-in switch for automated guest data-disk preparation (initialize, partition, format, assign drive letter/label) on the APP application data disk and the two SQL data/log disks, delivered via Microsoft.Compute/virtualMachines/runCommands scoped to exactly these two VMs. Defaults to false — a normal foundation redeployment never formats a disk unless this is explicitly set to true. Every mutation target is still re-verified at execution time against Azure Instance Metadata Service identity, LUN, managed-disk resource name, and capacity before anything is touched — this flag only controls whether the Run Command resource is deployed at all. See docs/operations.md for the full behavioral contract, idempotency model, and customer opt-in/validation procedure."
+      }
+    },
+    "guestDiskPreparationExecutionTarget": {
+      "type": "string",
+      "defaultValue": "None",
+      "allowedValues": [
+        "None",
+        "ValidateApp",
+        "ValidateSql",
+        "ValidateBoth",
+        "ApplyApp",
+        "ApplySql"
+      ],
+      "metadata": {
+        "description": "Which guest data-disk preparation Run Command(s) are deployed and which mode (Validate/Apply) each runs in, once enableGuestDiskPreparation is true. Defaults to \"None\" — deliberately neither VM's Run Command resource exists, regardless of enableGuestDiskPreparation, until this is explicitly set. \"ValidateApp\"/\"ValidateSql\"/\"ValidateBoth\" deploy a read-only assessment only (the script\\'s own Validate mode — mutation functions are unreachable); \"ApplyApp\"/\"ApplySql\" deploy the mutating run for exactly one VM. There is deliberately no \"ApplyBoth\" value: Apply can only ever be requested for one VM per deployment, so a single enum value (and therefore a single parameter file edit) can never simultaneously authorize mutation on both APP and SQL. See docs/operations.md for the full customer validate→apply→reverify sequence."
+      }
+    },
+    "appDataVolumeDriveLetter": {
+      "type": "string",
+      "defaultValue": "A",
+      "metadata": {
+        "description": "Destination drive letter (single character, no colon) for the APP application data disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "appDataVolumeLabel": {
+      "type": "string",
+      "defaultValue": "LIMS-App",
+      "metadata": {
+        "description": "NTFS volume label applied to the APP application data disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "appDataVolumeAllocationUnitBytes": {
+      "type": "int",
+      "defaultValue": 4096,
+      "metadata": {
+        "description": "NTFS allocation unit size, in bytes, for the APP application data disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlDataVolumeDriveLetter": {
+      "type": "string",
+      "defaultValue": "E",
+      "metadata": {
+        "description": "Destination drive letter (single character, no colon) for the SQL DATA disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlDataVolumeLabel": {
+      "type": "string",
+      "defaultValue": "SQL-Data",
+      "metadata": {
+        "description": "NTFS volume label applied to the SQL DATA disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlDataVolumeAllocationUnitBytes": {
+      "type": "int",
+      "defaultValue": 65536,
+      "metadata": {
+        "description": "NTFS allocation unit size, in bytes, for the SQL DATA disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlLogVolumeDriveLetter": {
+      "type": "string",
+      "defaultValue": "F",
+      "metadata": {
+        "description": "Destination drive letter (single character, no colon) for the SQL LOG disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlLogVolumeLabel": {
+      "type": "string",
+      "defaultValue": "SQL-Logs",
+      "metadata": {
+        "description": "NTFS volume label applied to the SQL LOG disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "sqlLogVolumeAllocationUnitBytes": {
+      "type": "int",
+      "defaultValue": 65536,
+      "metadata": {
+        "description": "NTFS allocation unit size, in bytes, for the SQL LOG disk once enableGuestDiskPreparation is true."
+      }
+    },
+    "guestDiskPreparationTimeoutInSeconds": {
+      "type": "int",
+      "defaultValue": 1800,
+      "metadata": {
+        "description": "Timeout, in seconds, for each of the two guest data-disk preparation Run Command executions once enableGuestDiskPreparation is true. The managed Run Command resource blocks the deployment until the script completes or this timeout elapses (see docs/operations.md)."
+      }
+    }
+  },
+  "variables": {
+    "vmAdministratorLoginRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '1c0163c0-47e6-4577-8991-ea5c82e286e4')]",
+    "vmUserLoginRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', 'fb879df8-f326-4884-b1cf-06f3ad86be52')]",
+    "appTags": "[union(parameters('tags'), createObject('role', 'application'))]",
+    "sqlTags": "[union(parameters('tags'), createObject('role', 'sql'))]",
+    "guestDiskPreparationScript": "<#\r\n.SYNOPSIS\r\n    Safely initializes, partitions, formats, labels, and assigns a drive\r\n    letter to a small, explicit, pre-approved set of RAW Azure managed data\r\n    disks inside a single Windows guest (vm-lims-dev-v2-westeu-001 or\r\n    vm-lims-dev-v2-westeu-002 only) -- and nothing else.\r\n\r\n.DESCRIPTION\r\n    Delivered inline via a Microsoft.Compute/virtualMachines/runCommands\r\n    resource (see modules/compute/lims-ws2025-dev-foundation/main.bicep) --\r\n    never from a storage account, never containing a secret.\r\n\r\n    SAFETY MODEL SUMMARY -- full rationale, real-world evidence, and\r\n    Microsoft documentation citations for every point below are kept in\r\n    Initialize-LimsGuestDataDisks.research.md (co-located with this script)\r\n    and docs/operations.md, not in this file, to stay well under Bicep's\r\n    loadTextContent() size limit:\r\n\r\n    1) Independent fixed allowlist (Get-ApprovedDiskPreparationAllowlist):\r\n       caller parameters AND live IMDS must EACH independently match it.\r\n    2) OS/temporary-disk exclusion (Select-NonOsNonTemporaryDiskCandidates)\r\n       via Get-Disk IsBoot/IsSystem plus an IMDS temp-disk-size\r\n       cross-check -- never a topology guess; any ambiguity fails. Disks\r\n       are then matched to an Azure LUN via SCSILogicalUnit, with\r\n       capacity checked via a small, one-sided tolerance\r\n       (Test-ManagedDiskCapacityWithinTolerance) -- never the sole\r\n       identifier.\r\n    2a) Customer-attested guest-disk-UniqueId binding -- ENABLED for both\r\n       real targets. ADDITIONAL verification only; a UniqueId is never\r\n       proof of the Azure relationship. Mixed/duplicate config fails.\r\n    3) Guest disk/partition state is fully validated, never\r\n       auto-corrected or mutated by this script itself.\r\n    4) Stable UniqueId capture/re-validation at every granularity --\r\n       -Mode Apply rebuilds the whole plan and re-asserts each disk's\r\n       shape immediately before each mutating call. Never auto-retried\r\n       or rolled back.\r\n    5) Complete, non-mutating preflight -- one disk's validation failure\r\n       blocks the entire VM's plan; zero mutations on that VM.\r\n    6) RAW alone never suffices to initialize a disk. A disk already\r\n       matching the intended layout is left untouched. Clear-Disk,\r\n       diskpart clean, and wildcard disk-state changes are never used.\r\n    7) SQL-only, conditional DVD-ROM move (E: -> Z), verified via\r\n       Win32_CDROMDrive identity/media state before and after. App's\r\n       DVD-ROM is never touched.\r\n    8) Never touches pagefile, the Azure temp disk, SQL TempDB/config/\r\n       folders/shares, or app content.\r\n\r\n    TESTABILITY. Decision logic uses only plain data objects, never a\r\n    real cmdlet -- testable on Pester/Ubuntu CI. Real calls are isolated\r\n    in \"*Adapter\" functions, which Pester mocks.\r\n\r\n    EXECUTION RUNTIME. Run Command on Windows executes under Windows\r\n    PowerShell 5.1 by default; this script targets 5.1 syntax and\r\n    independently verifies administrator/SYSTEM execution.\r\n\r\n.PARAMETER Target\r\n    Which fixed allowlist entry this invocation is for: 'App' or 'Sql'.\r\n    Mandatory, with no default -- an invocation that omits -Target is\r\n    rejected by PowerShell parameter binding itself before any other check\r\n    runs, rather than silently defaulting to one target or attempting both.\r\n\r\n.PARAMETER Mode\r\n    'Validate' (read-only: builds and prints the full plan, never calls a\r\n    mutating adapter -- mutation functions are unreachable from this code\r\n    path) or 'Apply' (rebuilds the plan fresh immediately before mutating,\r\n    then executes exactly the actions that plan approved, re-verifying\r\n    identity and shape again immediately before each individual mutating\r\n    call). Mandatory, with no default.\r\n\r\n.PARAMETER ExpectedSubscriptionId\r\n    The caller-supplied subscription ID this VM is expected to belong to.\r\n    Checked against the fixed allowlist (not merely against IMDS).\r\n\r\n.PARAMETER ExpectedResourceGroupName\r\n    The caller-supplied resource group name this VM is expected to belong\r\n    to. Checked against the fixed allowlist (not merely against IMDS).\r\n\r\n.PARAMETER ExpectedVmName\r\n    The caller-supplied Azure VM resource name. Checked against the fixed\r\n    allowlist (not merely against IMDS).\r\n\r\n.PARAMETER ExpectedComputerName\r\n    The caller-supplied Windows (NetBIOS) computer name. Checked against the\r\n    fixed allowlist (not merely against the actual local $env:COMPUTERNAME).\r\n\r\n.PARAMETER ExpectedDisksJson\r\n    A JSON array of objects, each describing one disk the caller believes is\r\n    approved: Lun, DiskName, SizeBytes, DriveLetter, FileSystemLabel,\r\n    AllocationUnitBytes. Checked against the fixed allowlist entry for\r\n    -Target -- a caller-supplied descriptor that does not exactly match the\r\n    fixed allowlist is rejected before any guest action.\r\n\r\n.PARAMETER DvdLetterMoveTarget\r\n    Caller-supplied DVD-ROM letter-move target (no colon), or an empty\r\n    string. Checked against the fixed allowlist entry for -Target.\r\n#>\r\n\r\n[CmdletBinding()]\r\nparam(\r\n    [Parameter(Mandatory = $true)]\r\n    [ValidateSet('App', 'Sql')]\r\n    [string] $Target,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [ValidateSet('Validate', 'Apply')]\r\n    [string] $Mode,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [string] $ExpectedSubscriptionId,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [string] $ExpectedResourceGroupName,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [string] $ExpectedVmName,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [string] $ExpectedComputerName,\r\n\r\n    [Parameter(Mandatory = $true)]\r\n    [string] $ExpectedDisksJson,\r\n\r\n    [Parameter(Mandatory = $false)]\r\n    [string] $DvdLetterMoveTarget = ''\r\n)\r\n\r\n$ErrorActionPreference = 'Stop'\r\nSet-StrictMode -Version Latest\r\n\r\n# GPT type GUID for a Microsoft Reserved (MSR) partition -- the one\r\n# Windows-generated type tolerated alongside the data partition. See\r\n# Initialize-LimsGuestDataDisks.research.md (\"GPT partition-type and\r\n# volume-GUID-path constants\").\r\n$script:MsrPartitionGptType = '{e3c9e316-0b5c-4db8-817d-f92df00215ae}'\r\n\r\n# GPT type GUID for a Basic Data Partition -- the EXACT type checked for\r\n# the approved data partition, never Get-Partition's friendly `Type`\r\n# string. See Initialize-LimsGuestDataDisks.research.md.\r\n$script:BasicDataPartitionGptType = '{ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}'\r\n\r\n# A documented volume GUID path shape, used to recognize this access\r\n# path among a partition's AccessPaths. See\r\n# Initialize-LimsGuestDataDisks.research.md.\r\n$script:VolumeGuidPathPattern = '^\\\\\\\\\\?\\\\Volume\\{[0-9a-fA-F-]+\\}\\\\$'\r\n\r\nfunction Assert-GuestDiskPreparationFailure {\r\n    <#\r\n        Raises a terminating error for this script's own control flow.\r\n        Never calls exit/Environment.Exit directly, so this function remains\r\n        safe to invoke from a dot-sourced, mocked Pester test -- only the\r\n        top-level invocation guard at the bottom of this file translates a\r\n        thrown failure into a process exit code.\r\n    #>\r\n    param([Parameter(Mandatory = $true)] [string] $Message)\r\n    throw [System.InvalidOperationException]::new($Message)\r\n}\r\n\r\nfunction Test-IsMsrPartition {\r\n    param([Parameter(Mandatory = $true)] $Partition)\r\n    $gptType = [string]$Partition.GptType\r\n    if ([string]::IsNullOrWhiteSpace($gptType)) { return $false }\r\n    return $gptType.ToLowerInvariant() -eq $script:MsrPartitionGptType.ToLowerInvariant()\r\n}\r\n\r\nfunction Get-ImdsResourceDiskSizeBytes {\r\n        <#\r\n        Extracts IMDS's own reported temporary disk size in bytes, or\r\n        $null if not reported at all (0 is IMDS's documented \"no local\r\n        temp disk\" value, distinct from \"not reported\"). An observed,\r\n        unresolved discrepancy vs. the real guest-observed temp disk on\r\n        the two real v2 VMs is recorded in\r\n        Initialize-LimsGuestDataDisks.research.md under this heading. Do\r\n        not \"fix\" the x1024 below by guessing a unit -- IMDS documents kB.\r\n    #>\r\n    param([Parameter(Mandatory = $true)] $ImdsCompute)\r\n\r\n    if ($ImdsCompute.PSObject.Properties.Name -notcontains 'storageProfile' -or -not $ImdsCompute.storageProfile) { return $null }\r\n    if ($ImdsCompute.storageProfile.PSObject.Properties.Name -notcontains 'resourceDisk' -or -not $ImdsCompute.storageProfile.resourceDisk) { return $null }\r\n    if ($ImdsCompute.storageProfile.resourceDisk.PSObject.Properties.Name -notcontains 'size') { return $null }\r\n\r\n    return [int64]$ImdsCompute.storageProfile.resourceDisk.size * 1024\r\n}\r\n\r\n# Fixed, conservative, one-sided capacity tolerance calibrated against\r\n# real ppm-level evidence from the two named v2 VMs (not a Microsoft-\r\n# published value). See Initialize-LimsGuestDataDisks.research.md\r\n# (\"Managed-disk capacity tolerance\") for the exact evidence.\r\n$script:ManagedDiskCapacityToleranceFraction = 0.0001\r\n\r\nfunction Test-ManagedDiskCapacityWithinTolerance {\r\n    <#\r\n        True when ActualBytes is at most NominalBytes, and no more than\r\n        $script:ManagedDiskCapacityToleranceFraction smaller than\r\n        NominalBytes. See the constant's own comment above for the exact\r\n        justification and real-evidence calibration.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [int64] $ActualBytes,\r\n        [Parameter(Mandatory = $true)] [int64] $NominalBytes\r\n    )\r\n    if ($ActualBytes -gt $NominalBytes) { return $false }\r\n    $toleranceBytes = [int64]([math]::Floor([double]$NominalBytes * $script:ManagedDiskCapacityToleranceFraction))\r\n    return ($NominalBytes - $ActualBytes) -le $toleranceBytes\r\n}\r\n\r\n# =============================================================================\r\n# DECISION / PLANNING LOGIC -- plain data objects only, no real cmdlet calls.\r\n# Fully unit-testable on any platform (including Pester on Ubuntu CI).\r\n# =============================================================================\r\n\r\nfunction Get-ApprovedDiskPreparationAllowlist {\r\n        <#\r\n        Independent, fixed, hardcoded allowlist -- single source of truth\r\n        for which subscription/RG/VM/computer/disk/LUN/size/letter/\r\n        label/allocation-unit combination may ever be touched; caller\r\n        parameters and IMDS must EACH independently match it (module\r\n        .DESCRIPTION above).\r\n\r\n        ExpectedOpticalDriveName: an OBSERVED device name on these two\r\n        VMs, used only by Sql to verify E: before moving it.\r\n\r\n        AttestedGuestUniqueId activates the customer-attested binding\r\n        (docs/operations.md) -- ADDITIONAL verification only, never a\r\n        replacement for the resource-ID/LUN checks. Left '' keeps the\r\n        automatic path. Full BINDING PROVENANCE is in\r\n        Initialize-LimsGuestDataDisks.research.md under this heading.\r\n    #>\r\n    return @{\r\n        App = [pscustomobject]@{\r\n            SubscriptionId           = '8ebb26a1-674a-40d1-97f8-e0a237e288a6'\r\n            ResourceGroupName        = 'rg-compute-lims-dev-westeu'\r\n            VmName                   = 'vm-lims-dev-v2-westeu-001'\r\n            ComputerName             = 'lims-dev-v2-001'\r\n            DvdLetterMoveTarget      = ''\r\n            ExpectedOpticalDriveName = ''\r\n            Disks                    = @(\r\n                [pscustomobject]@{\r\n                    Lun                   = 0\r\n                    DiskName              = 'appdata-vm-lims-dev-v2-westeu-001'\r\n                    SizeBytes             = [int64]128 * 1024 * 1024 * 1024\r\n                    DriveLetter           = 'A'\r\n                    FileSystemLabel       = 'LIMS-App'\r\n                    AllocationUnitBytes   = 4096\r\n                                        # Customer-attested binding (App LUN 0) -- see \"BINDING PROVENANCE\" above / research.md.\r\n                    AttestedGuestUniqueId = '60022480D1B07E6ACD98417F86591F4B'\r\n                }\r\n            )\r\n        }\r\n        Sql = [pscustomobject]@{\r\n            SubscriptionId           = '8ebb26a1-674a-40d1-97f8-e0a237e288a6'\r\n            ResourceGroupName        = 'rg-compute-lims-dev-westeu'\r\n            VmName                   = 'vm-lims-dev-v2-westeu-002'\r\n            ComputerName             = 'lims-dev-v2-002'\r\n            DvdLetterMoveTarget      = 'Z'\r\n            ExpectedOpticalDriveName = 'Microsoft Virtual DVD-ROM'\r\n            Disks                    = @(\r\n                [pscustomobject]@{\r\n                    Lun                   = 0\r\n                    DiskName              = 'sqldata-vm-lims-dev-v2-westeu-002'\r\n                    SizeBytes             = [int64]1024 * 1024 * 1024 * 1024\r\n                    DriveLetter           = 'E'\r\n                    FileSystemLabel       = 'SQL-Data'\r\n                    AllocationUnitBytes   = 65536\r\n                                        # Customer-attested binding (Sql LUN 0 / SQL DATA) -- see \"BINDING PROVENANCE\" above / research.md.\r\n                    AttestedGuestUniqueId = '60022480FC5A2FF57B5FE802967E448E'\r\n                }\r\n                [pscustomobject]@{\r\n                    Lun                   = 1\r\n                    DiskName              = 'sqllog-vm-lims-dev-v2-westeu-002'\r\n                    SizeBytes             = [int64]512 * 1024 * 1024 * 1024\r\n                    DriveLetter           = 'F'\r\n                    FileSystemLabel       = 'SQL-Logs'\r\n                    AllocationUnitBytes   = 65536\r\n                                        # Customer-attested binding (Sql LUN 1 / SQL LOG) -- this LUN collides numerically with the temp disk; see \"BINDING PROVENANCE\" above / research.md.\r\n                    AttestedGuestUniqueId = '60022480042D640894BBE41BA513DCFC'\r\n                }\r\n            )\r\n        }\r\n    }\r\n}\r\n\r\nfunction Test-AttestedGuestUniqueIdBindingConfiguration {\r\n        <#\r\n        Pure validation of the customer-attested binding (docs/operations.md).\r\n        ADDITIONAL verification only, never a replacement for\r\n        Resolve-ApprovedDiskTarget's own checks.\r\n\r\n        IsAttestedMode=$true only when EVERY disk carries a non-empty,\r\n        mutually unique AttestedGuestUniqueId (all-or-nothing).\r\n        IsAttestedMode=$false, no error, when NONE do. Any OTHER\r\n        configuration (some but not all, or a duplicate value) is a hard\r\n        error that blocks the whole plan.\r\n    #>\r\n    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Disks)\r\n\r\n    $diskArray = @($Disks)\r\n    $withAttested = @($diskArray | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.AttestedGuestUniqueId) })\r\n\r\n    if ($withAttested.Count -eq 0) {\r\n        return [pscustomobject]@{ IsAttestedMode = $false; Error = $null }\r\n    }\r\n    if ($withAttested.Count -ne $diskArray.Count) {\r\n        return [pscustomobject]@{\r\n            IsAttestedMode = $false\r\n            Error          = \"Inconsistent customer-attested guest UniqueId binding configuration: $($withAttested.Count) of $($diskArray.Count) approved disk(s) carry an AttestedGuestUniqueId; either all or none must be configured for a given target (missing binding).\"\r\n        }\r\n    }\r\n    $dupGroups = @($withAttested | Group-Object { [string]$_.AttestedGuestUniqueId } | Where-Object { $_.Count -gt 1 })\r\n    if ($dupGroups.Count -gt 0) {\r\n        return [pscustomobject]@{\r\n            IsAttestedMode = $false\r\n            Error          = 'Duplicate customer-attested guest UniqueId configured for more than one approved disk on the same target; each attested UniqueId must be unique (duplicate binding).'\r\n        }\r\n    }\r\n\r\n    return [pscustomobject]@{ IsAttestedMode = $true; Error = $null }\r\n}\r\n\r\nfunction Test-TargetIdentityMatchesAllowlist {\r\n    <#\r\n        Returns $null when every caller-supplied value AND the IMDS compute\r\n        identity each independently match the fixed allowlist entry for\r\n        -Target; otherwise returns a non-null error string describing the\r\n        first mismatch found. Never compares caller parameters against IMDS\r\n        directly -- both are compared only against the fixed allowlist.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [string] $Target,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedVmName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedComputerName,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $ExpectedDisks,\r\n        # Mandatory but legitimately '' for App (its allowlist entry's own\r\n        # DvdLetterMoveTarget is empty) -- AllowEmptyString prevents\r\n        # PowerShell's own default Mandatory-parameter-rejects-empty-string\r\n        # behavior from throwing a raw ParameterBindingValidationException\r\n        # on App's normal, valid, non-mutating input.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DvdLetterMoveTarget,\r\n        [Parameter(Mandatory = $true)] $ImdsCompute\r\n    )\r\n\r\n    $allowlist = Get-ApprovedDiskPreparationAllowlist\r\n    if (-not $allowlist.ContainsKey($Target)) {\r\n        return \"Unknown target '$Target'; no fixed allowlist entry exists for it.\"\r\n    }\r\n    $entry = $allowlist[$Target]\r\n\r\n    # 1) Caller-supplied parameters must exactly match the fixed allowlist.\r\n    if ($ExpectedSubscriptionId -ne $entry.SubscriptionId) {\r\n        return \"Caller-supplied subscription ID '$ExpectedSubscriptionId' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n    if ($ExpectedResourceGroupName -ne $entry.ResourceGroupName) {\r\n        return \"Caller-supplied resource group '$ExpectedResourceGroupName' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n    if ($ExpectedVmName -ne $entry.VmName) {\r\n        return \"Caller-supplied VM name '$ExpectedVmName' does not match the fixed allowlist for target '$Target'. Substituting a v1 or any other VM name is rejected here.\"\r\n    }\r\n    if ($ExpectedComputerName -ne $entry.ComputerName) {\r\n        return \"Caller-supplied computer name '$ExpectedComputerName' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n    if ($DvdLetterMoveTarget -ne $entry.DvdLetterMoveTarget) {\r\n        return \"Caller-supplied DVD letter move target '$DvdLetterMoveTarget' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n\r\n    $expectedDiskArray = @($ExpectedDisks)\r\n    $allowlistDiskArray = @($entry.Disks)\r\n    if ($expectedDiskArray.Count -ne $allowlistDiskArray.Count) {\r\n        return \"Caller-supplied disk count ($($expectedDiskArray.Count)) does not match the fixed allowlist for target '$Target' ($($allowlistDiskArray.Count)).\"\r\n    }\r\n    foreach ($callerDisk in $expectedDiskArray) {\r\n        $allowlistDisk = $allowlistDiskArray | Where-Object { [int]$_.Lun -eq [int]$callerDisk.Lun }\r\n        if (-not $allowlistDisk) {\r\n            return \"Caller-supplied LUN $($callerDisk.Lun) is not part of the fixed allowlist for target '$Target'.\"\r\n        }\r\n        if ($allowlistDisk.DiskName -ne [string]$callerDisk.DiskName -or\r\n            [int64]$allowlistDisk.SizeBytes -ne [int64]$callerDisk.SizeBytes -or\r\n            $allowlistDisk.DriveLetter -ne ([string]$callerDisk.DriveLetter).ToUpperInvariant() -or\r\n            $allowlistDisk.FileSystemLabel -ne [string]$callerDisk.FileSystemLabel -or\r\n            [int64]$allowlistDisk.AllocationUnitBytes -ne [int64]$callerDisk.AllocationUnitBytes) {\r\n            return \"Caller-supplied descriptor for LUN $($callerDisk.Lun) does not exactly match the fixed allowlist for target '$Target'.\"\r\n        }\r\n    }\r\n\r\n    # 2) IMDS must INDEPENDENTLY match the same fixed allowlist entry -- not\r\n    #    merely agree with the caller-supplied parameters checked above.\r\n    if ([string]$ImdsCompute.subscriptionId -ne $entry.SubscriptionId) {\r\n        return \"IMDS subscription ID '$($ImdsCompute.subscriptionId)' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n    if ([string]$ImdsCompute.resourceGroupName -ne $entry.ResourceGroupName) {\r\n        return \"IMDS resource group '$($ImdsCompute.resourceGroupName)' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n    if ([string]$ImdsCompute.name -ne $entry.VmName) {\r\n        return \"IMDS VM name '$($ImdsCompute.name)' does not match the fixed allowlist for target '$Target'.\"\r\n    }\r\n\r\n    return $null\r\n}\r\n\r\nfunction Select-NonOsNonTemporaryDiskCandidates {\r\n        <#\r\n        Excludes the OS disk (IsBoot/IsSystem) and the Azure temp disk\r\n        from the candidate pool used to resolve data disks by LUN. The\r\n        temp disk is unmanaged and absent from IMDS's data-disk list;\r\n        identified by matching IMDS's reported temp-disk size against\r\n        each candidate's Get-Disk.Size -- never a topology guess. Any\r\n        ambiguity, or missing resourceDisk.size, or a nonzero size\r\n        matching zero candidates (DEFECT FIX), fails closed -- see\r\n        -SkipTemporaryDiskExclusion below for the attested-binding path.\r\n        Full evidence: Initialize-LimsGuestDataDisks.research.md.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDiskInventory,\r\n        # $null is valid here (not [int64]) -- \"IMDS did not report it\".\r\n        [Parameter(Mandatory = $true)] [AllowNull()] $ImdsResourceDiskSizeBytes,\r\n        # Customer-attested binding opt-in -- see\r\n        # Test-AttestedGuestUniqueIdBindingConfiguration. Always $false\r\n        # unless the caller already confirmed a valid attested binding.\r\n        [Parameter(Mandatory = $false)] [bool] $SkipTemporaryDiskExclusion = $false\r\n    )\r\n\r\n    $osDisks = @($GuestDiskInventory | Where-Object { $_.IsBoot -or $_.IsSystem })\r\n    if ($osDisks.Count -ne 1) {\r\n        return [pscustomobject]@{\r\n            Candidates = @()\r\n            Error      = \"Expected exactly one boot/system Windows disk, found $($osDisks.Count); refusing to proceed without an unambiguous OS disk to exclude.\"\r\n        }\r\n    }\r\n\r\n    $nonOsDisks = @($GuestDiskInventory | Where-Object { -not ($_.IsBoot -or $_.IsSystem) })\r\n\r\n    $invalidScsiDisks = @($nonOsDisks | Where-Object {\r\n            [int]$_.ScsiBus -lt 0 -or [int]$_.ScsiPort -lt 0 -or [int]$_.ScsiTargetId -lt 0 -or [int]$_.ScsiLogicalUnit -lt 0\r\n        })\r\n    if ($invalidScsiDisks.Count -gt 0) {\r\n        $invalidNumbers = ($invalidScsiDisks | ForEach-Object { $_.Number }) -join ', '\r\n        return [pscustomobject]@{\r\n            Candidates = @()\r\n            Error      = \"Windows disk(s) $invalidNumbers reported missing or invalid SCSI addressing; cannot establish an Azure LUN mapping for them, so no disk is treated as a data-disk candidate until this is understood.\"\r\n        }\r\n    }\r\n\r\n    if ($SkipTemporaryDiskExclusion) {\r\n        return [pscustomobject]@{\r\n            Candidates = $nonOsDisks\r\n            Error      = $null\r\n        }\r\n    }\r\n\r\n    if ($null -eq $ImdsResourceDiskSizeBytes) {\r\n        return [pscustomobject]@{\r\n            Candidates = @()\r\n            Error      = 'IMDS did not report compute.storageProfile.resourceDisk.size; cannot positively establish whether a temporary/resource disk is present to exclude it.'\r\n        }\r\n    }\r\n    if ([int64]$ImdsResourceDiskSizeBytes -lt 0) {\r\n        # A negative value is contradictory/malformed metadata, never\r\n        # IMDS's own documented \"no temp disk\" value (which is exactly\r\n        # zero -- see Get-ImdsResourceDiskSizeBytes's own comment). Must\r\n        # be a hard failure, not silently treated as \"no temporary disk\r\n        # to exclude.\"\r\n        return [pscustomobject]@{\r\n            Candidates = @()\r\n            Error      = \"IMDS reported a negative compute.storageProfile.resourceDisk.size-derived byte count ($ImdsResourceDiskSizeBytes bytes); this is contradictory metadata, not a valid 'no temporary disk' value (which is documented as exactly zero), so no disk is treated as a safe data-disk candidate until this is understood.\"\r\n        }\r\n    }\r\n\r\n    $temporaryDisks = @()\r\n    if ([int64]$ImdsResourceDiskSizeBytes -gt 0) {\r\n        # Up to 64 MiB tolerance for the usual kB/geometry rounding between\r\n        # IMDS's reported size and Get-Disk's own figure.\r\n        $temporaryDisks = @($nonOsDisks | Where-Object { [math]::Abs([int64]$_.SizeBytes - [int64]$ImdsResourceDiskSizeBytes) -le 67108864 })\r\n        if ($temporaryDisks.Count -eq 0) {\r\n            return [pscustomobject]@{\r\n                Candidates = @()\r\n                Error      = \"IMDS reports a nonzero temporary disk size ($ImdsResourceDiskSizeBytes bytes) but no non-OS Windows disk's reported size matches it; cannot positively identify and exclude the temporary disk, so no disk is treated as a safe data-disk candidate until this is resolved (see docs/operations.md's customer-attested-binding proposal and Get-LimsGuestDiskDiagnostics.ps1 for the read-only evidence needed to review it).\"\r\n            }\r\n        }\r\n        if ($temporaryDisks.Count -gt 1) {\r\n            return [pscustomobject]@{\r\n                Candidates = @()\r\n                Error      = \"More than one non-OS Windows disk's reported size matches Azure's own reported temporary disk size ($ImdsResourceDiskSizeBytes bytes); cannot unambiguously identify the temporary disk to exclude it.\"\r\n            }\r\n        }\r\n    }\r\n\r\n    $candidates = @($nonOsDisks | Where-Object { $temporaryDisks -notcontains $_ })\r\n\r\n    return [pscustomobject]@{\r\n        Candidates = $candidates\r\n        Error      = $null\r\n    }\r\n}\r\n\r\nfunction Resolve-ApprovedDiskTarget {\r\n        <#\r\n        Resolves one approved disk descriptor to a Windows disk,\r\n        validating: IMDS LUN match, managed-disk resource ID, capacity,\r\n        candidate-guest-disk match, non-boot/non-system, operational\r\n        state, and a captured UniqueId. Returns .Target or .Error --\r\n        never throws, so callers collect every error before Blocking.\r\n\r\n        -AttestedGuestUniqueId ('' default): when non-empty, the guest\r\n        disk at the approved LUN must ALSO carry this exact UniqueId.\r\n        ADDITIONAL verification only -- never by itself proof of the\r\n        Azure relationship.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] $ExpectedDisk,\r\n        # Legitimately empty on a misconfigured VM with fewer disks than\r\n        # expected -- yields this function's own clean \"0 found\" error.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $ImdsDataDisks,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $CandidateGuestDisks,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $AttestedGuestUniqueId = ''\r\n    )\r\n\r\n    $lun = [int]$ExpectedDisk.Lun\r\n\r\n    $imdsMatches = @($ImdsDataDisks | Where-Object { [int]$_.lun -eq $lun })\r\n    if ($imdsMatches.Count -ne 1) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun does not resolve to exactly one IMDS data disk ($($imdsMatches.Count) found).\" }\r\n    }\r\n    $imdsDisk = $imdsMatches[0]\r\n\r\n    if ([string]$imdsDisk.name -ne [string]$ExpectedDisk.DiskName) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun managed-disk name mismatch: IMDS reports '$($imdsDisk.name)', expected '$($ExpectedDisk.DiskName)'.\" }\r\n    }\r\n\r\n        # Exact full managed-disk resource ID equality -- deliberately NOT\r\n    # StartsWith(prefix) + EndsWith(diskName) (a prior version used that\r\n    # combination, which could wrongly accept an ID with an intervening,\r\n    # unexpected path segment). See Initialize-LimsGuestDataDisks.research.md\r\n    # under this function's own heading for the exact defect example.\r\n    $expectedManagedDiskId = \"/subscriptions/$ExpectedSubscriptionId/resourceGroups/$ExpectedResourceGroupName/providers/Microsoft.Compute/disks/$($ExpectedDisk.DiskName)\"\r\n    $actualManagedDiskId = [string]$imdsDisk.managedDisk.id\r\n    if ([string]::IsNullOrWhiteSpace($actualManagedDiskId) -or\r\n        -not [string]::Equals($actualManagedDiskId, $expectedManagedDiskId, [System.StringComparison]::OrdinalIgnoreCase)) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun managed-disk resource ID '$actualManagedDiskId' does not exactly match the expected resource ID '$expectedManagedDiskId'.\" }\r\n    }\r\n\r\n    $imdsSizeBytes = $null\r\n    if ($imdsDisk.PSObject.Properties.Name -contains 'diskCapacityBytes' -and $imdsDisk.diskCapacityBytes) {\r\n        $imdsSizeBytes = [int64]$imdsDisk.diskCapacityBytes\r\n    }\r\n    elseif ($imdsDisk.PSObject.Properties.Name -contains 'diskSizeGB' -and $imdsDisk.diskSizeGB) {\r\n        $imdsSizeBytes = [int64]$imdsDisk.diskSizeGB * 1024 * 1024 * 1024\r\n    }\r\n    $expectedSizeBytes = [int64]$ExpectedDisk.SizeBytes\r\n    if (-not $imdsSizeBytes -or -not (Test-ManagedDiskCapacityWithinTolerance -ActualBytes $imdsSizeBytes -NominalBytes $expectedSizeBytes)) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun capacity mismatch: IMDS reports approximately $imdsSizeBytes bytes, expected $expectedSizeBytes bytes (outside the documented, evidence-calibrated tolerance -- see Test-ManagedDiskCapacityWithinTolerance).\" }\r\n    }\r\n\r\n    if ([string]::IsNullOrWhiteSpace($AttestedGuestUniqueId)) {\r\n        $guestMatches = @($CandidateGuestDisks | Where-Object { [int]$_.ScsiLogicalUnit -eq $lun })\r\n        if ($guestMatches.Count -ne 1) {\r\n            return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolves to $($guestMatches.Count) non-OS/non-temporary Windows disk device(s) after exclusion; an unambiguous one-to-one mapping is required.\" }\r\n        }\r\n    }\r\n    else {\r\n                # Customer-attested guest-disk-UniqueId binding mode (see this\r\n        # function's own .DESCRIPTION/-AttestedGuestUniqueId comment\r\n        # above): the guest LUN match AND the attested UniqueId must BOTH\r\n        # agree on the same disk.\r\n        $guestMatches = @($CandidateGuestDisks | Where-Object { [int]$_.ScsiLogicalUnit -eq $lun -and [string]$_.UniqueId -eq $AttestedGuestUniqueId })\r\n        if ($guestMatches.Count -ne 1) {\r\n            return [pscustomobject]@{ Target = $null; Error = \"LUN $lun with a customer-attested guest UniqueId configured resolves to $($guestMatches.Count) Windows disk device(s) matching both that LUN and that UniqueId; refusing to proceed without an unambiguous attested-identity match.\" }\r\n        }\r\n    }\r\n    $guestDisk = $guestMatches[0]\r\n\r\n    if ($guestDisk.IsBoot -or $guestDisk.IsSystem) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), which is flagged boot and/or system; refusing to proceed.\" }\r\n    }\r\n    if ($guestDisk.IsOffline) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), which is offline; refusing to proceed.\" }\r\n    }\r\n    if ($guestDisk.IsReadOnly) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), which is read-only; refusing to proceed.\" }\r\n    }\r\n    if ([string]$guestDisk.OperationalStatus -ne 'Online') {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), whose operational status is '$($guestDisk.OperationalStatus)' (expected 'Online'); refusing to proceed.\" }\r\n    }\r\n    if (-not (Test-ManagedDiskCapacityWithinTolerance -ActualBytes ([int64]$guestDisk.SizeBytes) -NominalBytes $expectedSizeBytes)) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), whose reported size ($($guestDisk.SizeBytes) bytes) does not match the expected $expectedSizeBytes bytes (outside the documented, evidence-calibrated tolerance -- see Test-ManagedDiskCapacityWithinTolerance).\" }\r\n    }\r\n    if ([string]::IsNullOrWhiteSpace([string]$guestDisk.UniqueId)) {\r\n        return [pscustomobject]@{ Target = $null; Error = \"LUN $lun resolved to Windows disk $($guestDisk.Number), which reported no stable UniqueId; refusing to proceed without one to re-validate against immediately before mutation.\" }\r\n    }\r\n\r\n    return [pscustomobject]@{\r\n        Target = [pscustomobject]@{\r\n            Lun                 = $lun\r\n            DiskNumber          = [int]$guestDisk.Number\r\n            DiskUniqueId        = [string]$guestDisk.UniqueId\r\n            DiskName            = [string]$ExpectedDisk.DiskName\r\n            SizeBytes           = $expectedSizeBytes\r\n            DriveLetter         = ([string]$ExpectedDisk.DriveLetter).ToUpperInvariant()\r\n            FileSystemLabel     = [string]$ExpectedDisk.FileSystemLabel\r\n            AllocationUnitBytes = [int64]$ExpectedDisk.AllocationUnitBytes\r\n            IsOffline           = [bool]$guestDisk.IsOffline\r\n            IsReadOnly          = [bool]$guestDisk.IsReadOnly\r\n            OperationalStatus   = [string]$guestDisk.OperationalStatus\r\n        }\r\n        Error  = $null\r\n    }\r\n}\r\n\r\nfunction Get-DiskPreparationPlan {\r\n        <#\r\n        Decides Initialize (RAW, zero partitions, suitable state), NoOp\r\n        (GPT, already matching the intended layout exactly -- left\r\n        untouched even if it already holds files), or Fail (anything\r\n        else). Never mutates anything.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] $Target,\r\n        [Parameter(Mandatory = $true)] $GuestDisk,\r\n        # A RAW disk with zero partitions -- the normal, expected,\r\n        # not-yet-initialized state -- legitimately passes an empty array\r\n        # here; AllowEmptyCollection prevents that valid, common input from\r\n        # throwing a raw ParameterBindingValidationException.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Partitions,\r\n        [Parameter(Mandatory = $false)] $Volume\r\n    )\r\n\r\n    $dataPartitions = @($Partitions | Where-Object { -not (Test-IsMsrPartition $_) })\r\n\r\n    if ($GuestDisk.PartitionStyle -eq 'RAW') {\r\n        if (@($Partitions).Count -gt 0) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Windows disk $($Target.DiskNumber) reports PartitionStyle RAW but already has $(@($Partitions).Count) partition(s); inconsistent state, refusing to proceed.\" }\r\n        }\r\n        return [pscustomobject]@{ Action = 'Initialize'; Reason = $null }\r\n    }\r\n\r\n    if ($GuestDisk.PartitionStyle -eq 'GPT') {\r\n        if ($dataPartitions.Count -eq 0) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) is already GPT-initialized but has no data partition -- an ambiguous partial-completion state; stopping for manual review rather than resuming automatically.\" }\r\n        }\r\n        if ($dataPartitions.Count -gt 1) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) has $($dataPartitions.Count) non-reserved partitions; the expected single-data-partition layout was not found, refusing to proceed.\" }\r\n        }\r\n\r\n        $dataPartition = $dataPartitions[0]\r\n\r\n        # Exact GPT Basic Data Partition type -- never the friendly `Type`\r\n        # string. https://learn.microsoft.com/en-us/windows-hardware/drivers/storage/msft-partition\r\n        $actualGptType = [string]$dataPartition.GptType\r\n        if ([string]::IsNullOrWhiteSpace($actualGptType) -or $actualGptType.ToLowerInvariant() -ne $script:BasicDataPartitionGptType.ToLowerInvariant()) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition has unexpected GPT type '$actualGptType' (expected the Basic Data Partition type $($script:BasicDataPartitionGptType)).\" }\r\n        }\r\n        if ([math]::Abs([int64]$dataPartition.SizeBytes - [int64]$Target.SizeBytes) -gt 67108864) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition size ($($dataPartition.SizeBytes) bytes) does not match the expected disk capacity ($($Target.SizeBytes) bytes); undersized or oversized layout.\" }\r\n        }\r\n\r\n        # Mount-path shape: only the approved drive-letter root and,\r\n        # once formatted, exactly one volume-GUID access path\r\n        # (https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume)\r\n        # are ever accepted -- never an additional directory mount, and\r\n        # never more than one GUID path (which would itself be ambiguous).\r\n        $expectedAccessPath = \"$($Target.DriveLetter):\\\"\r\n        $accessPaths = @($dataPartition.AccessPaths)\r\n        $driveRootPaths = @($accessPaths | Where-Object { $_ -eq $expectedAccessPath })\r\n        $volumeGuidPaths = @($accessPaths | Where-Object { $_ -match $script:VolumeGuidPathPattern })\r\n        $otherPaths = @($accessPaths | Where-Object { $_ -and $_ -ne $expectedAccessPath -and $_ -notmatch $script:VolumeGuidPathPattern })\r\n        if ($otherPaths.Count -gt 0) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition has unexpected mount path(s): $($otherPaths -join ', ').\" }\r\n        }\r\n        if ($driveRootPaths.Count -ne 1) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition does not have exactly one mount at the approved drive root ${expectedAccessPath} (found $($driveRootPaths.Count)).\" }\r\n        }\r\n        if ($volumeGuidPaths.Count -gt 1) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition reports more than one volume GUID access path; ambiguous volume association.\" }\r\n        }\r\n\r\n        if (-not $Volume) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) has a data partition but no formatted volume -- an ambiguous partial-completion state; stopping for manual review.\" }\r\n        }\r\n\r\n        # The partition's own volume-GUID access path must be exactly this\r\n        # correlated volume's own Path (Get-Volume's Path property is\r\n        # exactly the same GUID-path string -- this is what proves the\r\n        # correlation is this partition's OWN verified volume, never a\r\n        # foreign volume's GUID path, and never simply absent once\r\n        # formatted).\r\n        if ($volumeGuidPaths.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$Volume.Path) -or $volumeGuidPaths[0] -ne [string]$Volume.Path) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition's access paths do not include this volume's own verified GUID path; refusing to proceed.\" }\r\n        }\r\n\r\n        $currentDriveLetter = if ($dataPartition.DriveLetter) { [string]$dataPartition.DriveLetter } else { '' }\r\n        $volumeDriveLetter = if ($Volume.DriveLetter) { [string]$Volume.DriveLetter } else { '' }\r\n        if ($volumeDriveLetter -and $currentDriveLetter -and $volumeDriveLetter.ToUpperInvariant() -ne $currentDriveLetter.ToUpperInvariant()) {\r\n            return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) data partition reports drive letter '$currentDriveLetter' but its correlated volume reports a different drive letter '$volumeDriveLetter'; conflicting letters.\" }\r\n        }\r\n\r\n        $matchesIntendedLayout = (\r\n            $currentDriveLetter.ToUpperInvariant() -eq $Target.DriveLetter -and\r\n            $Volume.FileSystem -eq 'NTFS' -and\r\n            $Volume.FileSystemLabel -eq $Target.FileSystemLabel -and\r\n            [int64]$Volume.AllocationUnitSize -eq [int64]$Target.AllocationUnitBytes\r\n        )\r\n        if ($matchesIntendedLayout) {\r\n            return [pscustomobject]@{ Action = 'NoOp'; Reason = $null }\r\n        }\r\n        return [pscustomobject]@{\r\n            Action = 'Fail'\r\n            Reason = (\"Disk $($Target.DiskNumber) is already initialized/formatted but does not match the intended layout \" +\r\n                \"(letter='$currentDriveLetter', fileSystem='$($Volume.FileSystem)', label='$($Volume.FileSystemLabel)', allocationUnitSize=$($Volume.AllocationUnitSize)); \" +\r\n                'refusing to repair or reformat automatically.')\r\n        }\r\n    }\r\n\r\n    return [pscustomobject]@{ Action = 'Fail'; Reason = \"Disk $($Target.DiskNumber) has unexpected PartitionStyle '$($GuestDisk.PartitionStyle)'; refusing to proceed.\" }\r\n}\r\n\r\nfunction Get-DvdPreparationPlan {\r\n        <#\r\n        SQL-only DVD-ROM letter-move decision: Move, AlreadyCorrect/\r\n        NoneRequired, or Fail (module .DESCRIPTION point 7). Requires an\r\n        unambiguous Win32_CDROMDrive at E: with the exact expected Name\r\n        and MediaLoaded=$false (unknown never treated as false),\r\n        correlated 1:1 with one CD-ROM Win32_Volume -- a mere empty\r\n        volume label is never sufficient.\r\n    #>\r\n    param(\r\n        # Legitimately '' for App -- see Test-TargetIdentityMatchesAllowlist's\r\n        # DvdLetterMoveTarget parameter comment above for why AllowEmptyString\r\n        # is required here.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DvdLetterMoveTarget,\r\n        [Parameter(Mandatory = $true)] [string] $EDataDiskPlanAction,\r\n        # Legitimately '' for App (its allowlist entry's ExpectedOpticalDriveName\r\n        # is always empty, since App never touches any DVD-ROM).\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $ExpectedOpticalDriveName,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $EOpticalDrives,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $EDvdVolumes,\r\n        [Parameter(Mandatory = $true)] [bool] $DestinationOccupied\r\n    )\r\n\r\n    if ([string]::IsNullOrWhiteSpace($DvdLetterMoveTarget)) {\r\n        return [pscustomobject]@{ Action = 'NoneRequired'; Reason = $null; DeviceId = $null }\r\n    }\r\n\r\n    # If the approved E: target already matches its intended layout exactly\r\n    # (NoOp), E: already belongs to the correctly prepared SQL DATA volume --\r\n    # never attempt a DVD move, and never fail merely because E: is not a\r\n    # DVD-ROM in that case. E: is never even inspected for DVD-ness here.\r\n    if ($EDataDiskPlanAction -eq 'NoOp') {\r\n        return [pscustomobject]@{ Action = 'AlreadyCorrect'; Reason = $null; DeviceId = $null }\r\n    }\r\n\r\n    $driveCount = @($EOpticalDrives).Count\r\n    $volumeCount = @($EDvdVolumes).Count\r\n\r\n    if ($driveCount -eq 0 -and $volumeCount -eq 0) {\r\n        return [pscustomobject]@{ Action = 'NoneRequired'; Reason = $null; DeviceId = $null }\r\n    }\r\n    if ($driveCount -ne 1 -or $volumeCount -ne 1) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = \"Expected exactly one optical device and one DVD-ROM volume at E:, found $driveCount device(s) and $volumeCount volume(s); cannot unambiguously verify E: before moving it.\"; DeviceId = $null }\r\n    }\r\n\r\n    $drive = $EOpticalDrives[0]\r\n    $volume = $EDvdVolumes[0]\r\n\r\n    if ([string]$drive.Name -ne $ExpectedOpticalDriveName) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = \"Optical device at E: reports name '$($drive.Name)', expected '$ExpectedOpticalDriveName'; refusing to move an unverified device.\"; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n    if ($null -eq $drive.MediaLoaded) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = 'Could not determine whether media is loaded in the optical device at E: (MediaLoaded reported unknown); refusing to proceed.'; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n    if ([bool]$drive.MediaLoaded) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = 'Optical device at E: reports media loaded; refusing to move it.'; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n    if ([int]$volume.DriveType -ne 5) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = \"Volume at E: is not a CD-ROM-type volume (DriveType=$($volume.DriveType)).\"; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n    if ($volume.Label -and $volume.Label.Trim().Length -gt 0) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = \"Optical device at E: reports MediaLoaded=`$false but its volume has a non-empty label ('$($volume.Label)'); inconsistent state, refusing to proceed.\"; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n    if ($DestinationOccupied) {\r\n        return [pscustomobject]@{ Action = 'Fail'; Reason = \"Target drive letter ${DvdLetterMoveTarget}: is already in use; refusing to move the DVD-ROM there.\"; DeviceId = [string]$drive.DeviceId }\r\n    }\r\n\r\n    return [pscustomobject]@{ Action = 'Move'; Reason = $null; DeviceId = [string]$drive.DeviceId }\r\n}\r\n\r\nfunction Test-DestinationLetterOccupied {\r\n        <#\r\n        Checks whether a candidate destination letter is already occupied,\r\n        across EVERY relevant inventory -- optical devices, DVD volumes,\r\n        ordinary volumes, and partitions -- so neither \"another DVD is\r\n        already there\" nor \"an unrelated volume/partition is already\r\n        there\" can be missed by checking only one source.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [string] $Letter,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $OpticalDrives,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $DvdVolumes,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Volumes,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Partitions\r\n    )\r\n\r\n    $letterUpper = $Letter.ToUpperInvariant()\r\n\r\n    if (@($OpticalDrives | Where-Object { $_.Drive -and $_.Drive.ToString().ToUpperInvariant() -eq \"${letterUpper}:\" }).Count -gt 0) { return $true }\r\n    if (@($DvdVolumes | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToString().ToUpperInvariant() -eq \"${letterUpper}:\" }).Count -gt 0) { return $true }\r\n    if (@($Volumes | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToString().ToUpperInvariant() -eq $letterUpper }).Count -gt 0) { return $true }\r\n    if (@($Partitions | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToString().ToUpperInvariant() -eq $letterUpper }).Count -gt 0) { return $true }\r\n\r\n    return $false\r\n}\r\n\r\nfunction Test-DiskReadyForInitializeStage {\r\n        <#\r\n        Pure shape assertion for the IMMEDIATE pre-Initialize-Disk recheck\r\n        (see Assert-DiskReadyForDestructiveStage): the freshly re-resolved\r\n        disk must still be RAW, zero partitions, suitable state, and the\r\n        approved drive letter must still be free guest-wide. Returns $null\r\n        when ready, or a reason string when not.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $false)] $GuestDisk,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Partitions,\r\n        [Parameter(Mandatory = $true)] $Target,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $AllGuestPartitions\r\n    )\r\n\r\n    if (-not $GuestDisk) { return \"Windows disk $($Target.DiskNumber) could no longer be found.\" }\r\n    if ($GuestDisk.IsBoot -or $GuestDisk.IsSystem) { return \"Windows disk $($Target.DiskNumber) is now flagged boot and/or system.\" }\r\n    if ($GuestDisk.IsOffline) { return \"Windows disk $($Target.DiskNumber) is offline.\" }\r\n    if ($GuestDisk.IsReadOnly) { return \"Windows disk $($Target.DiskNumber) is read-only.\" }\r\n    if ([string]$GuestDisk.OperationalStatus -ne 'Online') { return \"Windows disk $($Target.DiskNumber) operational status is '$($GuestDisk.OperationalStatus)', expected 'Online'.\" }\r\n    if ($GuestDisk.PartitionStyle -ne 'RAW') { return \"Windows disk $($Target.DiskNumber) is no longer RAW (reports '$($GuestDisk.PartitionStyle)').\" }\r\n    if (@($Partitions).Count -gt 0) { return \"Windows disk $($Target.DiskNumber) now reports $(@($Partitions).Count) partition(s); expected none immediately before initialization.\" }\r\n\r\n    $conflict = @($AllGuestPartitions | Where-Object {\r\n            $_.DriveLetter -and $_.DriveLetter.ToString().ToUpperInvariant() -eq $Target.DriveLetter -and $_.DiskNumber -ne $Target.DiskNumber\r\n        })\r\n    if ($conflict.Count -gt 0) { return \"Drive letter $($Target.DriveLetter): is now in use by a different Windows disk.\" }\r\n\r\n    return $null\r\n}\r\n\r\nfunction Test-DiskReadyForNewPartitionStage {\r\n        <#\r\n        Pure shape assertion for the IMMEDIATE pre-New-Partition recheck:\r\n        the disk must now show exactly the expected post-initialization\r\n        state (GPT, suitable state, only the Windows-generated MSR\r\n        partition, no data partition yet) -- this EXPECTED transition\r\n        caused by this same invocation's own prior Initialize-Disk call is\r\n        recognized as correct; any OTHER partition already present is\r\n        always unexpected. Returns $null when ready, or a reason string\r\n        when not.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $false)] $GuestDisk,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Partitions\r\n    )\r\n\r\n    if (-not $GuestDisk) { return 'The Windows disk could no longer be found.' }\r\n    if ($GuestDisk.IsOffline) { return \"Disk $($GuestDisk.Number) is offline.\" }\r\n    if ($GuestDisk.IsReadOnly) { return \"Disk $($GuestDisk.Number) is read-only.\" }\r\n    if ([string]$GuestDisk.OperationalStatus -ne 'Online') { return \"Disk $($GuestDisk.Number) operational status is '$($GuestDisk.OperationalStatus)', expected 'Online'.\" }\r\n    if ($GuestDisk.PartitionStyle -ne 'GPT') { return \"Disk $($GuestDisk.Number) is not GPT immediately after initialization (reports '$($GuestDisk.PartitionStyle)').\" }\r\n\r\n    $nonMsr = @($Partitions | Where-Object { -not (Test-IsMsrPartition $_) })\r\n    if ($nonMsr.Count -gt 0) {\r\n        return \"Disk $($GuestDisk.Number) already has $($nonMsr.Count) non-reserved partition(s) immediately after initialization; expected only the Windows-generated MSR partition.\"\r\n    }\r\n    $msrCount = @($Partitions | Where-Object { Test-IsMsrPartition $_ }).Count\r\n    if ($msrCount -ne 1) {\r\n        return \"Disk $($GuestDisk.Number) reports $msrCount Microsoft Reserved partition(s) immediately after initialization; expected exactly one.\"\r\n    }\r\n\r\n    return $null\r\n}\r\n\r\nfunction Test-PartitionReadyForFormatStage {\r\n        <#\r\n        Pure shape assertion for the IMMEDIATE pre-Format-Volume recheck:\r\n        the same disk identity must now show exactly the newly created\r\n        data partition -- same partition number, exact Basic Data GPT\r\n        type, matching size, and the approved drive letter -- with no\r\n        filesystem already present. Returns $null when ready, or a reason\r\n        string when not.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Partitions,\r\n        [Parameter(Mandatory = $true)] $Target,\r\n        [Parameter(Mandatory = $true)] [int] $NewPartitionNumber,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $Volumes\r\n    )\r\n\r\n    $dataPartitions = @($Partitions | Where-Object { -not (Test-IsMsrPartition $_) })\r\n    if ($dataPartitions.Count -ne 1) {\r\n        return \"Expected exactly one newly created data partition immediately before formatting, found $($dataPartitions.Count).\"\r\n    }\r\n    $partition = $dataPartitions[0]\r\n    if ($partition.PartitionNumber -ne $NewPartitionNumber) {\r\n        return \"The data partition's number ($($partition.PartitionNumber)) no longer matches the partition just created (#$NewPartitionNumber).\"\r\n    }\r\n    $actualGptType = [string]$partition.GptType\r\n    if ([string]::IsNullOrWhiteSpace($actualGptType) -or $actualGptType.ToLowerInvariant() -ne $script:BasicDataPartitionGptType.ToLowerInvariant()) {\r\n        return \"The newly created partition reports unexpected GPT type '$actualGptType' immediately before formatting.\"\r\n    }\r\n    if ([math]::Abs([int64]$partition.SizeBytes - [int64]$Target.SizeBytes) -gt 67108864) {\r\n        return \"The newly created partition's size ($($partition.SizeBytes) bytes) does not match the expected disk capacity ($($Target.SizeBytes) bytes).\"\r\n    }\r\n    $currentLetter = if ($partition.DriveLetter) { [string]$partition.DriveLetter } else { '' }\r\n    if ($currentLetter.ToUpperInvariant() -ne $Target.DriveLetter) {\r\n        return \"The newly created partition's drive letter ('$currentLetter') no longer matches the approved target ('$($Target.DriveLetter)').\"\r\n    }\r\n\r\n    $existingVolume = $Volumes | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToString().ToUpperInvariant() -eq $Target.DriveLetter } | Select-Object -First 1\r\n    if ($existingVolume -and -not [string]::IsNullOrWhiteSpace([string]$existingVolume.FileSystem)) {\r\n        return \"A filesystem ('$($existingVolume.FileSystem)') unexpectedly already appears on drive $($Target.DriveLetter): immediately before formatting; refusing to format over unexpected existing state.\"\r\n    }\r\n\r\n    return $null\r\n}\r\n\r\nfunction Get-GuestDiskPreparationPlan {\r\n        <#\r\n        Builds one complete, read-only plan: allowlist/identity checks,\r\n        OS/temporary disk exclusion, per-disk resolution + preparation\r\n        plan, a drive-letter conflict preflight, and (SQL) the DVD plan.\r\n        Never mutates. Used for -Mode Validate and as the mandatory,\r\n        fresh, immediately-pre-mutation re-validation inside Apply.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [string] $Target,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedVmName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedComputerName,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $ExpectedDisks,\r\n        # Legitimately '' for App -- see Test-TargetIdentityMatchesAllowlist's\r\n        # DvdLetterMoveTarget parameter comment above.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DvdLetterMoveTarget,\r\n        [Parameter(Mandatory = $true)] $ImdsCompute,\r\n        [Parameter(Mandatory = $true)] [string] $ActualComputerName,\r\n        # All inventories legitimately empty on a freshly provisioned guest\r\n        # (e.g. zero partitions/volumes before any disk is prepared, or no\r\n        # DVD-ROM/optical device attached at all) -- AllowEmptyCollection\r\n        # prevents those valid states from throwing a raw\r\n        # ParameterBindingValidationException instead of flowing through\r\n        # this function's own decision logic.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDiskInventory,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestPartitionInventory,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestVolumeInventory,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDvdVolumeInventory,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestOpticalDriveInventory\r\n    )\r\n\r\n    $blockingErrors = @()\r\n    $dvdPlan = [pscustomobject]@{ Action = 'NoneRequired'; Reason = $null; DeviceId = $null }\r\n\r\n    $allowlist = Get-ApprovedDiskPreparationAllowlist\r\n    if (-not $allowlist.ContainsKey($Target)) {\r\n        return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = @(\"Unknown target '$Target'.\"); DiskPlans = @(); DvdPlan = $dvdPlan }\r\n    }\r\n    $allowlistEntry = $allowlist[$Target]\r\n\r\n    # Validate the OPTIONAL, disabled-by-default customer-attested\r\n    # guest-disk-UniqueId binding configuration for this target BEFORE any\r\n    # guest/IMDS query -- an inconsistent (mixed or duplicate) hardcoded\r\n    # allowlist configuration is a static defect in the allowlist itself,\r\n    # independent of any caller/guest state, and blocks exactly like any\r\n    # other allowlist-agreement failure.\r\n    $attestedBindingConfig = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $allowlistEntry.Disks\r\n    if ($attestedBindingConfig.Error) {\r\n        return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = @($attestedBindingConfig.Error); DiskPlans = @(); DvdPlan = $dvdPlan }\r\n    }\r\n\r\n    $allowlistAgreementError = Test-TargetIdentityMatchesAllowlist -Target $Target `\r\n        -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n        -ExpectedVmName $ExpectedVmName -ExpectedComputerName $ExpectedComputerName `\r\n        -ExpectedDisks $ExpectedDisks -DvdLetterMoveTarget $DvdLetterMoveTarget -ImdsCompute $ImdsCompute\r\n    if ($allowlistAgreementError) { $blockingErrors += $allowlistAgreementError }\r\n\r\n    if ($ActualComputerName -ne $allowlistEntry.ComputerName) {\r\n        $blockingErrors += \"Actual Windows computer name '$ActualComputerName' does not match the fixed allowlist for target '$Target' ('$($allowlistEntry.ComputerName)').\"\r\n    }\r\n\r\n    if ($blockingErrors.Count -gt 0) {\r\n        # Identity could not be established -- do not attempt disk\r\n        # correlation at all.\r\n        return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = $blockingErrors; DiskPlans = @(); DvdPlan = $dvdPlan }\r\n    }\r\n\r\n    $imdsResourceDiskSizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $ImdsCompute\r\n    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $GuestDiskInventory `\r\n        -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes -SkipTemporaryDiskExclusion $attestedBindingConfig.IsAttestedMode\r\n    if ($candidateResult.Error) {\r\n        $blockingErrors += $candidateResult.Error\r\n        return [pscustomobject]@{ Target = $Target; Blocked = $true; Errors = $blockingErrors; DiskPlans = @(); DvdPlan = $dvdPlan }\r\n    }\r\n\r\n    $imdsDataDisks = @()\r\n    if ($ImdsCompute.storageProfile -and $ImdsCompute.storageProfile.dataDisks) {\r\n        $imdsDataDisks = @($ImdsCompute.storageProfile.dataDisks)\r\n    }\r\n    $imdsLunGroups = @($imdsDataDisks | Group-Object { [int]$_.lun })\r\n    foreach ($g in $imdsLunGroups) {\r\n        if ($g.Count -gt 1) { $blockingErrors += \"IMDS reports more than one data disk at LUN $($g.Name); cannot establish an unambiguous mapping.\" }\r\n    }\r\n\r\n    # Each resolved entry pairs the resolved Target with its own original\r\n    # ExpectedDisk descriptor, so the exact approved descriptor can be\r\n    # re-resolved fresh, independently, immediately before each destructive\r\n    # step later (see Assert-DiskReadyForDestructiveStage) -- never reusing\r\n    # this snapshot's own resolution as authorization.\r\n    $resolvedEntries = @()\r\n    $diskPlans = @()\r\n    if ($blockingErrors.Count -eq 0) {\r\n        foreach ($expectedDisk in $ExpectedDisks) {\r\n            # Looked up from the fixed ALLOWLIST's own Disks (never from\r\n            # caller-supplied $ExpectedDisks, which carries no\r\n            # AttestedGuestUniqueId field at all by design) -- the\r\n            # attested binding is a deliberate, hardcoded, reviewed\r\n            # code-level opt-in, never something a caller/Bicep parameter\r\n            # can supply or influence.\r\n            $allowlistDiskForLun = $allowlistEntry.Disks | Where-Object { [int]$_.Lun -eq [int]$expectedDisk.Lun } | Select-Object -First 1\r\n            $attestedGuestUniqueId = ''\r\n            if ($allowlistDiskForLun) { $attestedGuestUniqueId = [string]$allowlistDiskForLun.AttestedGuestUniqueId }\r\n\r\n            $resolution = Resolve-ApprovedDiskTarget -ExpectedDisk $expectedDisk -ImdsDataDisks $imdsDataDisks `\r\n                -CandidateGuestDisks $candidateResult.Candidates `\r\n                -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n                -AttestedGuestUniqueId $attestedGuestUniqueId\r\n            if ($resolution.Error) {\r\n                $blockingErrors += $resolution.Error\r\n            }\r\n            else {\r\n                $resolvedEntries += [pscustomobject]@{ Target = $resolution.Target; ExpectedDisk = $expectedDisk }\r\n            }\r\n        }\r\n    }\r\n\r\n    if ($blockingErrors.Count -eq 0) {\r\n        $dupDiskNumbers = @($resolvedEntries | Group-Object { $_.Target.DiskNumber } | Where-Object { $_.Count -gt 1 })\r\n        if ($dupDiskNumbers.Count -gt 0) { $blockingErrors += 'More than one approved disk descriptor resolved to the same Windows disk number; refusing to proceed.' }\r\n        $dupLetters = @($resolvedEntries | Group-Object { $_.Target.DriveLetter } | Where-Object { $_.Count -gt 1 })\r\n        if ($dupLetters.Count -gt 0) { $blockingErrors += 'More than one approved disk descriptor requests the same drive letter; refusing to proceed.' }\r\n    }\r\n\r\n    # Whole-guest drive-letter conflict preflight (any disk, not just\r\n    # approved ones). Loop variable deliberately $resolvedEntry, never\r\n    # $target -- see Initialize-LimsGuestDataDisks.research.md under\r\n    # this heading for why.\r\n    if ($blockingErrors.Count -eq 0) {\r\n        foreach ($resolvedEntry in $resolvedEntries) {\r\n            $resolvedTarget = $resolvedEntry.Target\r\n            $conflict = @($GuestPartitionInventory | Where-Object {\r\n                    $_.DriveLetter -and $_.DriveLetter.ToUpperInvariant() -eq $resolvedTarget.DriveLetter -and $_.DiskNumber -ne $resolvedTarget.DiskNumber\r\n                })\r\n            if ($conflict.Count -gt 0) {\r\n                $blockingErrors += \"Drive letter $($resolvedTarget.DriveLetter): is already in use by a disk other than the approved target (Windows disk $($resolvedTarget.DiskNumber)).\"\r\n            }\r\n        }\r\n    }\r\n\r\n    if ($blockingErrors.Count -eq 0) {\r\n        foreach ($resolvedEntry in $resolvedEntries) {\r\n            $resolvedTarget = $resolvedEntry.Target\r\n            $guestDisk = $GuestDiskInventory | Where-Object { $_.Number -eq $resolvedTarget.DiskNumber } | Select-Object -First 1\r\n            $partitions = @($GuestPartitionInventory | Where-Object { $_.DiskNumber -eq $resolvedTarget.DiskNumber })\r\n            $dataPartitions = @($partitions | Where-Object { -not (Test-IsMsrPartition $_) })\r\n\r\n            # Correlate the data partition to its own volume via the\r\n            # documented volume-GUID access path (Get-Volume's Path\r\n            # property is exactly that string), never by drive letter\r\n            # alone. https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-volume\r\n            $volume = $null\r\n            if ($dataPartitions.Count -eq 1) {\r\n                $guidPaths = @($dataPartitions[0].AccessPaths | Where-Object { $_ -match $script:VolumeGuidPathPattern })\r\n                if ($guidPaths.Count -eq 1) {\r\n                    $matchingVolumes = @($GuestVolumeInventory | Where-Object { $_.Path -and [string]$_.Path -eq $guidPaths[0] })\r\n                    if ($matchingVolumes.Count -eq 1) {\r\n                        $volume = $matchingVolumes[0]\r\n                    }\r\n                    elseif ($matchingVolumes.Count -gt 1) {\r\n                        $blockingErrors += \"More than one guest volume reports the same volume GUID path associated with disk $($resolvedTarget.DiskNumber); ambiguous volume association.\"\r\n                    }\r\n                }\r\n                elseif ($guidPaths.Count -gt 1) {\r\n                    $blockingErrors += \"Disk $($resolvedTarget.DiskNumber)'s data partition reports more than one volume GUID access path; ambiguous volume association.\"\r\n                }\r\n            }\r\n\r\n            $plan = Get-DiskPreparationPlan -Target $resolvedTarget -GuestDisk $guestDisk -Partitions $partitions -Volume $volume\r\n            $diskPlans += [pscustomobject]@{ Target = $resolvedTarget; ExpectedDisk = $resolvedEntry.ExpectedDisk; Plan = $plan }\r\n            if ($plan.Action -eq 'Fail') { $blockingErrors += $plan.Reason }\r\n        }\r\n    }\r\n\r\n    # SQL-only DVD-ROM plan (APP's DvdLetterMoveTarget is always empty).\r\n    $eDataDiskPlanAction = 'NotApplicable'\r\n    $ePlanEntry = $diskPlans | Where-Object { $_.Target.DriveLetter -eq 'E' } | Select-Object -First 1\r\n    if ($ePlanEntry) { $eDataDiskPlanAction = $ePlanEntry.Plan.Action }\r\n\r\n    $eOpticalDrives = @($GuestOpticalDriveInventory | Where-Object { $_.Drive -and $_.Drive.ToString().ToUpperInvariant() -eq 'E:' })\r\n    $eDvdVolumes = @($GuestDvdVolumeInventory | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToUpperInvariant() -eq 'E:' -and [int]$_.DriveType -eq 5 })\r\n\r\n    $destinationOccupied = $false\r\n    if (-not [string]::IsNullOrWhiteSpace($DvdLetterMoveTarget)) {\r\n        $destinationOccupied = Test-DestinationLetterOccupied -Letter $DvdLetterMoveTarget `\r\n            -OpticalDrives $GuestOpticalDriveInventory -DvdVolumes $GuestDvdVolumeInventory `\r\n            -Volumes $GuestVolumeInventory -Partitions $GuestPartitionInventory\r\n    }\r\n\r\n    $dvdPlan = Get-DvdPreparationPlan -DvdLetterMoveTarget $DvdLetterMoveTarget -EDataDiskPlanAction $eDataDiskPlanAction `\r\n        -ExpectedOpticalDriveName $allowlistEntry.ExpectedOpticalDriveName -EOpticalDrives $eOpticalDrives -EDvdVolumes $eDvdVolumes `\r\n        -DestinationOccupied $destinationOccupied\r\n    if ($dvdPlan.Action -eq 'Fail') { $blockingErrors += $dvdPlan.Reason }\r\n\r\n    return [pscustomobject]@{\r\n        Target    = $Target\r\n        Blocked   = ($blockingErrors.Count -gt 0)\r\n        Errors    = $blockingErrors\r\n        DiskPlans = $diskPlans\r\n        DvdPlan   = $dvdPlan\r\n    }\r\n}\r\n\r\n# =============================================================================\r\n# INVENTORY ADAPTERS -- the only functions that call real cmdlets to READ\r\n# guest/Azure state. Each fetches its FULL inventory once per plan build;\r\n# filtering happens in memory, so a query failure always hard-fails rather\r\n# than looking like \"no partitions\"/\"free letter\". Pester mocks these.\r\n# =============================================================================\r\n\r\nfunction Test-CurrentIdentityIsAdministratorOrSystemAdapter {\r\n    $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()\r\n    $isSystem = $identity.User -and $identity.User.Value -eq 'S-1-5-18'\r\n    $isAdministrator = ([System.Security.Principal.WindowsPrincipal]::new($identity)).IsInRole(\r\n        [System.Security.Principal.WindowsBuiltInRole]::Administrator\r\n    )\r\n    return [bool]($isSystem -or $isAdministrator)\r\n}\r\n\r\nfunction Get-CurrentIdentityNameAdapter {\r\n    return [System.Security.Principal.WindowsIdentity]::GetCurrent().Name\r\n}\r\n\r\nfunction Get-ActualComputerNameAdapter {\r\n    return $env:COMPUTERNAME\r\n}\r\n\r\nfunction Get-ImdsComputeMetadataAdapter {\r\n        <#\r\n        PS 5.1-compatible IMDS query. -NoProxy on Invoke-RestMethod\r\n        requires PS 6+, unavailable in PS 5.1 (Run Command's default\r\n        Windows runtime). Uses the PS5-compatible proxy-bypass instead\r\n        (empty System.Net.WebProxy bound to a WebRequestSession). See\r\n        Initialize-LimsGuestDataDisks.research.md under this heading.\r\n    #>\r\n    $uri = 'http://169.254.169.254/metadata/instance/compute?api-version=2025-04-07&format=json'\r\n    try {\r\n        $proxy = New-Object System.Net.WebProxy\r\n        $webSession = New-Object Microsoft.PowerShell.Commands.WebRequestSession\r\n        $webSession.Proxy = $proxy\r\n        return Invoke-RestMethod -Headers @{ Metadata = 'true' } -Method Get -Uri $uri -WebSession $webSession -TimeoutSec 15\r\n    }\r\n    catch {\r\n        Assert-GuestDiskPreparationFailure \"Unable to query the Azure Instance Metadata Service (IMDS): $($_.Exception.Message)\"\r\n    }\r\n}\r\n\r\nfunction Get-GuestDiskInventoryAdapter {\r\n        <#\r\n        Merges Get-Disk (IsBoot/IsSystem/IsOffline/IsReadOnly/\r\n        OperationalStatus/PartitionStyle/Size/UniqueId) with\r\n        Win32_DiskDrive (SCSI addressing: SCSIBus/SCSIPort/SCSITargetId/\r\n        SCSILogicalUnit) into one plain-object inventory, fetched in full\r\n        exactly once.\r\n    #>\r\n    $disks = @(Get-Disk)\r\n    $diskDrives = @(Get-CimInstance -ClassName Win32_DiskDrive)\r\n    $diskDrivesByIndex = @{}\r\n    foreach ($dd in $diskDrives) { $diskDrivesByIndex[[int]$dd.Index] = $dd }\r\n\r\n    $result = @()\r\n    foreach ($disk in $disks) {\r\n        $dd = $diskDrivesByIndex[[int]$disk.Number]\r\n        $result += [pscustomobject]@{\r\n            Number            = [int]$disk.Number\r\n            UniqueId          = [string]$disk.UniqueId\r\n            IsBoot            = [bool]$disk.IsBoot\r\n            IsSystem          = [bool]$disk.IsSystem\r\n            IsOffline         = [bool]$disk.IsOffline\r\n            IsReadOnly        = [bool]$disk.IsReadOnly\r\n            OperationalStatus = [string]$disk.OperationalStatus\r\n            PartitionStyle    = [string]$disk.PartitionStyle\r\n            SizeBytes         = [int64]$disk.Size\r\n            ScsiBus           = if ($dd) { [int]$dd.SCSIBus } else { -1 }\r\n            ScsiPort          = if ($dd) { [int]$dd.SCSIPort } else { -1 }\r\n            ScsiTargetId      = if ($dd) { [int]$dd.SCSITargetId } else { -1 }\r\n            ScsiLogicalUnit   = if ($dd) { [int]$dd.SCSILogicalUnit } else { -1 }\r\n            FriendlyName      = [string]$disk.FriendlyName\r\n        }\r\n    }\r\n    return $result\r\n}\r\n\r\nfunction Get-GuestPartitionInventoryAdapter {\r\n    $partitions = @(Get-Partition)\r\n    return @($partitions | ForEach-Object {\r\n            [pscustomobject]@{\r\n                DiskNumber      = [int]$_.DiskNumber\r\n                PartitionNumber = [int]$_.PartitionNumber\r\n                DriveLetter     = if ($_.DriveLetter) { [string]$_.DriveLetter } else { '' }\r\n                GptType         = if ($_.GptType) { [string]$_.GptType } else { '' }\r\n                Type            = [string]$_.Type\r\n                SizeBytes       = [int64]$_.Size\r\n                AccessPaths     = @($_.AccessPaths)\r\n            }\r\n        })\r\n}\r\n\r\nfunction Get-GuestVolumeInventoryAdapter {\r\n        <#\r\n        Get-Volume's own `Path` property is exactly the volume's own\r\n        canonical volume-GUID path -- used (instead of drive letter alone)\r\n        to correlate a partition's AccessPaths to this specific volume.\r\n    #>\r\n    $volumes = @(Get-Volume)\r\n    return @($volumes | ForEach-Object {\r\n            [pscustomobject]@{\r\n                DriveLetter        = if ($_.DriveLetter) { [string]$_.DriveLetter } else { '' }\r\n                FileSystem         = [string]$_.FileSystem\r\n                FileSystemLabel    = [string]$_.FileSystemLabel\r\n                AllocationUnitSize = [int64]$_.AllocationUnitSize\r\n                SizeBytes          = [int64]$_.Size\r\n                Path               = [string]$_.Path\r\n            }\r\n        })\r\n}\r\n\r\nfunction Get-GuestDvdVolumeInventoryAdapter {\r\n        <#\r\n        Win32_Volume (not Get-Volume) is used specifically because it is\r\n        the only documented way to later change an optical drive's letter\r\n        (Set-CimInstance -InputObject).\r\n    #>\r\n    $volumes = @(Get-CimInstance -ClassName Win32_Volume)\r\n    return @($volumes | ForEach-Object {\r\n            [pscustomobject]@{\r\n                DriveLetter = if ($_.DriveLetter) { [string]$_.DriveLetter } else { '' }\r\n                DriveType   = [int]$_.DriveType\r\n                Label       = [string]$_.Label\r\n            }\r\n        })\r\n}\r\n\r\nfunction Get-GuestOpticalDriveInventoryAdapter {\r\n        <#\r\n        Win32_CDROMDrive -- source for an optical device's stable\r\n        identity (DeviceID survives a letter move) and MediaLoaded,\r\n        left as whatever WMI reports (can be $null) rather than\r\n        force-cast to [bool], so Get-DvdPreparationPlan can tell\r\n        \"unknown\" apart from \"false\".\r\n    #>\r\n    $drives = @(Get-CimInstance -ClassName Win32_CDROMDrive)\r\n    return @($drives | ForEach-Object {\r\n            [pscustomobject]@{\r\n                DeviceId    = [string]$_.DeviceID\r\n                Name        = [string]$_.Name\r\n                Drive       = if ($_.Drive) { [string]$_.Drive } else { '' }\r\n                MediaLoaded = $_.MediaLoaded\r\n            }\r\n        })\r\n}\r\n\r\n# =============================================================================\r\n# MUTATION ADAPTERS -- the only functions in this script that change guest\r\n# disk state. Every one operates on an explicit disk/partition number or\r\n# object, never on a drive letter alone; none uses Clear-Disk, diskpart\r\n# clean, or any blanket operation; none retries automatically on failure.\r\n# =============================================================================\r\n\r\nfunction Initialize-ApprovedDiskAdapter {\r\n    param([Parameter(Mandatory = $true)] [int] $DiskNumber)\r\n    Initialize-Disk -Number $DiskNumber -PartitionStyle GPT\r\n}\r\n\r\nfunction New-ApprovedPartitionAdapter {\r\n    param([Parameter(Mandatory = $true)] [int] $DiskNumber, [Parameter(Mandatory = $true)] [string] $DriveLetter)\r\n    return New-Partition -DiskNumber $DiskNumber -UseMaximumSize -DriveLetter ([char]$DriveLetter)\r\n}\r\n\r\nfunction Format-ApprovedVolumeAdapter {\r\n    param(\r\n        [Parameter(Mandatory = $true)] [int] $DiskNumber,\r\n        [Parameter(Mandatory = $true)] [int] $PartitionNumber,\r\n        [Parameter(Mandatory = $true)] [int64] $AllocationUnitBytes,\r\n        [Parameter(Mandatory = $true)] [string] $FileSystemLabel\r\n    )\r\n    $partition = Get-Partition -DiskNumber $DiskNumber -PartitionNumber $PartitionNumber\r\n    # -Confirm:$false only suppresses the interactive ShouldProcess prompt\r\n    # (required for unattended Run Command execution); -Force is\r\n    # deliberately not used -- it is not needed to format a freshly created,\r\n    # unmounted partition and is not a flag this script relies on.\r\n    return Format-Volume -Partition $partition -FileSystem NTFS -AllocationUnitSize $AllocationUnitBytes -NewFileSystemLabel $FileSystemLabel -Confirm:$false\r\n}\r\n\r\nfunction Move-DvdRomLetterAdapter {\r\n    param([Parameter(Mandatory = $true)] [string] $DeviceId, [Parameter(Mandatory = $true)] [string] $ToLetter)\r\n    $drive = Get-CimInstance -ClassName Win32_CDROMDrive | Where-Object { $_.DeviceID -eq $DeviceId }\r\n    if (-not $drive) {\r\n        Assert-GuestDiskPreparationFailure \"Optical device '$DeviceId' could no longer be found immediately before the mutating move.\"\r\n    }\r\n    $volume = Get-CimInstance -ClassName Win32_Volume -Filter \"DriveLetter='E:'\"\r\n    if (-not $volume) {\r\n        Assert-GuestDiskPreparationFailure 'No volume found at E: immediately before the mutating move; identity changed since the immediate pre-mutation re-check.'\r\n    }\r\n    Set-CimInstance -InputObject $volume -Property @{ DriveLetter = \"${ToLetter}:\" }\r\n}\r\n\r\nfunction Confirm-DvdRomLetterMoveSucceededAdapter {\r\n    param([Parameter(Mandatory = $true)] [string] $DeviceId, [Parameter(Mandatory = $true)] [string] $ToLetter)\r\n    $drive = Get-CimInstance -ClassName Win32_CDROMDrive | Where-Object { $_.DeviceID -eq $DeviceId }\r\n    $atTargetVolume = Get-CimInstance -ClassName Win32_Volume -Filter \"DriveLetter='$($ToLetter):'\"\r\n    $stillAtSourceVolume = Get-CimInstance -ClassName Win32_Volume -Filter \"DriveLetter='E:'\"\r\n    $driveNowAtTarget = $drive -and $drive.Drive -and ([string]$drive.Drive).ToUpperInvariant() -eq \"${ToLetter}:\".ToUpperInvariant()\r\n    return [bool]($driveNowAtTarget -and $atTargetVolume -and -not $stillAtSourceVolume)\r\n}\r\n\r\n# =============================================================================\r\n# ORCHESTRATION -- ties inventory adapters + decision logic + (Apply only)\r\n# mutation adapters together. This is the only layer where plan-building and\r\n# real I/O are combined; it is covered by Pester end-to-end tests that mock\r\n# only the adapter functions above.\r\n# =============================================================================\r\n\r\nfunction Get-FreshGuestDiskPreparationPlan {\r\n        <#\r\n        Gathers every adapter's inventory fresh (no caching, no reuse\r\n        across calls) and builds one complete plan via\r\n        Get-GuestDiskPreparationPlan. Called at least twice per -Mode\r\n        Apply invocation so that a previous plan is never treated as\r\n        authorization to trust stale state.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [string] $Target,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedVmName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedComputerName,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $ExpectedDisks,\r\n        # Legitimately '' for App -- see Test-TargetIdentityMatchesAllowlist's\r\n        # DvdLetterMoveTarget parameter comment above.\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DvdLetterMoveTarget\r\n    )\r\n\r\n    $imdsCompute = Get-ImdsComputeMetadataAdapter\r\n    if ([string]::IsNullOrWhiteSpace([string]$imdsCompute.subscriptionId) -or\r\n        [string]::IsNullOrWhiteSpace([string]$imdsCompute.resourceGroupName) -or\r\n        [string]::IsNullOrWhiteSpace([string]$imdsCompute.name)) {\r\n        Assert-GuestDiskPreparationFailure 'IMDS returned incomplete compute identity metadata (missing subscriptionId, resourceGroupName, or name).'\r\n    }\r\n    $actualComputerName = Get-ActualComputerNameAdapter\r\n    if ([string]::IsNullOrWhiteSpace($actualComputerName)) {\r\n        Assert-GuestDiskPreparationFailure 'Could not determine the local Windows computer name.'\r\n    }\r\n\r\n        # Every call below is wrapped in @(...) at the ASSIGNMENT site, not\r\n    # only inside each adapter's own return statement, so a legitimate\r\n    # zero-element inventory (e.g. no optical drive attached) is never\r\n    # silently unrolled to $null. See\r\n    # Initialize-LimsGuestDataDisks.research.md under this function's own\r\n    # heading for the exact failure mode this avoids.\r\n    $guestDiskInventory = @(Get-GuestDiskInventoryAdapter)\r\n    $guestPartitionInventory = @(Get-GuestPartitionInventoryAdapter)\r\n    $guestVolumeInventory = @(Get-GuestVolumeInventoryAdapter)\r\n    $guestDvdVolumeInventory = @(Get-GuestDvdVolumeInventoryAdapter)\r\n    $guestOpticalDriveInventory = @(Get-GuestOpticalDriveInventoryAdapter)\r\n\r\n    return Get-GuestDiskPreparationPlan -Target $Target `\r\n        -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n        -ExpectedVmName $ExpectedVmName -ExpectedComputerName $ExpectedComputerName `\r\n        -ExpectedDisks $ExpectedDisks -DvdLetterMoveTarget $DvdLetterMoveTarget `\r\n        -ImdsCompute $imdsCompute -ActualComputerName $actualComputerName `\r\n        -GuestDiskInventory $guestDiskInventory -GuestPartitionInventory $guestPartitionInventory `\r\n        -GuestVolumeInventory $guestVolumeInventory -GuestDvdVolumeInventory $guestDvdVolumeInventory `\r\n        -GuestOpticalDriveInventory $guestOpticalDriveInventory\r\n}\r\n\r\nfunction Write-GuestDiskPreparationReport {\r\n    param([Parameter(Mandatory = $true)] $Plan, [Parameter(Mandatory = $true)] [string] $Mode)\r\n\r\n    Write-Output \"===== Guest disk preparation report (Target=$($Plan.Target), Mode=$Mode) =====\"\r\n    if ($Plan.Blocked) {\r\n        Write-Output 'RESULT: BLOCKED -- no mutation will be attempted.'\r\n        foreach ($e in $Plan.Errors) { Write-Output \"  ERROR: $e\" }\r\n    }\r\n    else {\r\n        Write-Output 'RESULT: all checks passed.'\r\n    }\r\n    foreach ($dp in $Plan.DiskPlans) {\r\n        $reasonSuffix = if ($dp.Plan.Reason) { \" ($($dp.Plan.Reason))\" } else { '' }\r\n        Write-Output \"  LUN $($dp.Target.Lun) '$($dp.Target.DiskName)' -> Windows disk $($dp.Target.DiskNumber) (UniqueId=$($dp.Target.DiskUniqueId), IsOffline=$($dp.Target.IsOffline), IsReadOnly=$($dp.Target.IsReadOnly), OperationalStatus=$($dp.Target.OperationalStatus)): proposed action = $($dp.Plan.Action)$reasonSuffix\"\r\n    }\r\n    $dvdReasonSuffix = if ($Plan.DvdPlan.Reason) { \" ($($Plan.DvdPlan.Reason))\" } else { '' }\r\n    $dvdDeviceSuffix = if ($Plan.DvdPlan.DeviceId) { \" (device='$($Plan.DvdPlan.DeviceId)')\" } else { '' }\r\n    Write-Output \"  DVD-ROM: proposed action = $($Plan.DvdPlan.Action)$dvdReasonSuffix$dvdDeviceSuffix\"\r\n    Write-Output '===== end report ====='\r\n}\r\n\r\nfunction Assert-DiskReadyForDestructiveStage {\r\n        <#\r\n        Immediately before Initialize-Disk/New-Partition/Format-Volume:\r\n        re-fetches a FRESH IMDS query and guest inventory (never the\r\n        $applyPlan snapshot), re-resolves the disk, confirms its\r\n        UniqueId/number unchanged, then applies a stage-specific shape\r\n        assertion. Throws on mismatch -- never retries or rolls back.\r\n\r\n        -Target looks up the SAME allowlist entry's own\r\n        AttestedGuestUniqueId (never caller-supplied) so an active\r\n        attested binding is honored consistently here.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] [ValidateSet('App', 'Sql')] [string] $Target,\r\n        [Parameter(Mandatory = $true)] [ValidateSet('Initialize', 'NewPartition', 'Format')] [string] $Stage,\r\n        [Parameter(Mandatory = $true)] $DiskPlan,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $false)] [int] $NewPartitionNumber\r\n    )\r\n\r\n    $originalTarget = $DiskPlan.Target\r\n    $expectedDisk = $DiskPlan.ExpectedDisk\r\n\r\n    $allowlistEntry = (Get-ApprovedDiskPreparationAllowlist)[$Target]\r\n    $attestedBindingConfig = Test-AttestedGuestUniqueIdBindingConfiguration -Disks $allowlistEntry.Disks\r\n    $attestedGuestUniqueId = ''\r\n    if ($attestedBindingConfig.IsAttestedMode) {\r\n        $allowlistDiskForLun = $allowlistEntry.Disks | Where-Object { [int]$_.Lun -eq [int]$originalTarget.Lun } | Select-Object -First 1\r\n        if ($allowlistDiskForLun) { $attestedGuestUniqueId = [string]$allowlistDiskForLun.AttestedGuestUniqueId }\r\n    }\r\n\r\n    $imdsCompute = Get-ImdsComputeMetadataAdapter\r\n    $imdsDataDisks = @()\r\n    if ($imdsCompute.storageProfile -and $imdsCompute.storageProfile.dataDisks) {\r\n        $imdsDataDisks = @($imdsCompute.storageProfile.dataDisks)\r\n    }\r\n    $imdsResourceDiskSizeBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $imdsCompute\r\n\r\n    $freshGuestDiskInventory = @(Get-GuestDiskInventoryAdapter)\r\n    $candidateResult = Select-NonOsNonTemporaryDiskCandidates -GuestDiskInventory $freshGuestDiskInventory `\r\n        -ImdsResourceDiskSizeBytes $imdsResourceDiskSizeBytes -SkipTemporaryDiskExclusion $attestedBindingConfig.IsAttestedMode\r\n    if ($candidateResult.Error) {\r\n        Assert-GuestDiskPreparationFailure \"Immediate pre-mutation re-check ($Stage) failed: $($candidateResult.Error)\"\r\n    }\r\n\r\n    $resolution = Resolve-ApprovedDiskTarget -ExpectedDisk $expectedDisk -ImdsDataDisks $imdsDataDisks `\r\n        -CandidateGuestDisks $candidateResult.Candidates -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n        -AttestedGuestUniqueId $attestedGuestUniqueId\r\n    if ($resolution.Error) {\r\n        Assert-GuestDiskPreparationFailure \"Immediate pre-mutation re-check ($Stage) failed: $($resolution.Error)\"\r\n    }\r\n    $freshTarget = $resolution.Target\r\n\r\n    if ($freshTarget.DiskUniqueId -ne $originalTarget.DiskUniqueId -or $freshTarget.DiskNumber -ne $originalTarget.DiskNumber) {\r\n        Assert-GuestDiskPreparationFailure \"Disk identity for LUN $($originalTarget.Lun) changed immediately before the '$Stage' step (was Windows disk $($originalTarget.DiskNumber)/UniqueId=$($originalTarget.DiskUniqueId), now Windows disk $($freshTarget.DiskNumber)/UniqueId=$($freshTarget.DiskUniqueId)); refusing to proceed.\"\r\n    }\r\n\r\n    $freshPartitionsWide = @(Get-GuestPartitionInventoryAdapter)\r\n    $freshPartitionsForDisk = @($freshPartitionsWide | Where-Object { $_.DiskNumber -eq $freshTarget.DiskNumber })\r\n    $freshGuestDisk = $freshGuestDiskInventory | Where-Object { $_.Number -eq $freshTarget.DiskNumber } | Select-Object -First 1\r\n\r\n    $shapeError = $null\r\n    if ($Stage -eq 'Initialize') {\r\n        $shapeError = Test-DiskReadyForInitializeStage -GuestDisk $freshGuestDisk -Partitions $freshPartitionsForDisk -Target $freshTarget -AllGuestPartitions $freshPartitionsWide\r\n    }\r\n    elseif ($Stage -eq 'NewPartition') {\r\n        $shapeError = Test-DiskReadyForNewPartitionStage -GuestDisk $freshGuestDisk -Partitions $freshPartitionsForDisk\r\n    }\r\n    elseif ($Stage -eq 'Format') {\r\n        $freshVolumesWide = @(Get-GuestVolumeInventoryAdapter)\r\n        $shapeError = Test-PartitionReadyForFormatStage -Partitions $freshPartitionsForDisk -Target $freshTarget -NewPartitionNumber $NewPartitionNumber -Volumes $freshVolumesWide\r\n    }\r\n    if ($shapeError) {\r\n        Assert-GuestDiskPreparationFailure \"Immediate pre-mutation re-check ($Stage) failed: $shapeError\"\r\n    }\r\n}\r\n\r\nfunction Assert-DvdReadyForMove {\r\n        <#\r\n        Immediately before the mutating DVD-ROM move: re-fetches every\r\n        inventory fresh (never $applyPlan) and re-runs\r\n        Get-DvdPreparationPlan, confirming the SAME device identity,\r\n        media state, and occupancy as previously verified. Returns the\r\n        re-checked plan or throws on any mismatch.\r\n    #>\r\n    param(\r\n        [Parameter(Mandatory = $true)] $DvdPlan,\r\n        [Parameter(Mandatory = $true)] [string] $DvdLetterMoveTarget,\r\n        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $ExpectedOpticalDriveName\r\n    )\r\n\r\n    $freshOpticalDrives = @(Get-GuestOpticalDriveInventoryAdapter)\r\n    $freshDvdVolumes = @(Get-GuestDvdVolumeInventoryAdapter)\r\n    $freshVolumes = @(Get-GuestVolumeInventoryAdapter)\r\n    $freshPartitions = @(Get-GuestPartitionInventoryAdapter)\r\n\r\n    $eOpticalDrives = @($freshOpticalDrives | Where-Object { $_.Drive -and $_.Drive.ToString().ToUpperInvariant() -eq 'E:' })\r\n    $eDvdVolumes = @($freshDvdVolumes | Where-Object { $_.DriveLetter -and $_.DriveLetter.ToUpperInvariant() -eq 'E:' -and [int]$_.DriveType -eq 5 })\r\n    $destinationOccupied = Test-DestinationLetterOccupied -Letter $DvdLetterMoveTarget `\r\n        -OpticalDrives $freshOpticalDrives -DvdVolumes $freshDvdVolumes -Volumes $freshVolumes -Partitions $freshPartitions\r\n\r\n    # EDataDiskPlanAction is deliberately passed as 'Initialize' (a\r\n    # placeholder meaning merely \"not NoOp\") -- the caller only reaches this\r\n    # function after already confirming, via the whole-VM $applyPlan, that\r\n    # the SQL DATA disk is NOT already correctly prepared; recomputing that\r\n    # here would require re-running the entire disk plan rather than just\r\n    # this device's own identity/media/occupancy state.\r\n    $recheckPlan = Get-DvdPreparationPlan -DvdLetterMoveTarget $DvdLetterMoveTarget -EDataDiskPlanAction 'Initialize' `\r\n        -ExpectedOpticalDriveName $ExpectedOpticalDriveName -EOpticalDrives $eOpticalDrives -EDvdVolumes $eDvdVolumes -DestinationOccupied $destinationOccupied\r\n\r\n    if ($recheckPlan.Action -ne 'Move') {\r\n        $reasonSuffix = if ($recheckPlan.Reason) { \" ($($recheckPlan.Reason))\" } else { '' }\r\n        Assert-GuestDiskPreparationFailure \"Immediate pre-move DVD-ROM re-check failed: expected a confirmed Move but got '$($recheckPlan.Action)'$reasonSuffix; stopping before any mutation.\"\r\n    }\r\n    if ($recheckPlan.DeviceId -ne $DvdPlan.DeviceId) {\r\n        Assert-GuestDiskPreparationFailure \"The optical device at E: identity changed between the original plan and the immediate pre-move re-check (was '$($DvdPlan.DeviceId)', now '$($recheckPlan.DeviceId)'); refusing to proceed.\"\r\n    }\r\n\r\n    return $recheckPlan\r\n}\r\n\r\nfunction Invoke-GuestDiskPreparation {\r\n    param(\r\n        [Parameter(Mandatory = $true)] [ValidateSet('App', 'Sql')] [string] $Target,\r\n        [Parameter(Mandatory = $true)] [ValidateSet('Validate', 'Apply')] [string] $Mode,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedSubscriptionId,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedResourceGroupName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedVmName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedComputerName,\r\n        [Parameter(Mandatory = $true)] [string] $ExpectedDisksJson,\r\n        [Parameter(Mandatory = $false)] [string] $DvdLetterMoveTarget = ''\r\n    )\r\n\r\n    if (-not (Test-CurrentIdentityIsAdministratorOrSystemAdapter)) {\r\n        Assert-GuestDiskPreparationFailure \"This script must run as SYSTEM or an Administrator. Current identity: $(Get-CurrentIdentityNameAdapter)\"\r\n    }\r\n\r\n    try {\r\n        $parsedExpectedDisks = ConvertFrom-Json -InputObject $ExpectedDisksJson\r\n    }\r\n    catch {\r\n        Assert-GuestDiskPreparationFailure \"ExpectedDisksJson could not be parsed as JSON: $($_.Exception.Message)\"\r\n    }\r\n    # ConvertFrom-Json writes each element of a top-level JSON array as a\r\n    # separate pipeline object rather than a single array value -- @(...)\r\n    # here re-collects them into one array regardless of whether the JSON\r\n    # held one disk or several.\r\n    $expectedDisks = @($parsedExpectedDisks)\r\n    if ($expectedDisks.Count -eq 0) {\r\n        Assert-GuestDiskPreparationFailure 'ExpectedDisksJson resolved to zero approved disks; refusing to proceed with nothing to validate.'\r\n    }\r\n\r\n    $planArgs = @{\r\n        Target                    = $Target\r\n        ExpectedSubscriptionId    = $ExpectedSubscriptionId\r\n        ExpectedResourceGroupName = $ExpectedResourceGroupName\r\n        ExpectedVmName            = $ExpectedVmName\r\n        ExpectedComputerName      = $ExpectedComputerName\r\n        ExpectedDisks             = $expectedDisks\r\n        DvdLetterMoveTarget       = $DvdLetterMoveTarget\r\n    }\r\n\r\n    $plan = Get-FreshGuestDiskPreparationPlan @planArgs\r\n    Write-GuestDiskPreparationReport -Plan $plan -Mode $Mode\r\n\r\n    if ($Mode -eq 'Validate') {\r\n        # Mutation adapters are never referenced anywhere above this point\r\n        # in the Validate code path -- they are unreachable here by\r\n        # construction, not merely skipped by a runtime flag.\r\n        if ($plan.Blocked) {\r\n            Assert-GuestDiskPreparationFailure 'Validation found one or more blocking issues; see the report above. No mutation was attempted (Validate mode never mutates).'\r\n        }\r\n        Write-Output 'Validate mode completed: proposed actions printed above. No mutation was performed.'\r\n        return\r\n    }\r\n\r\n    # ---- -Mode Apply from here on ----\r\n    # The plan above is NEVER authorization to mutate by itself -- the\r\n    # entire plan is rebuilt from scratch immediately before any mutation\r\n    # (the whole-VM preflight); each mutating call below ALSO re-verifies\r\n    # its own exact target via Assert-DiskReadyForDestructiveStage /\r\n    # Assert-DvdReadyForMove immediately before it runs.\r\n    $applyPlan = Get-FreshGuestDiskPreparationPlan @planArgs\r\n    if ($applyPlan.Blocked) {\r\n        Write-GuestDiskPreparationReport -Plan $applyPlan -Mode $Mode\r\n        Assert-GuestDiskPreparationFailure 'Immediate pre-mutation re-validation found one or more blocking issues; see the report above. No mutation was attempted.'\r\n    }\r\n\r\n    # Stable-identity confirmation: every disk resolved in the first plan\r\n    # must still resolve to the SAME UniqueId in the fresh re-validation --\r\n    # never continue mutating using a stale Windows disk number.\r\n    foreach ($firstDiskPlan in $plan.DiskPlans) {\r\n        $matching = $applyPlan.DiskPlans | Where-Object { $_.Target.Lun -eq $firstDiskPlan.Target.Lun }\r\n        if (-not $matching -or $matching.Target.DiskUniqueId -ne $firstDiskPlan.Target.DiskUniqueId) {\r\n            Assert-GuestDiskPreparationFailure \"Stable disk identity for LUN $($firstDiskPlan.Target.Lun) changed between validation and the immediate pre-mutation re-check; refusing to proceed.\"\r\n        }\r\n    }\r\n\r\n    $expectedOpticalDriveName = (Get-ApprovedDiskPreparationAllowlist)[$Target].ExpectedOpticalDriveName\r\n\r\n    # DVD move (if required) strictly before any partition creation on E:,\r\n    # then per-disk Initialize/New-Partition/Format in LUN order, each\r\n    # re-verified immediately before its own mutating call. Never a drive\r\n    # letter alone, never Clear-Disk/diskpart clean, never auto-retried,\r\n    # and a step already succeeded this invocation is never rolled back.\r\n    if ($applyPlan.DvdPlan.Action -eq 'Move') {\r\n        $reconfirmedDvdPlan = Assert-DvdReadyForMove -DvdPlan $applyPlan.DvdPlan -DvdLetterMoveTarget $DvdLetterMoveTarget -ExpectedOpticalDriveName $expectedOpticalDriveName\r\n        Write-Output \"Moving the confirmed empty virtual DVD-ROM (device '$($reconfirmedDvdPlan.DeviceId)') from E: to ${DvdLetterMoveTarget}:.\"\r\n        Move-DvdRomLetterAdapter -DeviceId $reconfirmedDvdPlan.DeviceId -ToLetter $DvdLetterMoveTarget\r\n        if (-not (Confirm-DvdRomLetterMoveSucceededAdapter -DeviceId $reconfirmedDvdPlan.DeviceId -ToLetter $DvdLetterMoveTarget)) {\r\n            Assert-GuestDiskPreparationFailure \"DVD-ROM letter move to ${DvdLetterMoveTarget}: could not be confirmed; stopping before any disk mutation.\"\r\n        }\r\n        Write-Output \"Confirmed: the virtual DVD-ROM is now at ${DvdLetterMoveTarget}: and E: is free.\"\r\n    }\r\n\r\n    foreach ($diskPlan in ($applyPlan.DiskPlans | Sort-Object { $_.Target.Lun })) {\r\n        if ($diskPlan.Plan.Action -eq 'NoOp') {\r\n            Write-Output \"Disk for LUN $($diskPlan.Target.Lun) ($($diskPlan.Target.DiskName)) already matches the intended layout -- validated, no action taken.\"\r\n            continue\r\n        }\r\n        if ($diskPlan.Plan.Action -ne 'Initialize') {\r\n            # Unreachable in practice: a Fail action already made $applyPlan\r\n            # Blocked above. Kept as an explicit guard rather than assumed.\r\n            Assert-GuestDiskPreparationFailure \"Unexpected plan action '$($diskPlan.Plan.Action)' for LUN $($diskPlan.Target.Lun); stopping.\"\r\n        }\r\n\r\n        # Deliberately $diskTarget, never $target -- see the matching\r\n        # comment in Get-GuestDiskPreparationPlan: this function also has\r\n        # its own typed [string] $Target parameter (-ValidateSet('App','Sql')),\r\n        # and a same-named loop/assignment variable would silently coerce\r\n        # this pscustomobject into that string slot instead of erroring.\r\n        $diskTarget = $diskPlan.Target\r\n\r\n        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'Initialize' -DiskPlan $diskPlan `\r\n            -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName\r\n        Write-Output \"Disk $($diskTarget.DiskNumber) (LUN $($diskTarget.Lun), $($diskTarget.DiskName)) is RAW with no partitions -- initializing.\"\r\n        Initialize-ApprovedDiskAdapter -DiskNumber $diskTarget.DiskNumber\r\n\r\n        $partitionsAfterInit = @(Get-GuestPartitionInventoryAdapter | Where-Object { $_.DiskNumber -eq $diskTarget.DiskNumber })\r\n        $unexpectedAfterInit = @($partitionsAfterInit | Where-Object { -not (Test-IsMsrPartition $_) })\r\n        if ($unexpectedAfterInit.Count -gt 0) {\r\n            Assert-GuestDiskPreparationFailure \"Disk $($diskTarget.DiskNumber) shows unexpected partition(s) immediately after GPT initialization; stopping for manual review rather than proceeding.\"\r\n        }\r\n\r\n        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'NewPartition' -DiskPlan $diskPlan `\r\n            -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName\r\n        $newPartition = New-ApprovedPartitionAdapter -DiskNumber $diskTarget.DiskNumber -DriveLetter $diskTarget.DriveLetter\r\n\r\n        Assert-DiskReadyForDestructiveStage -Target $Target -Stage 'Format' -DiskPlan $diskPlan `\r\n            -ExpectedSubscriptionId $ExpectedSubscriptionId -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n            -NewPartitionNumber $newPartition.PartitionNumber\r\n        $null = Format-ApprovedVolumeAdapter -DiskNumber $diskTarget.DiskNumber -PartitionNumber $newPartition.PartitionNumber `\r\n            -AllocationUnitBytes $diskTarget.AllocationUnitBytes -FileSystemLabel $diskTarget.FileSystemLabel\r\n\r\n        Write-Output \"Disk $($diskTarget.DiskNumber) initialized, partitioned, and formatted as $($diskTarget.DriveLetter): ('$($diskTarget.FileSystemLabel)').\"\r\n    }\r\n\r\n    Write-Output 'Apply mode completed successfully.'\r\n}\r\n\r\n# ---- Top-level invocation guard ----\r\n# Set LIMS_GUEST_DISK_PREP_DOT_SOURCE_ONLY=1 before dot-sourcing this file\r\n# (e.g. from a Pester test) to load every function above without executing\r\n# Invoke-GuestDiskPreparation, so mutation adapters can be safely mocked and\r\n# asserted against instead of ever running on a real local disk.\r\nif ($env:LIMS_GUEST_DISK_PREP_DOT_SOURCE_ONLY -ne '1') {\r\n    try {\r\n        Invoke-GuestDiskPreparation -Target $Target -Mode $Mode `\r\n            -ExpectedSubscriptionId $ExpectedSubscriptionId `\r\n            -ExpectedResourceGroupName $ExpectedResourceGroupName `\r\n            -ExpectedVmName $ExpectedVmName `\r\n            -ExpectedComputerName $ExpectedComputerName `\r\n            -ExpectedDisksJson $ExpectedDisksJson `\r\n            -DvdLetterMoveTarget $DvdLetterMoveTarget\r\n        exit 0\r\n    }\r\n    catch {\r\n        Write-Error $_.Exception.Message\r\n        exit 1\r\n    }\r\n}\r\n",
+    "appGuestDiskPreparationActive": "[and(parameters('enableGuestDiskPreparation'), contains(createArray('ValidateApp', 'ValidateBoth', 'ApplyApp'), parameters('guestDiskPreparationExecutionTarget')))]",
+    "appGuestDiskPreparationMode": "[if(equals(parameters('guestDiskPreparationExecutionTarget'), 'ApplyApp'), 'Apply', 'Validate')]",
+    "sqlGuestDiskPreparationActive": "[and(parameters('enableGuestDiskPreparation'), contains(createArray('ValidateSql', 'ValidateBoth', 'ApplySql'), parameters('guestDiskPreparationExecutionTarget')))]",
+    "sqlGuestDiskPreparationMode": "[if(equals(parameters('guestDiskPreparationExecutionTarget'), 'ApplySql'), 'Apply', 'Validate')]",
+    "appExpectedGuestDisks": [
+      {
+        "Lun": 0,
+        "DiskName": "[parameters('appDataDiskName')]",
+        "SizeBytes": "[mul(mul(mul(parameters('appDataDiskSizeGiB'), 1024), 1024), 1024)]",
+        "DriveLetter": "[parameters('appDataVolumeDriveLetter')]",
+        "FileSystemLabel": "[parameters('appDataVolumeLabel')]",
+        "AllocationUnitBytes": "[parameters('appDataVolumeAllocationUnitBytes')]"
+      }
+    ],
+    "sqlExpectedGuestDisks": [
+      {
+        "Lun": 0,
+        "DiskName": "[parameters('sqlDataDiskName')]",
+        "SizeBytes": "[mul(mul(mul(parameters('sqlDataDiskSizeGiB'), 1024), 1024), 1024)]",
+        "DriveLetter": "[parameters('sqlDataVolumeDriveLetter')]",
+        "FileSystemLabel": "[parameters('sqlDataVolumeLabel')]",
+        "AllocationUnitBytes": "[parameters('sqlDataVolumeAllocationUnitBytes')]"
+      },
+      {
+        "Lun": 1,
+        "DiskName": "[parameters('sqlLogDiskName')]",
+        "SizeBytes": "[mul(mul(mul(parameters('sqlLogDiskSizeGiB'), 1024), 1024), 1024)]",
+        "DriveLetter": "[parameters('sqlLogVolumeDriveLetter')]",
+        "FileSystemLabel": "[parameters('sqlLogVolumeLabel')]",
+        "AllocationUnitBytes": "[parameters('sqlLogVolumeAllocationUnitBytes')]"
+      }
+    ],
+    "appIdentity": "[if(empty(parameters('appExistingUserAssignedIdentityResourceIds')), createObject('type', 'SystemAssigned'), createObject('type', 'SystemAssigned, UserAssigned', 'userAssignedIdentities', toObject(parameters('appExistingUserAssignedIdentityResourceIds'), lambda('id', lambdaVariables('id')), lambda('id', createObject()))))]",
+    "sqlIdentity": "[if(empty(parameters('sqlExistingUserAssignedIdentityResourceIds')), createObject('type', 'SystemAssigned'), createObject('type', 'SystemAssigned, UserAssigned', 'userAssignedIdentities', toObject(parameters('sqlExistingUserAssignedIdentityResourceIds'), lambda('id', lambdaVariables('id')), lambda('id', createObject()))))]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('appNicName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "properties": {
+        "auxiliaryMode": "None",
+        "auxiliarySku": "None",
+        "disableTcpStateTracking": false,
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "privateIPAddressVersion": "IPv4",
+              "subnet": {
+                "id": "[parameters('subnetResourceId')]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2024-03-02",
+      "name": "[parameters('appDataDiskName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "sku": {
+        "name": "Premium_LRS"
+      },
+      "properties": {
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "diskSizeGB": "[parameters('appDataDiskSizeGiB')]",
+        "tier": "[parameters('appDataDiskTier')]",
+        "networkAccessPolicy": "AllowAll",
+        "publicNetworkAccess": "Enabled",
+        "encryption": {
+          "type": "EncryptionAtRestWithCustomerKey",
+          "diskEncryptionSetId": "[parameters('diskEncryptionSetResourceId')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-11-01",
+      "name": "[parameters('appVmName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "identity": "[variables('appIdentity')]",
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[parameters('imagePublisher')]",
+            "offer": "[parameters('imageOffer')]",
+            "sku": "[parameters('imageSku')]",
+            "version": "[parameters('imageVersion')]"
+          },
+          "osDisk": {
+            "name": "[parameters('appOsDiskName')]",
+            "createOption": "FromImage",
+            "caching": "ReadWrite",
+            "diskSizeGB": "[parameters('osDiskSizeGiB')]",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS",
+              "diskEncryptionSet": {
+                "id": "[parameters('diskEncryptionSetResourceId')]"
+              }
+            }
+          },
+          "dataDisks": [
+            {
+              "lun": 0,
+              "name": "[parameters('appDataDiskName')]",
+              "caching": "None",
+              "createOption": "Attach",
+              "deleteOption": "Detach",
+              "managedDisk": {
+                "id": "[resourceId('Microsoft.Compute/disks', parameters('appDataDiskName'))]"
+              }
+            }
+          ]
+        },
+        "osProfile": {
+          "computerName": "[parameters('appComputerName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "enableAutomaticUpdates": true,
+            "provisionVMAgent": true,
+            "patchSettings": {
+              "assessmentMode": "AutomaticByPlatform",
+              "patchMode": "AutomaticByPlatform",
+              "automaticByPlatformSettings": {
+                "bypassPlatformSafetyChecksOnUserSchedule": true
+              }
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('appNicName'))]"
+            }
+          ]
+        },
+        "securityProfile": {
+          "securityType": "TrustedLaunch",
+          "uefiSettings": {
+            "secureBootEnabled": true,
+            "vTpmEnabled": true
+          },
+          "encryptionAtHost": true
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/disks', parameters('appDataDiskName'))]",
+        "[resourceId('Microsoft.Network/networkInterfaces', parameters('appNicName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('appVmName'), 'AADLoginForWindows')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.ActiveDirectory",
+        "type": "AADLoginForWindows",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('appVmName'), 'AzurePolicyforWindows')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "properties": {
+        "publisher": "Microsoft.GuestConfiguration",
+        "type": "ConfigurationforWindows",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "enableAutomaticUpgrade": true
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "appAdministratorLoginAssignments",
+        "count": "[length(parameters('appAdministratorLoginPrincipalIds'))]"
+      },
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]",
+      "name": "[guid(resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName')), parameters('appAdministratorLoginPrincipalIds')[copyIndex()], variables('vmAdministratorLoginRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[parameters('appAdministratorLoginPrincipalIds')[copyIndex()]]",
+        "principalType": "Group",
+        "roleDefinitionId": "[variables('vmAdministratorLoginRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "appUserLoginAssignments",
+        "count": "[length(parameters('appUserLoginPrincipalIds'))]"
+      },
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]",
+      "name": "[guid(resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName')), parameters('appUserLoginPrincipalIds')[copyIndex()], variables('vmUserLoginRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[parameters('appUserLoginPrincipalIds')[copyIndex()]]",
+        "principalType": "Group",
+        "roleDefinitionId": "[variables('vmUserLoginRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('appGuestDiskPreparationActive')]",
+      "type": "Microsoft.Compute/virtualMachines/runCommands",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('appVmName'), 'lims-guest-disk-preparation')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('appTags')]",
+      "properties": {
+        "source": {
+          "script": "[variables('guestDiskPreparationScript')]"
+        },
+        "parameters": [
+          {
+            "name": "Target",
+            "value": "App"
+          },
+          {
+            "name": "Mode",
+            "value": "[variables('appGuestDiskPreparationMode')]"
+          },
+          {
+            "name": "ExpectedSubscriptionId",
+            "value": "[subscription().subscriptionId]"
+          },
+          {
+            "name": "ExpectedResourceGroupName",
+            "value": "[resourceGroup().name]"
+          },
+          {
+            "name": "ExpectedVmName",
+            "value": "[parameters('appVmName')]"
+          },
+          {
+            "name": "ExpectedComputerName",
+            "value": "[parameters('appComputerName')]"
+          },
+          {
+            "name": "ExpectedDisksJson",
+            "value": "[string(variables('appExpectedGuestDisks'))]"
+          },
+          {
+            "name": "DvdLetterMoveTarget",
+            "value": ""
+          }
+        ],
+        "timeoutInSeconds": "[parameters('guestDiskPreparationTimeoutInSeconds')]",
+        "treatFailureAsDeploymentFailure": true,
+        "asyncExecution": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Network/networkInterfaces",
+      "apiVersion": "2024-05-01",
+      "name": "[parameters('sqlNicName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "properties": {
+        "auxiliaryMode": "None",
+        "auxiliarySku": "None",
+        "disableTcpStateTracking": false,
+        "ipConfigurations": [
+          {
+            "name": "ipconfig1",
+            "properties": {
+              "privateIPAllocationMethod": "Dynamic",
+              "privateIPAddressVersion": "IPv4",
+              "subnet": {
+                "id": "[parameters('subnetResourceId')]"
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2024-03-02",
+      "name": "[parameters('sqlDataDiskName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "sku": {
+        "name": "Premium_LRS"
+      },
+      "properties": {
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "diskSizeGB": "[parameters('sqlDataDiskSizeGiB')]",
+        "tier": "[parameters('sqlDataDiskTier')]",
+        "networkAccessPolicy": "AllowAll",
+        "publicNetworkAccess": "Enabled",
+        "encryption": {
+          "type": "EncryptionAtRestWithCustomerKey",
+          "diskEncryptionSetId": "[parameters('diskEncryptionSetResourceId')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/disks",
+      "apiVersion": "2024-03-02",
+      "name": "[parameters('sqlLogDiskName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "sku": {
+        "name": "Premium_LRS"
+      },
+      "properties": {
+        "creationData": {
+          "createOption": "Empty"
+        },
+        "diskSizeGB": "[parameters('sqlLogDiskSizeGiB')]",
+        "tier": "[parameters('sqlLogDiskTier')]",
+        "networkAccessPolicy": "AllowAll",
+        "publicNetworkAccess": "Enabled",
+        "encryption": {
+          "type": "EncryptionAtRestWithCustomerKey",
+          "diskEncryptionSetId": "[parameters('diskEncryptionSetResourceId')]"
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines",
+      "apiVersion": "2024-11-01",
+      "name": "[parameters('sqlVmName')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "identity": "[variables('sqlIdentity')]",
+      "properties": {
+        "hardwareProfile": {
+          "vmSize": "[parameters('vmSize')]"
+        },
+        "storageProfile": {
+          "imageReference": {
+            "publisher": "[parameters('imagePublisher')]",
+            "offer": "[parameters('imageOffer')]",
+            "sku": "[parameters('imageSku')]",
+            "version": "[parameters('imageVersion')]"
+          },
+          "osDisk": {
+            "name": "[parameters('sqlOsDiskName')]",
+            "createOption": "FromImage",
+            "caching": "ReadWrite",
+            "diskSizeGB": "[parameters('osDiskSizeGiB')]",
+            "managedDisk": {
+              "storageAccountType": "Premium_LRS",
+              "diskEncryptionSet": {
+                "id": "[parameters('diskEncryptionSetResourceId')]"
+              }
+            }
+          },
+          "dataDisks": [
+            {
+              "lun": 0,
+              "name": "[parameters('sqlDataDiskName')]",
+              "caching": "ReadOnly",
+              "createOption": "Attach",
+              "deleteOption": "Detach",
+              "managedDisk": {
+                "id": "[resourceId('Microsoft.Compute/disks', parameters('sqlDataDiskName'))]"
+              }
+            },
+            {
+              "lun": 1,
+              "name": "[parameters('sqlLogDiskName')]",
+              "caching": "None",
+              "createOption": "Attach",
+              "deleteOption": "Detach",
+              "managedDisk": {
+                "id": "[resourceId('Microsoft.Compute/disks', parameters('sqlLogDiskName'))]"
+              }
+            }
+          ]
+        },
+        "osProfile": {
+          "computerName": "[parameters('sqlComputerName')]",
+          "adminUsername": "[parameters('adminUsername')]",
+          "adminPassword": "[parameters('adminPassword')]",
+          "windowsConfiguration": {
+            "enableAutomaticUpdates": true,
+            "provisionVMAgent": true,
+            "patchSettings": {
+              "assessmentMode": "AutomaticByPlatform",
+              "patchMode": "AutomaticByPlatform",
+              "automaticByPlatformSettings": {
+                "bypassPlatformSafetyChecksOnUserSchedule": true
+              }
+            }
+          }
+        },
+        "networkProfile": {
+          "networkInterfaces": [
+            {
+              "id": "[resourceId('Microsoft.Network/networkInterfaces', parameters('sqlNicName'))]"
+            }
+          ]
+        },
+        "securityProfile": {
+          "securityType": "TrustedLaunch",
+          "uefiSettings": {
+            "secureBootEnabled": true,
+            "vTpmEnabled": true
+          },
+          "encryptionAtHost": true
+        }
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/disks', parameters('sqlDataDiskName'))]",
+        "[resourceId('Microsoft.Compute/disks', parameters('sqlLogDiskName'))]",
+        "[resourceId('Microsoft.Network/networkInterfaces', parameters('sqlNicName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('sqlVmName'), 'AADLoginForWindows')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "properties": {
+        "publisher": "Microsoft.Azure.ActiveDirectory",
+        "type": "AADLoginForWindows",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+      ]
+    },
+    {
+      "type": "Microsoft.Compute/virtualMachines/extensions",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('sqlVmName'), 'AzurePolicyforWindows')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "properties": {
+        "publisher": "Microsoft.GuestConfiguration",
+        "type": "ConfigurationforWindows",
+        "typeHandlerVersion": "1.0",
+        "autoUpgradeMinorVersion": true,
+        "enableAutomaticUpgrade": true
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "sqlAdministratorLoginAssignments",
+        "count": "[length(parameters('sqlAdministratorLoginPrincipalIds'))]"
+      },
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]",
+      "name": "[guid(resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName')), parameters('sqlAdministratorLoginPrincipalIds')[copyIndex()], variables('vmAdministratorLoginRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[parameters('sqlAdministratorLoginPrincipalIds')[copyIndex()]]",
+        "principalType": "Group",
+        "roleDefinitionId": "[variables('vmAdministratorLoginRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+      ]
+    },
+    {
+      "copy": {
+        "name": "sqlUserLoginAssignments",
+        "count": "[length(parameters('sqlUserLoginPrincipalIds'))]"
+      },
+      "type": "Microsoft.Authorization/roleAssignments",
+      "apiVersion": "2022-04-01",
+      "scope": "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]",
+      "name": "[guid(resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName')), parameters('sqlUserLoginPrincipalIds')[copyIndex()], variables('vmUserLoginRoleDefinitionId'))]",
+      "properties": {
+        "principalId": "[parameters('sqlUserLoginPrincipalIds')[copyIndex()]]",
+        "principalType": "Group",
+        "roleDefinitionId": "[variables('vmUserLoginRoleDefinitionId')]"
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+      ]
+    },
+    {
+      "condition": "[variables('sqlGuestDiskPreparationActive')]",
+      "type": "Microsoft.Compute/virtualMachines/runCommands",
+      "apiVersion": "2024-11-01",
+      "name": "[format('{0}/{1}', parameters('sqlVmName'), 'lims-guest-disk-preparation')]",
+      "location": "[parameters('location')]",
+      "tags": "[variables('sqlTags')]",
+      "properties": {
+        "source": {
+          "script": "[variables('guestDiskPreparationScript')]"
+        },
+        "parameters": [
+          {
+            "name": "Target",
+            "value": "Sql"
+          },
+          {
+            "name": "Mode",
+            "value": "[variables('sqlGuestDiskPreparationMode')]"
+          },
+          {
+            "name": "ExpectedSubscriptionId",
+            "value": "[subscription().subscriptionId]"
+          },
+          {
+            "name": "ExpectedResourceGroupName",
+            "value": "[resourceGroup().name]"
+          },
+          {
+            "name": "ExpectedVmName",
+            "value": "[parameters('sqlVmName')]"
+          },
+          {
+            "name": "ExpectedComputerName",
+            "value": "[parameters('sqlComputerName')]"
+          },
+          {
+            "name": "ExpectedDisksJson",
+            "value": "[string(variables('sqlExpectedGuestDisks'))]"
+          },
+          {
+            "name": "DvdLetterMoveTarget",
+            "value": "Z"
+          }
+        ],
+        "timeoutInSeconds": "[parameters('guestDiskPreparationTimeoutInSeconds')]",
+        "treatFailureAsDeploymentFailure": true,
+        "asyncExecution": false
+      },
+      "dependsOn": [
+        "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+      ]
+    }
+  ],
+  "outputs": {
+    "appVmResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the APP virtual machine."
+      },
+      "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName'))]"
+    },
+    "sqlVmResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the SQL virtual machine."
+      },
+      "value": "[resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName'))]"
+    },
+    "appVmPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "System-assigned managed identity principal ID of the APP virtual machine."
+      },
+      "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', parameters('appVmName')), '2024-11-01', 'full').identity.principalId]"
+    },
+    "sqlVmPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "System-assigned managed identity principal ID of the SQL virtual machine."
+      },
+      "value": "[reference(resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName')), '2024-11-01', 'full').identity.principalId]"
+    },
+    "appNicResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the APP NIC."
+      },
+      "value": "[resourceId('Microsoft.Network/networkInterfaces', parameters('appNicName'))]"
+    },
+    "sqlNicResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the SQL NIC."
+      },
+      "value": "[resourceId('Microsoft.Network/networkInterfaces', parameters('sqlNicName'))]"
+    },
+    "appDataDiskResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the APP application data disk."
+      },
+      "value": "[resourceId('Microsoft.Compute/disks', parameters('appDataDiskName'))]"
+    },
+    "sqlDataDiskResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the SQL DATA disk."
+      },
+      "value": "[resourceId('Microsoft.Compute/disks', parameters('sqlDataDiskName'))]"
+    },
+    "sqlLogDiskResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the SQL LOG disk."
+      },
+      "value": "[resourceId('Microsoft.Compute/disks', parameters('sqlLogDiskName'))]"
+    }
+  }
+}

@@ -1,0 +1,44 @@
+Fix Bicep loadTextContent() script-size failure (BCP184/BCP062/BCP104) by condensing the embedded script and adding a CI size guard
+
+Root cause: the committed Initialize-LimsGuestDataDisks.ps1 (136,420 chars)
+exceeded Bicep's documented 131,072-character loadTextContent() limit
+(https://learn.microsoft.com/en-us/azure/azure-resource-manager/bicep/bicep-functions-files#loadtextcontent),
+causing BCP184 at the loadTextContent() call in main.bicep, with BCP062 and
+BCP104 as downstream consequences at every consuming resource.
+
+This is a packaging/documentation-only correction. No executable behavior,
+safety checks, fixed allowlists, disk bindings, parameters, execution modes,
+or resource scopes were changed.
+
+1. Initialize-LimsGuestDataDisks.ps1: condensed explanatory/research prose
+   comments to concise operational comments and pointers into a new
+   companion document; all .SYNOPSIS/.PARAMETER help and the 8-point (+2a)
+   safety model are preserved in full or condensed form. Script is now
+   97,037 characters (CRLF-normalized), ~3% under the 100,000-character
+   project budget and ~26% under Bicep's 131,072-character hard limit.
+   Verified via PowerShell AST semantic-token-stream comparison: the
+   before/after token streams (7,891 tokens, excluding comments/newlines)
+   are IDENTICAL in Kind and Text — no executable code, string literal,
+   here-string, parameter declaration, or token boundary changed. No
+   comment-based directives (e.g. #Requires) exist in either version.
+
+2. Initialize-LimsGuestDataDisks.research.md (new): the full, verbatim
+   research prose, citations, and defect-history narrative extracted from
+   the condensed comments, organized by the function/section each belongs
+   to, so none of the original rationale is lost.
+
+3. .azuredevops/pipelines/ci.yml: added a "loadTextContent() script-size
+   guard" step that runs before Bicep build/lint. It discovers every
+   loadTextContent() call across all .bicep files, resolves the referenced
+   path, and fails (hard, never silently) if the file is missing, fails to
+   decode as strict UTF-8, or exceeds the 100,000-character project budget
+   after conservative CRLF normalization. The failure message explains both
+   the 100,000 project budget and Bicep's 131,072 hard limit.
+
+No compression, minification, generated runtime copies, Base64 wrappers,
+external script hosting, or alternate guest-execution mechanism were
+introduced. The script remains directly reviewable and is still embedded
+via the existing loadTextContent() mechanism.
+
+enableGuestDiskPreparation = false and guestDiskPreparationExecutionTarget =
+'None' remain unchanged in both affected .bicepparam files.

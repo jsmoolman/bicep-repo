@@ -1,0 +1,261 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2018-05-01/subscriptionDeploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "metadata": {
+    "_generator": {
+      "name": "bicep",
+      "version": "0.46.1.21595",
+      "templateHash": "3470102602638170771"
+    },
+    "description": "Subscription-scoped orchestrator for the narrow LIMS WS2025 DEV v2 SQL installation-media container RBAC exception (docs/scope.md): resolves and verifies the existing SQL v2 VM system-assigned identity in the DEV subscription (read-only — no resource is ever deployed there), then grants that identity exactly one built-in Storage Blob Data Reader role assignment scoped to the existing mssql-2022-source container in the MGMT subscription — never storage-account, resource-group, or subscription scope. Creates no VM, identity, storage account, container, custom role, account key, or SAS token. Deliberately cross-subscription: the DEV VM lookup and the MGMT role-assignment target are each an explicitly, separately scoped module — never conflated."
+  },
+  "parameters": {
+    "sqlVmResourceGroupResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the existing DEV resource group hosting the SQL v2 VM, e.g. /subscriptions/<dev-subscription-id>/resourceGroups/rg-compute-lims-dev-westeu. The DEV subscription ID and resource group name are both derived from this single authoritative value. This composition creates no resource group and never deploys any resource into this subscription — the module scoped here performs a read-only existing-VM identity lookup only."
+      }
+    },
+    "sqlVmName": {
+      "type": "string",
+      "metadata": {
+        "description": "Resource name of the existing SQL v2 virtual machine, e.g. vm-lims-dev-v2-westeu-002. Referenced only as an existing resource for identity resolution — not created, modified, or redefined here."
+      }
+    },
+    "expectedSqlVmPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Customer-attested expected principalId of the SQL VM system-assigned managed identity — verification evidence only. See modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep for how it is used: it is never the functional identity passed to the role assignment, only an independent check against the live-resolved value."
+      }
+    },
+    "storageResourceGroupResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the existing MGMT resource group hosting the installation-media storage account, e.g. /subscriptions/<mgmt-subscription-id>/resourceGroups/rg-core-lims-mgmt-westeu. The MGMT subscription ID and resource group name are both derived from this single authoritative value. This is the only subscription this composition deploys (creates) anything into — exactly one Microsoft.Authorization/roleAssignments resource, scoped to the container below."
+      }
+    },
+    "storageAccountName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing storage account hosting the installation-media container, e.g. salimsmgmtwe. Referenced only as an existing resource — not created, modified, or redefined here."
+      }
+    },
+    "containerName": {
+      "type": "string",
+      "metadata": {
+        "description": "Name of the existing blob container to grant read access to, e.g. mssql-2022-source. Referenced only as an existing resource — not created, modified, or redefined here."
+      }
+    }
+  },
+  "variables": {
+    "devResourceGroupIdSegments": "[split(parameters('sqlVmResourceGroupResourceId'), '/')]",
+    "devSubscriptionId": "[variables('devResourceGroupIdSegments')[2]]",
+    "devResourceGroupName": "[variables('devResourceGroupIdSegments')[4]]",
+    "mgmtResourceGroupIdSegments": "[split(parameters('storageResourceGroupResourceId'), '/')]",
+    "mgmtSubscriptionId": "[variables('mgmtResourceGroupIdSegments')[2]]",
+    "mgmtResourceGroupName": "[variables('mgmtResourceGroupIdSegments')[4]]",
+    "distinctSubscriptionGuard": "[filter(createArray(variables('devSubscriptionId')), lambda('id', not(equals(lambdaVariables('id'), variables('mgmtSubscriptionId')))))]",
+    "verifiedDevSubscriptionId": "[variables('distinctSubscriptionGuard')[0]]"
+  },
+  "resources": [
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "resolve-sql-vm-identity",
+      "subscriptionId": "[variables('verifiedDevSubscriptionId')]",
+      "resourceGroup": "[variables('devResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "sqlVmName": {
+            "value": "[parameters('sqlVmName')]"
+          },
+          "expectedSqlVmPrincipalId": {
+            "value": "[parameters('expectedSqlVmPrincipalId')]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "6568812453091461791"
+            },
+            "description": "Resolves and verifies the existing system-assigned managed identity principalId of the existing LIMS WS2025 DEV v2 SQL virtual machine, for the narrow SQL v2 installation-media container RBAC exception in docs/scope.md. References the VM as an existing resource only — creates, modifies, or replaces no identity. The supplied expectedSqlVmPrincipalId is verification evidence only: it is independently compared against the VM live-resolved identity.principalId, and this deployment fails closed if they do not match. The output is always the live-resolved value, never the supplied expected value, so it is never used as a hardcoded functional identity downstream."
+          },
+          "parameters": {
+            "sqlVmName": {
+              "type": "string",
+              "metadata": {
+                "description": "Resource name of the existing SQL virtual machine whose system-assigned identity is resolved, e.g. vm-lims-dev-v2-westeu-002. Referenced only as an existing resource — not created, modified, or redefined here."
+              }
+            },
+            "expectedSqlVmPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "Customer-attested expected principalId of the SQL VM system-assigned managed identity, used ONLY as independent verification evidence against the live-resolved value below — never used as the functional principal passed to any role assignment. A mismatch fails this deployment closed."
+              }
+            }
+          },
+          "resources": [],
+          "outputs": {
+            "verifiedPrincipalId": {
+              "type": "string",
+              "metadata": {
+                "description": "The SQL VM system-assigned identity principalId, live-resolved from the existing VM resource and verified to match expectedSqlVmPrincipalId. Callers should use only this output functionally — never expectedSqlVmPrincipalId directly."
+              },
+              "value": "[filter(createArray(reference(resourceId('Microsoft.Compute/virtualMachines', parameters('sqlVmName')), '2024-11-01', 'full').identity.principalId), lambda('id', equals(lambdaVariables('id'), parameters('expectedSqlVmPrincipalId'))))[0]]"
+            }
+          }
+        }
+      }
+    },
+    {
+      "type": "Microsoft.Resources/deployments",
+      "apiVersion": "2025-04-01",
+      "name": "sql-media-container-rbac",
+      "subscriptionId": "[variables('mgmtSubscriptionId')]",
+      "resourceGroup": "[variables('mgmtResourceGroupName')]",
+      "properties": {
+        "expressionEvaluationOptions": {
+          "scope": "inner"
+        },
+        "mode": "Incremental",
+        "parameters": {
+          "storageAccountName": {
+            "value": "[parameters('storageAccountName')]"
+          },
+          "containerName": {
+            "value": "[parameters('containerName')]"
+          },
+          "principalId": {
+            "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('verifiedDevSubscriptionId'), variables('devResourceGroupName')), 'Microsoft.Resources/deployments', 'resolve-sql-vm-identity'), '2025-04-01').outputs.verifiedPrincipalId.value]"
+          }
+        },
+        "template": {
+          "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentTemplate.json#",
+          "contentVersion": "1.0.0.0",
+          "metadata": {
+            "_generator": {
+              "name": "bicep",
+              "version": "0.46.1.21595",
+              "templateHash": "7870483133537714131"
+            },
+            "description": "Grants an already-resolved, already-verified principal exactly one built-in Storage Blob Data Reader role assignment, scoped to exactly the existing mssql-2022-source blob container inside the existing salimsmgmtwe storage account — never storage-account, resource-group, or subscription scope. Part of the narrow LIMS WS2025 DEV v2 SQL installation-media container RBAC exception in docs/scope.md. Creates no storage account, container, account key, SAS token, or additional identity; references both the storage account and container as existing resources and modifies neither."
+          },
+          "parameters": {
+            "storageAccountName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the existing storage account hosting the installation-media container, e.g. salimsmgmtwe. Referenced only as an existing resource — not created, modified, or redefined here."
+              }
+            },
+            "containerName": {
+              "type": "string",
+              "metadata": {
+                "description": "Name of the existing blob container to grant read access to, e.g. mssql-2022-source. Referenced only as an existing resource — not created, modified, or redefined here."
+              }
+            },
+            "principalId": {
+              "type": "string",
+              "metadata": {
+                "description": "The already-resolved, already-verified principalId of the SQL VM system-assigned managed identity (see modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep). This module performs no verification of its own and resolves no identity — it only consumes this value."
+              }
+            }
+          },
+          "variables": {
+            "storageBlobDataReaderRoleDefinitionId": "[subscriptionResourceId('Microsoft.Authorization/roleDefinitions', '2a2b9908-6ea1-4ae2-8e65-a410df84e7d1')]"
+          },
+          "resources": [
+            {
+              "type": "Microsoft.Authorization/roleAssignments",
+              "apiVersion": "2022-04-01",
+              "scope": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName'))]",
+              "name": "[guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName')), parameters('principalId'), variables('storageBlobDataReaderRoleDefinitionId'))]",
+              "properties": {
+                "principalId": "[parameters('principalId')]",
+                "principalType": "ServicePrincipal",
+                "roleDefinitionId": "[variables('storageBlobDataReaderRoleDefinitionId')]"
+              }
+            }
+          ],
+          "outputs": {
+            "roleAssignmentId": {
+              "type": "string",
+              "metadata": {
+                "description": "Full ARM resource ID of the single Storage Blob Data Reader role assignment created by this module."
+              },
+              "value": "[extensionResourceId(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName')), 'Microsoft.Authorization/roleAssignments', guid(resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName')), parameters('principalId'), variables('storageBlobDataReaderRoleDefinitionId')))]"
+            },
+            "containerResourceId": {
+              "type": "string",
+              "metadata": {
+                "description": "Full ARM resource ID of the exact container scope this role assignment targets (never the storage account, resource group, or subscription)."
+              },
+              "value": "[resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', parameters('storageAccountName'), 'default', parameters('containerName'))]"
+            }
+          }
+        }
+      },
+      "dependsOn": [
+        "[extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('verifiedDevSubscriptionId'), variables('devResourceGroupName')), 'Microsoft.Resources/deployments', 'resolve-sql-vm-identity')]"
+      ]
+    }
+  ],
+  "outputs": {
+    "devSubscriptionId": {
+      "type": "string",
+      "metadata": {
+        "description": "DEV subscription ID the SQL VM identity was resolved from (derived from sqlVmResourceGroupResourceId)."
+      },
+      "value": "[variables('verifiedDevSubscriptionId')]"
+    },
+    "devResourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "DEV resource group hosting the SQL VM."
+      },
+      "value": "[variables('devResourceGroupName')]"
+    },
+    "mgmtSubscriptionId": {
+      "type": "string",
+      "metadata": {
+        "description": "MGMT subscription ID the role assignment was deployed into (derived from storageResourceGroupResourceId)."
+      },
+      "value": "[variables('mgmtSubscriptionId')]"
+    },
+    "mgmtResourceGroupName": {
+      "type": "string",
+      "metadata": {
+        "description": "MGMT resource group hosting the storage account."
+      },
+      "value": "[variables('mgmtResourceGroupName')]"
+    },
+    "verifiedSqlVmPrincipalId": {
+      "type": "string",
+      "metadata": {
+        "description": "Live-resolved, verified principalId of the SQL VM system-assigned identity actually granted access."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('verifiedDevSubscriptionId'), variables('devResourceGroupName')), 'Microsoft.Resources/deployments', 'resolve-sql-vm-identity'), '2025-04-01').outputs.verifiedPrincipalId.value]"
+    },
+    "roleAssignmentId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the single Storage Blob Data Reader role assignment created."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('mgmtSubscriptionId'), variables('mgmtResourceGroupName')), 'Microsoft.Resources/deployments', 'sql-media-container-rbac'), '2025-04-01').outputs.roleAssignmentId.value]"
+    },
+    "containerResourceId": {
+      "type": "string",
+      "metadata": {
+        "description": "Full ARM resource ID of the exact container scope this role assignment targets (never the storage account, resource group, or subscription)."
+      },
+      "value": "[reference(extensionResourceId(format('/subscriptions/{0}/resourceGroups/{1}', variables('mgmtSubscriptionId'), variables('mgmtResourceGroupName')), 'Microsoft.Resources/deployments', 'sql-media-container-rbac'), '2025-04-01').outputs.containerResourceId.value]"
+    }
+  }
+}

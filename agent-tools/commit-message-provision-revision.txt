@@ -1,0 +1,117 @@
+Replace standalone staging pipeline with pinned provision-lims-ws2025-dev-sql.yml
+
+Revises commit 27b86a3 before its first live run, per explicit follow-up
+direction: replaces the standalone, operator-parameterized staging
+pipeline with a single, pinned provisioning pipeline, structured so a
+future 'install' action (SQL Server Setup, still out of scope) can
+reuse the same Managed Run Command submit/poll/verify mechanism.
+
+Removed: .azuredevops/pipelines/stage-lims-ws2025-dev-sql-media.yml
+
+Added: .azuredevops/pipelines/provision-lims-ws2025-dev-sql.yml
+- Manually triggered only (trigger: none / pr: none). Exposes exactly
+  one runtime parameter besides the service connection: `action`, type
+  string with `values: [stage-only]` -- 'stage-only' is its sole
+  allowed value today; a future 'install' action would extend this
+  same list and add one more conditional step block, not a new
+  pipeline or mechanism (see this file's own header comment).
+- Pins the DEV subscription (8ebb26a1-674a-40d1-97f8-e0a237e288a6),
+  resource group (rg-compute-lims-dev-westeu), VM name
+  (vm-lims-dev-v2-westeu-002), and the staging script's repository path
+  as fixed pipeline variables -- removed as operator-overridable
+  parameters entirely, since this pipeline is scoped to exactly one VM
+  and a parameter mix-up on these specific values is the mistake worth
+  eliminating outright rather than only detecting. The identity-guard
+  step still independently compares the live VM's resolved resource ID
+  against this pinned target before ever submitting a script, and the
+  same pinned resource-group/VM-name values are reused, unchanged, for
+  submission, polling, and cleanup.
+- Explicit job `timeoutInMinutes: 60`, aligned with a 2400s/40min guest
+  script timeout and a 2700s/45min polling deadline -- the previous
+  pipeline's 7200s (2h) guest timeout plus a 600s polling margin could
+  exceed the Microsoft-hosted agent's default 60-minute job timeout,
+  which has not been separately confirmed raised for this
+  organization/project. All three values are called out together in
+  the pipeline's own header comment as values that must be revisited
+  together, never one at a time.
+
+Added: .azuredevops/pipelines/scripts/submit-and-wait-run-command.sh
+- Factored out of the previous pipeline's inline bash into one shared,
+  independently testable script, called by the `stage-only` action
+  today and intended to be reused unchanged by a future `install`
+  action.
+- Allows a bounded number of startup retries (fixed interval) when the
+  run-command resource is not yet visible to `az vm run-command show`
+  (a transient "ResourceNotFound"-shaped error), or is visible but has
+  not yet reported any instanceView.executionState -- both treated as
+  the same expected "not started yet" condition. Any other CLI error
+  (authorization failures, malformed requests, etc.) is surfaced and
+  fails the run immediately, with zero retries, never mistaken for
+  "not yet visible." Once an executionState has been observed at least
+  once, polls at a normal interval until a terminal state or an
+  overall wall-clock polling deadline, whichever comes first. Reports
+  success only when Azure returns executionState 'Succeeded' AND the
+  guest-reported exit code is exactly 0.
+- Sets pipeline variable `runCommandName` as soon as the name is known
+  (before submission is even attempted), and `stagingIndeterminate`
+  (true only when the real-world result could not be conclusively
+  determined: deadline expiry, never-became-visible, a non-transient
+  CLI error mid-poll, or a 'Succeeded' state with no exit code --
+  false for every definite outcome, including a definite failure or
+  nonzero exit code). The pipeline's cleanup step reads
+  `stagingIndeterminate` and deliberately skips deleting the run-command
+  resource when true, retaining its name for manual inspection rather
+  than deleting a resource that may still be executing.
+
+Modified:
+- operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1
+  and PSScriptAnalyzerSettings.psd1: updated their own header-comment
+  references to the renamed pipeline file (no functional change to
+  either file; staging logic, identity checks, and PS5.1-compatibility
+  settings are unchanged from 27b86a3).
+- docs/operations.md: rewrote the "Delivery mechanisms" subsection of
+  "LIMS WS2025 DEV v2 -- SQL installation-media staging" to describe
+  provision-lims-ws2025-dev-sql.yml and its `stage-only` action, the
+  pinned target, the bounded-startup-retry/permanent-error/wall-clock
+  polling design, the aligned time budget, and updated validation
+  results. The managed-identity access path and staging destination
+  (C:\SQLMedia\SQL2022) are unchanged and still described exactly as
+  before.
+- docs/scope.md: no change needed -- its staging exception already
+  describes "a dedicated, manually triggered Azure DevOps pipeline"
+  generically, by mechanism rather than by filename, and remains
+  accurate.
+
+Validation:
+- YAML: provision-lims-ws2025-dev-sql.yml parses cleanly (js-yaml);
+  structure confirmed (trigger/pr disabled, 2 parameters, 9 pinned
+  variables, 1 job with timeoutInMinutes 60, 4 steps including the
+  stage-only conditional block).
+- Polling logic: ran the real, unmodified
+  submit-and-wait-run-command.sh locally via Git Bash against a
+  scripted fake `az` (no real Azure CLI or VM dependency), covering all
+  four requested fixtures:
+    1. Delayed startup then success -- two bounded "not yet visible"
+       startup retries, then Running, then Succeeded/exit 0 -> exit 0,
+       stagingIndeterminate=false.
+    2. Permanent CLI failure (AuthorizationFailed on the very first
+       poll) -- surfaced immediately with zero retries -> exit 1,
+       stagingIndeterminate=true.
+    3. Polling-deadline expiry (Running forever) -- stopped by the
+       wall-clock deadline, not an infinite loop -> exit 1,
+       stagingIndeterminate=true.
+    4. Nonzero guest exit code (Succeeded, exit code 1) -> exit 1,
+       stagingIndeterminate=false (a definite result, safe to clean
+       up).
+  All four produced the expected exit code and stagingIndeterminate
+  value; stdout/stderr ordering was independently re-verified via
+  separate stream capture to rule out a console-interleaving artifact
+  as an actual logic defect.
+- PSScriptAnalyzer (PS5.1-targeted settings) on the staging script: 0
+  findings. Pester: all 41 existing tests still pass unchanged
+  (staging script logic itself was not touched by this revision).
+- Confirmed no remaining references anywhere in the repository to the
+  removed stage-lims-ws2025-dev-sql-media.yml filename.
+
+No execution against real Azure by this repository -- the first real
+run is left for the operator.

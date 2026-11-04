@@ -1,0 +1,1 @@
+﻿C:\Source\bicep-repo\bicep-repo\modules\compute\lims-ws2025-dev-foundation\scripts\PSScriptAnalyzerSettings.psd1

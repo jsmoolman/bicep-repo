@@ -1,0 +1,141 @@
+=========== 1. delayed-success (subscription correct) ===========
+##vso[task.setvariable variable=runCommandName]test-delayed-success
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-delayed-success' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6, script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+Startup retry 1/20: command not yet visible (ERROR: (ResourceNotFound) The entity was not found.); retrying in 1s...
+Startup retry 2/20: command not yet visible (ERROR: (ResourceNotFound) The entity was not found.); retrying in 1s...
+Poll at 2s: executionState=Running
+Poll at 4s: executionState=Succeeded
+##vso[task.setvariable variable=stagingIndeterminate]false
+===== Managed Run Command result =====
+Name           : test-delayed-success
+ExecutionState : Succeeded
+ExitCode       : 0
+---- Guest script output (compact summary) ----
+===== LIMS SQL v2 installation-media staging: SUCCESS =====
+Destination: C:\SQLMedia\SQL2022
+=======================================
+Managed Run Command 'test-delayed-success' succeeded with exit code 0.
+Exit=0 Indeterminate=false
+---cleanup---
+Deleting Managed Run Command resource 'test-delayed-success' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6)...
+fake az: deleted run-command resource
+OK: cleanup deleted as expected
+
+=========== 2. permanent-failure (indeterminate -> cleanup must skip) ===========
+##vso[task.setvariable variable=runCommandName]test-permanent-failure
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-permanent-failure' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6, script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+ERROR: 'az vm run-command show --instance-view' failed for 'test-permanent-failure' with a non-transient error -- surfacing immediately rather than retrying: ERROR: (AuthorizationFailed) The client does not have authorization to perform action 'Microsoft.Compute/virtualMachines/runCommands/read'.
+Run-command name: test-permanent-failure
+Its real-world state has not been conclusively determined by this run -- it is being retained rather than deleted. Inspect it manually with:
+  az vm run-command show --subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-permanent-failure --instance-view
+Exit=1 Indeterminate=true
+---cleanup---
+The result for 'test-permanent-failure' could not be conclusively determined -- it may still be executing. Deliberately NOT deleting it.
+Run-command name: test-permanent-failure
+Inspect manually with:
+  az vm run-command show --subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-permanent-failure --instance-view
+OK: cleanup skipped deletion as expected
+
+=========== 3. deadline-expiry (indeterminate -> cleanup must skip) ===========
+##vso[task.setvariable variable=runCommandName]test-deadline-expiry
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-deadline-expiry' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6, script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 3s)...
+Poll at 0s: executionState=Running
+Poll at 1s: executionState=Running
+Poll at 2s: executionState=Running
+ERROR: polling deadline of 3s exceeded without Azure ever reporting a terminal execution state for 'test-deadline-expiry'. Its real-world state cannot be conclusively determined -- it may still be executing in the guest.
+Run-command name: test-deadline-expiry
+Its real-world state has not been conclusively determined by this run -- it is being retained rather than deleted. Inspect it manually with:
+  az vm run-command show --subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-deadline-expiry --instance-view
+Exit=1 Indeterminate=true
+---cleanup---
+The result for 'test-deadline-expiry' could not be conclusively determined -- it may still be executing. Deliberately NOT deleting it.
+Run-command name: test-deadline-expiry
+Inspect manually with:
+  az vm run-command show --subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-deadline-expiry --instance-view
+OK: cleanup skipped deletion as expected
+
+=========== 4. nonzero-exit (determinate failure -> cleanup must still delete) ===========
+##vso[task.setvariable variable=runCommandName]test-nonzero-exit
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-nonzero-exit' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6, script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+Poll at 0s: executionState=Succeeded
+##vso[task.setvariable variable=stagingIndeterminate]false
+===== Managed Run Command result =====
+Name           : test-nonzero-exit
+ExecutionState : Succeeded
+ExitCode       : 1
+---- Guest script output (compact summary) ----
+
+---- Guest script error ----
+Assert-StagingTargetIdentity: guest hostname mismatch.
+=======================================
+ERROR: guest script exited with code 1 (expected 0).
+Exit=1 Indeterminate=false
+---cleanup---
+Deleting Managed Run Command resource 'test-nonzero-exit' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6)...
+fake az: deleted run-command resource
+OK: cleanup deleted as expected
+
+=========== 5. Negative control: wrong subscription passed to submit script ===========
+##vso[task.setvariable variable=runCommandName]test-delayed-success
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-delayed-success' (subscription: 11111111-1111-1111-1111-111111111111, script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+TEST FAILURE: --subscription was '11111111-1111-1111-1111-111111111111', expected '8ebb26a1-674a-40d1-97f8-e0a237e288a6'.
+ERROR: 'az vm run-command create' itself failed, or its response was lost -- whether Azure actually accepted this submission cannot be determined, so it is treated as indeterminate rather than 'nothing was created'.
+Run-command name: test-delayed-success
+Its real-world state has not been conclusively determined by this run -- it is being retained rather than deleted. Inspect it manually with:
+  az vm run-command show --subscription 11111111-1111-1111-1111-111111111111 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-delayed-success --instance-view
+Exit=1
+OK: harness correctly caught the wrong subscription
+
+=========== 6. Cleanup with no RUN_COMMAND_NAME recorded (nothing submitted) ===========
+No Managed Run Command resource name was ever recorded this run; nothing to delete.
+OK: no-op as expected
+
+=========== 7. Cleanup with STAGING_INDETERMINATE entirely unset (must default to retain) ===========
+The result for 'test-unset-indeterminate' could not be conclusively determined -- it may still be executing. Deliberately NOT deleting it.
+Run-command name: test-unset-indeterminate
+Inspect manually with:
+  az vm run-command show --subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6 --resource-group rg-compute-lims-dev-westeu --vm-name vm-lims-dev-v2-westeu-002 --name test-unset-indeterminate --instance-view
+OK: retained by default as expected
+
+=========== 8. --script receives the real multiline PowerShell source as one argument, verbatim ===========
+##vso[task.setvariable variable=runCommandName]test-delayed-success
+##vso[task.setvariable variable=stagingIndeterminate]true
+Submitting Managed Run Command 'test-delayed-success' (subscription: 8ebb26a1-674a-40d1-97f8-e0a237e288a6, script: agent-tools/fixtures/fake-script-with-vars-and-quotes.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+Startup retry 1/20: command not yet visible (ERROR: (ResourceNotFound) The entity was not found.); retrying in 1s...
+Startup retry 2/20: command not yet visible (ERROR: (ResourceNotFound) The entity was not found.); retrying in 1s...
+Poll at 3s: executionState=Running
+Poll at 4s: executionState=Succeeded
+##vso[task.setvariable variable=stagingIndeterminate]false
+===== Managed Run Command result =====
+Name           : test-delayed-success
+ExecutionState : Succeeded
+ExitCode       : 0
+---- Guest script output (compact summary) ----
+===== LIMS SQL v2 installation-media staging: SUCCESS =====
+Destination: C:\SQLMedia\SQL2022
+=======================================
+Managed Run Command 'test-delayed-success' succeeded with exit code 0.
+Exit=0 Indeterminate=false
+OK: --script content matched the fixture's PowerShell variables/quotes/newlines exactly
+
+=========== 9. Missing SCRIPT_TO_SUBMIT file prevents submission entirely ===========
+cat: agent-tools/fixtures/does-not-exist.ps1: No such file or directory
+ERROR: failed to read script content from 'agent-tools/fixtures/does-not-exist.ps1'; nothing has been submitted.
+Exit=2
+OK: read failure caught before anything was recorded or submitted
+
+=========== 10. Empty SCRIPT_TO_SUBMIT file prevents submission entirely ===========
+ERROR: script content read from 'agent-tools/fixtures/fake-script-empty.ps1' is empty; nothing has been submitted.
+Exit=2
+OK: empty content caught before anything was recorded or submitted
+
+=========== 11. Regression guard: --script must never use the broken '@<path>' convention ===========
+OK: --script carries literal content, not an '@<path>' reference
+
+
+==================== OVERALL: PASS ====================

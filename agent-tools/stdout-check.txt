@@ -1,0 +1,13 @@
+##vso[task.setvariable variable=runCommandName]test-nonzero-exit
+##vso[task.setvariable variable=stagingIndeterminate]false
+Submitting Managed Run Command 'test-nonzero-exit' (script: operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1, guest timeout: 2400s, poll deadline: 2700s)...
+Poll at 0s: executionState=Succeeded
+===== Managed Run Command result =====
+Name           : test-nonzero-exit
+ExecutionState : Succeeded
+ExitCode       : 1
+---- Guest script output (compact summary) ----
+
+---- Guest script error ----
+Assert-StagingTargetIdentity: guest hostname mismatch.
+=======================================

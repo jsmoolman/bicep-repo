@@ -1,0 +1,65 @@
+Strip leading BOM and validate root element in Blob listing XML parsing
+
+The live stage-only run received a Blob listing XML page and failed
+converting it to System.Xml.XmlDocument. The failed [xml] cast's own
+PSInvalidCastException embeds the entire input value being cast --
+i.e. the full raw response body -- into its Message, which then
+reached the pipeline log verbatim via Assert-LimsSqlMediaStagingFailure
+and Write-Error.
+
+Root cause: a UTF-8 BOM (U+FEFF) survives as a literal leading
+character once the response body is decoded to a .NET string -- at
+that point it is ordinary string content, not an encoding marker a
+byte-stream-based parser would silently consume, so .NET's XML parser
+rejects it as invalid content at the root level.
+
+Fix in ConvertFrom-BlobListingXml (operations/compute/lims-ws2025-dev-
+sql-media-staging/Stage-LimsSqlInstallationMedia.ps1):
+- Strip a leading U+FEFF from the response string before parsing, the
+  same way the diagnostic used while investigating the live failure
+  stripped it.
+- Parse via XmlDocument.LoadXml() directly instead of the [xml] cast
+  operator, specifically to avoid PSInvalidCastException's raw-body-
+  embedding Message. A failed LoadXml() call is wrapped by PowerShell
+  in a MethodInvocationException (any direct .NET method call gets
+  this treatment); its InnerException is the real XmlException, which
+  is unwrapped to report a short diagnostic -- exception type, and
+  LineNumber/LinePosition when the parser provides them -- without
+  ever interpolating any exception Message or the response body
+  itself into the failure message that reaches the pipeline log.
+- Explicitly validate the parsed document's root element is
+  'EnumerationResults'; a well-formed-but-wrong-shaped response (e.g.
+  an Azure <Error> document) now fails closed with a clear message
+  instead of silently matching zero blobs and an empty NextMarker.
+- Pagination (NextMarker) is unchanged/preserved.
+
+This failure path is reached only while building the staging plan,
+before any destination directory is created or any file is written or
+downloaded -- consistent with this script's existing "fail before any
+write" design; nothing about that control flow needed to change.
+
+Verification performed (Windows PowerShell 5.1 -- this script's actual
+guest runtime, not just the cross-platform pwsh Pester run in CI):
+- Added three Pester fixtures to Stage-LimsSqlInstallationMedia.Tests.ps1:
+  a BOM-prefixed page with an XML declaration (parses correctly,
+  pagination/NextMarker preserved), a well-formed-wrong-root page
+  (fails closed, never silently empty), and a malformed-XML page
+  (fails with a short diagnostic -- exception type + line/position --
+  that never echoes the raw response text, asserted against a planted
+  sensitive marker string).
+- Added an orchestration-level fixture (Get-LimsSqlMediaStagingPlan)
+  confirming a malformed listing page blocks before any write/download
+  adapter is ever invoked (Get-FreeBytesOnDriveAdapter,
+  New-StagingDirectoryAdapter, Invoke-BlobDownloadToFileAdapter all
+  asserted at zero invocations), and that the propagated error message
+  never contains the raw response body.
+- Ran the full suite under genuine Windows PowerShell 5.1
+  (powershell.exe 5.1.26100.9711, not pwsh): 44/44 tests pass.
+- Ran PSScriptAnalyzer with this directory's PS5.1-compatibility
+  settings against the modified script: no issues found.
+
+No change to pipeline submission (submit-and-wait-run-command.sh),
+targeting (Assert-StagingTargetIdentity), or cleanup
+(cleanup-run-command.sh) logic.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>

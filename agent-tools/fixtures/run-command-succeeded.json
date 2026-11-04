@@ -1,0 +1,8 @@
+{
+  "instanceView": {
+    "executionState": "Succeeded",
+    "exitCode": 0,
+    "output": "===== LIMS SQL v2 installation-media staging: SUCCESS =====\nDestination         : C:\\SQLMedia\\SQL2022\nExpected files       : 42\nVerified files       : 42\nFiles copied         : 2\nFiles reused (skip)  : 40\nBytes copied         : 123456789\nSETUP.EXE path       : C:\\SQLMedia\\SQL2022\\SETUP.EXE\n============================================================",
+    "error": ""
+  }
+}

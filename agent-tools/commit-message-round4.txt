@@ -1,0 +1,51 @@
+Correct wording in e87fcb1: deployment-record vs. workload-resource claims, what-if preview limits
+
+Documentation/comment-only correction to the SQL v2 -> installation-media
+container RBAC composition added in e87fcb1. No executable Bicep logic,
+role, principal resolution, scope, pipeline actions, or customer parameter
+values changed.
+
+1. Deployment-record vs. workload-resource claims
+   The DEV-side identity-resolution module creates no workload resource and
+   modifies no VM, but - like any Bicep nested module deployment - it still
+   creates/updates a Microsoft.Resources/deployments record in the DEV
+   resource group. Previous wording ("nothing is ever deployed there",
+   "deploys zero resources", "never deploys any resource into this
+   subscription") conflated "zero workload resources in the inner template"
+   with "no ARM resource created at all". Corrected in:
+     - docs/scope.md (RBAC exception section)
+     - docs/operations.md (module bullet, "why cross-subscription" paragraph)
+     - src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep (metadata
+       description, param descriptions, comments)
+     - modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep
+       (metadata description)
+     - .azuredevops/pipelines/deploy-lims-ws2025-dev-sql-media-rbac.yml
+       (header comment)
+
+2. what-if preview guarantees
+   The role assignment's principalId is sourced from a separate module's
+   output. az deployment sub what-if may leave that cross-module dependency
+   unresolved or omit the downstream role assignment from its diff. Previous
+   wording claimed what-if "previews exactly one resource" and "fails...
+   closed rather than silently previewing the wrong principal" - these were
+   guarantees about what-if's own preview-time resolution that it does not
+   provide. Corrected to state an incomplete/empty what-if is not proof that
+   deploy would create nothing, while explicitly preserving that the
+   deployment-time fail-closed identity verification in
+   resolve-sql-vm-identity.bicep is unchanged and still applies at actual
+   deploy time. Corrected in docs/operations.md ("Expected what-if behavior"
+   paragraph, customer deployment sequence step 3) and the pipeline's
+   what-if NOTE echo block.
+
+3. Service connection permissions
+   Recorded the customer-confirmed fact that the Azure DevOps service
+   connection's managed identity already has Owner access across all LIMS
+   subscriptions, which covers deployment permissions in both DEV and MGMT.
+   Removed prior narrower, hypothetical permission language (Reader on the
+   VM plus roleAssignments/write at container scope) that implied a
+   separate narrower access model needed verification. No permission is
+   granted or changed by this repository or this commit.
+
+Verified: all three touched .bicep files rebuild cleanly with local
+bicep.exe 0.46.1 (no new warnings/errors); pipeline YAML re-parses cleanly
+with js-yaml. git status confirms only the five intended files changed.

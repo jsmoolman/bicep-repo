@@ -1,0 +1,146 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "resourceGroupResourceId": {
+      "value": "REPLACE_WITH_REAL_VALUE:/subscriptions/<lims-dev-subscription-id>/resourceGroups/rg-compute-lims-dev-westeu"
+    },
+    "location": {
+      "value": "westeurope"
+    },
+    "subnetResourceId": {
+      "value": "REPLACE_WITH_REAL_VALUE:<resource ID of the existing snet-routable subnet>"
+    },
+    "diskEncryptionSetResourceId": {
+      "value": "REPLACE_WITH_REAL_VALUE:<resource ID of the existing LIMS DEV Disk Encryption Set>"
+    },
+    "adminUsername": {
+      "value": "not-set-see-pipeline-secret-variable"
+    },
+    "adminPassword": {
+      "value": "not-set-see-pipeline-secret-variable"
+    },
+    "vmSize": {
+      "value": "Standard_D4ads_v5"
+    },
+    "osDiskSizeGiB": {
+      "value": 127
+    },
+    "appVmName": {
+      "value": "vm-lims-dev-v2-westeu-001"
+    },
+    "appComputerName": {
+      "value": "lims-dev-v2-001"
+    },
+    "appNicName": {
+      "value": "nic-vm-lims-dev-v2-westeu-001"
+    },
+    "appOsDiskName": {
+      "value": "osdisk-vm-lims-dev-v2-westeu-001"
+    },
+    "appDataDiskName": {
+      "value": "appdata-vm-lims-dev-v2-westeu-001"
+    },
+    "appDataDiskSizeGiB": {
+      "value": 128
+    },
+    "appDataDiskTier": {
+      "value": "P10"
+    },
+    "sqlVmName": {
+      "value": "vm-lims-dev-v2-westeu-002"
+    },
+    "sqlComputerName": {
+      "value": "lims-dev-v2-002"
+    },
+    "sqlNicName": {
+      "value": "nic-vm-lims-dev-v2-westeu-002"
+    },
+    "sqlOsDiskName": {
+      "value": "osdisk-vm-lims-dev-v2-westeu-002"
+    },
+    "sqlDataDiskName": {
+      "value": "sqldata-vm-lims-dev-v2-westeu-002"
+    },
+    "sqlDataDiskSizeGiB": {
+      "value": 1024
+    },
+    "sqlDataDiskTier": {
+      "value": "P30"
+    },
+    "sqlLogDiskName": {
+      "value": "sqllog-vm-lims-dev-v2-westeu-002"
+    },
+    "sqlLogDiskSizeGiB": {
+      "value": 512
+    },
+    "sqlLogDiskTier": {
+      "value": "P20"
+    },
+    "tags": {
+      "value": {
+        "environment": "development",
+        "purpose": "lims",
+        "dataClassification": "non-production"
+      }
+    },
+    "appExistingUserAssignedIdentityResourceIds": {
+      "value": [
+        "REPLACE_WITH_REAL_VALUE:<resource ID of the existing Built-In-Identity-westeurope user-assigned identity already attached to vm-lims-dev-v2-westeu-001>"
+      ]
+    },
+    "sqlExistingUserAssignedIdentityResourceIds": {
+      "value": [
+        "REPLACE_WITH_REAL_VALUE:<resource ID of the existing Built-In-Identity-westeurope user-assigned identity already attached to vm-lims-dev-v2-westeu-002>"
+      ]
+    },
+    "appAdministratorLoginPrincipalIds": {
+      "value": []
+    },
+    "appUserLoginPrincipalIds": {
+      "value": []
+    },
+    "sqlAdministratorLoginPrincipalIds": {
+      "value": []
+    },
+    "sqlUserLoginPrincipalIds": {
+      "value": []
+    },
+    "enableGuestDiskPreparation": {
+      "value": false
+    },
+    "guestDiskPreparationExecutionTarget": {
+      "value": "None"
+    },
+    "appDataVolumeDriveLetter": {
+      "value": "A"
+    },
+    "appDataVolumeLabel": {
+      "value": "LIMS-App"
+    },
+    "appDataVolumeAllocationUnitBytes": {
+      "value": 4096
+    },
+    "sqlDataVolumeDriveLetter": {
+      "value": "E"
+    },
+    "sqlDataVolumeLabel": {
+      "value": "SQL-Data"
+    },
+    "sqlDataVolumeAllocationUnitBytes": {
+      "value": 65536
+    },
+    "sqlLogVolumeDriveLetter": {
+      "value": "F"
+    },
+    "sqlLogVolumeLabel": {
+      "value": "SQL-Logs"
+    },
+    "sqlLogVolumeAllocationUnitBytes": {
+      "value": 65536
+    },
+    "guestDiskPreparationTimeoutInSeconds": {
+      "value": 1800
+    }
+  }
+}

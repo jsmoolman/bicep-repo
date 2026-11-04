@@ -1,0 +1,93 @@
+Fix remaining guest disk preparation findings: volume GUID correlation, positive DVD verification, disk-state checks, per-stage revalidation, IMDS-based temp-disk exclusion
+
+Corrects commit 758e3a6a (LIMS WS2025 DEV v2 guest data-disk
+preparation) against five remaining review findings. Preserves the
+fixed v2 allowlist, disabled-by-default preparation, Validate/Apply
+separation, single-VM Apply selectors, Ubuntu CI, and Windows
+PowerShell 5.1 compatibility.
+
+1. Partition<->volume correlation (Get-DiskPreparationPlan) now uses
+   documented stable identifiers instead of drive-letter-only
+   matching: verifies the data partition's GptType is exactly the
+   GPT basic-data-partition GUID {ebd0a0a2-b9e5-4433-87c0-68b6b72699c7}
+   (MSFT_Partition), requires AccessPaths to contain only the approved
+   drive root plus at most one well-formed volume GUID path
+   (\\?\Volume{GUID}\, "Naming a Volume"), and requires that GUID path
+   to equal the correlated volume's own Get-Volume.Path exactly.
+   Rejects extra mounts, foreign GUIDs, and letter/volume mismatches.
+
+2. SQL DVD-ROM move (Get-DvdPreparationPlan, Assert-DvdReadyForMove)
+   now positively verifies the optical device via Win32_CDROMDrive
+   before ever planning or performing a move: requires exactly one
+   optical drive and one DVD volume at E:, the exact expected
+   "Microsoft Virtual DVD-ROM" device Name, and MediaLoaded=$false
+   (not $null/$true). Verifies Z: is free across the optical-drive,
+   DVD-volume, ordinary-volume, and partition inventories together,
+   rechecks identity/media/occupancy immediately before moving, and
+   reconfirms the device at Z: and E: free afterward.
+
+3. Disk operational-state validation (Resolve-ApprovedDiskTarget) now
+   captures and blocks on Get-Disk IsOffline/IsReadOnly/
+   OperationalStatus!=Online for every resolved disk, blocking the
+   whole VM's plan (so an unsuitable SQL LOG disk also blocks DATA
+   and the DVD move). These fields are included in the Validate-mode
+   report. The script never changes these states itself.
+
+4. Per-stage revalidation (Assert-DiskReadyForDestructiveStage,
+   Assert-DvdReadyForMove, new Test-DiskReadyForInitializeStage/
+   Test-DiskReadyForNewPartitionStage/Test-PartitionReadyForFormatStage)
+   re-fetches fresh IMDS/disk/partition/volume/optical inventory and
+   re-resolves identity immediately before each of Initialize-Disk,
+   New-Partition, Format-Volume, and the DVD move -- not only once
+   before the whole batch. Expected in-invocation state transitions
+   (RAW -> GPT+MSR, etc.) are accepted; unexpected/ambiguous state at
+   the start of a stage blocks without retry, auto-resume, or
+   rollback of earlier successful steps.
+
+5. Temporary/resource-disk exclusion (Select-NonOsNonTemporaryDiskCandidates)
+   replaces the prior unofficial SCSI-bus/port co-location assumption
+   with positive evidence: cross-references each non-OS disk's
+   Get-Disk.Size against IMDS's own authoritative
+   compute.storageProfile.resourceDisk.size (documented since IMDS
+   api-version 2021-02-01). A missing resourceDisk.size property (as
+   opposed to a genuine 0) fails closed; more than one matching disk
+   fails closed; invalid/missing SCSI addressing on a non-OS disk
+   never admits it as a data-disk candidate. Adds a new, read-only,
+   no-mutation diagnostic script
+   (scripts/Get-LimsGuestDiskDiagnostics.ps1) for customer-side
+   evidence collection if a real VM's reported shape ever differs
+   from these fixtures.
+
+Also corrects docs/operations.md's claim that every Run Command
+redeployment re-executes the script -- standard ARM incremental-mode
+behavior applies (unchanged properties: no operation); documents the
+IMDS/volume-GUID/Win32_CDROMDrive/disk-state corrections; clarifies
+that a foundation redeployment can reapply other unchanged foundation
+resources even while guest-disk mode is Validate; and clarifies
+what-if cannot preview guest formatting. Updates docs/scope.md's
+guest-data-disk-preparation exception text to match.
+
+Microsoft sources used: Instance Metadata Service
+(storageProfile.resourceDisk.size), Managed disks overview (temporary
+disk is never a managed disk), MSFT_Partition (GptType), Naming a
+Volume (volume GUID paths), Win32_CDROMDrive, Get-Disk, Deployment
+modes (incremental-mode unchanged-resource behavior).
+
+Tests: Initialize-LimsGuestDataDisks.Tests.ps1 rewritten with
+realistic fixtures (volume GUID paths, optical device identity/media
+state, disk operational flags) and stateful mutation-adapter mocks
+that simulate real state transitions across Initialize/New-Partition/
+Format/DVD-move so the new per-stage checks are genuinely exercised
+end-to-end. 111/111 Pester 5.9.0 tests pass locally (Windows
+PowerShell 5.1.26100.9711). PSScriptAnalyzer 1.25.0 (both the
+PS5.1-targeted settings file and the full default ruleset) reports
+zero findings against both scripts. modules/compute/lims-ws2025-dev-foundation/main.bicep,
+src/compute/lims-ws2025-dev-foundation/main.bicep, and both foundation
+.bicepparam files build cleanly with zero diagnostics; both committed
+param files retain enableGuestDiskPreparation=false and
+guestDiskPreparationExecutionTarget='None'. No Bicep parameter
+changes were required (ExpectedOpticalDriveName is internal to the
+script's own hardcoded allowlist).
+
+No Azure access, guest execution, deployment, formatting, VM restart,
+merge, or PR creation performed.

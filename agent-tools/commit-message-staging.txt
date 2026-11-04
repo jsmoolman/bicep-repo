@@ -1,0 +1,100 @@
+Add PS5.1 SQL v2 installation-media staging script and a dedicated Managed Run Command pipeline
+
+Stages the approved SQL Server 2022 installation media from the existing
+mssql-2022-source container onto vm-lims-dev-v2-westeu-002's own local
+disk (C:\SQLMedia\SQL2022), using exactly the Storage Blob Data Reader
+access already granted to that VM's system-assigned identity in
+e87fcb1/02af63a/e7323e8. SQL Setup, VM configuration, RBAC, networking,
+and the existing SQL server remain explicitly out of scope.
+
+Script (operations/compute/lims-ws2025-dev-sql-media-staging/):
+- Stage-LimsSqlInstallationMedia.ps1: standalone, parameterless Windows
+  PowerShell 5.1 script. Fails closed before any write unless the guest
+  hostname and the live Azure Instance Metadata Service identity
+  (subscription/resource group/VM name) both match a fixed, hardcoded
+  allowlist. Authenticates to the source container using only the VM's
+  own system-assigned managed identity (OAuth2 bearer token, TLS 1.2,
+  proxy bypass, normal certificate validation; the token is never
+  written to any output). Enumerates every page of the blob listing,
+  validates every destination path (rejects traversal, absolute paths,
+  invalid Windows filename characters/reserved names, and any path that
+  would traverse a junction/symlink), and checks free space on C:
+  before downloading. Skips files whose existing length already
+  matches; downloads missing/mismatched files to a temp file beside
+  their destination, verifies the length, then moves it into place --
+  never a resumed partial byte range -- so an interrupted run is always
+  safe to rerun. Verifies the full staged inventory and SETUP.EXE
+  before reporting one compact summary (destination, expected/verified
+  file counts, files copied vs. reused, bytes copied, SETUP.EXE path);
+  raw Blob XML and per-file progress are never printed. Lives under
+  operations/ (imperative, ad hoc Run Command script) rather than
+  modules/.../scripts/ (Bicep loadTextContent()-embedded), since it is
+  never declared in any Bicep template and so is not subject to that
+  mechanism's inline-script size limit.
+- PSScriptAnalyzerSettings.psd1: adds PSUseCompatibleSyntax /
+  PSUseCompatibleCommands checks targeted at Windows PowerShell 5.1,
+  mirroring modules/compute/lims-ws2025-dev-foundation/scripts/.
+- Stage-LimsSqlInstallationMedia.Tests.ps1: 41 Pester tests covering the
+  plain-data decision/planning functions directly (pagination, path
+  rejection, insufficient-space, free-space math) and the end-to-end
+  orchestration function with every real-cmdlet-calling *Adapter
+  mocked, including a stateful two-run fixture for an interrupted
+  download followed by a full rerun (first run fails after one file is
+  "interrupted" at the wrong length while a prior file completes
+  correctly; rerun skips the already-correct file and completes the
+  interrupted one). All 41 tests pass; 0 PSScriptAnalyzer findings;
+  confirmed to dot-source and load cleanly under real Windows
+  PowerShell 5.1 (5.1.26100.9711).
+
+Pipeline (.azuredevops/pipelines/stage-lims-ws2025-dev-sql-media.yml):
+- trigger: none / pr: none; manual-only; reuses the existing Azure
+  DevOps service connection (already has customer-confirmed Owner
+  access across all LIMS subscriptions -- no new permission requested
+  or granted). Independently re-verifies the target VM's exact resource
+  ID (subscription/resource group/VM name) via the Azure CLI before
+  ever submitting the script -- never trusting only the script's own
+  identity checks.
+- Submits the script via a Microsoft.Compute/virtualMachines/
+  runCommands ("Managed Run Command") resource created ad hoc through
+  the Azure CLI (never declared in Bicep) with an explicit timeout
+  (default 7200s), then polls az vm run-command show --instance-view
+  until a terminal execution state and explicitly checks both
+  instanceView.executionState and instanceView.exitCode. Fails the
+  pipeline if staging did not succeed, or if the result cannot be
+  verified at all (empty/unreadable state or missing exit code is
+  treated as failure, never assumed success). Prints the guest script's
+  compact summary in the pipeline log. Deletes the ephemeral Managed
+  Run Command resource afterward on a best-effort basis.
+- Keeps Azure Portal -> Run Command -> RunPowerShellScript, pointed at
+  the same script file, as a documented manual fallback (90-minute
+  portal execution limit) -- this pipeline is primary because Managed
+  Run Command accepts its own, independently configurable timeout.
+- Validated locally without any real az/VM dependency: the YAML parses
+  cleanly (js-yaml); the target-identity guard's bash logic was
+  exercised against 5 scenarios (exact match, case-insensitive match,
+  wrong subscription, wrong resource group, wrong VM name); the
+  Managed-Run-Command polling/verification logic was exercised against
+  6 fixture az vm run-command show --instance-view payloads
+  (succeeded, failed execution state, succeeded-but-nonzero-exit,
+  missing instanceView, still-running/non-terminal, missing exit code)
+  -- confirming the pipeline correctly fails closed on a failed guest
+  script and on every unverifiable-result case, never assuming success.
+
+docs/scope.md:
+- Narrowed the existing SQL-media-container RBAC exception's "does not
+  authorize" clause, which previously and incorrectly forbade listing/
+  downloading the container's contents outright -- directly
+  contradicting this capability. Added a new, separate, narrowly scoped
+  "LIMS WS2025 DEV v2 -- SQL installation-media staging on the SQL VM"
+  exception that explicitly authorizes exactly this script/VM/
+  container/destination, and nothing beyond it.
+
+docs/operations.md:
+- Added a "LIMS WS2025 DEV v2 -- SQL installation-media staging"
+  section documenting the script, both delivery mechanisms, scope
+  boundaries, and validation performed. Updated the adjacent RBAC
+  section's "what this does not do" wording and the CI section's
+  Pester-test-file list to reflect the new capability.
+
+No execution against real Azure by this repository -- the first real
+run, by either delivery mechanism, is left for a human operator.

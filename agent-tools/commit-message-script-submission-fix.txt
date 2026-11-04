@@ -1,0 +1,39 @@
+Submit script content directly to az vm run-command, not an "@<path>" reference
+
+The live run reached SQL v2 and attempted to submit the staging script,
+but `az vm run-command create --script "@${SCRIPT_TO_SUBMIT}"` sent the
+literal string "@operations/.../Stage-LimsSqlInstallationMedia.ps1" to
+Azure. The "@<path>" convention is an az CLI *client-side* file-content
+convention for some arguments, but is not honored for this command's
+--script value the way a local file path would be -- there is nothing
+on the Azure control plane or in the guest for "@<path>" to resolve
+against. PowerShell rejected the literal "@..." text itself as invalid
+syntax on line 1 of the submitted script.
+
+Fix: read the pinned repository file into a Bash variable up front --
+`script_content=$(cat -- "$SCRIPT_TO_SUBMIT")` -- checking for both a
+read failure (missing/unreadable file) and empty content, before
+anything is recorded (runCommandName/stagingIndeterminate) or
+submitted. Pass that content as a single quoted --script argument
+(`--script "$script_content"`) instead of the "@<path>" form. The
+script body itself is never echoed/logged anywhere in this script, so
+it does not appear in pipeline logs.
+
+Verification performed:
+- `bash -n` on the modified script: no syntax errors.
+- Extended the local fake-az test harness (agent-tools/, not committed)
+  to assert --script receives the literal multiline source as a single
+  argument (never an "@<path>" reference), and added a fixture with
+  real PowerShell variables ($var), single/double quotes, and multiple
+  lines, confirming they survive into that single argument unmangled.
+- Added fixtures confirming a missing SCRIPT_TO_SUBMIT file and an
+  empty SCRIPT_TO_SUBMIT file both fail fast (exit 2) before any
+  pipeline variable is recorded and before any `az` call is made.
+- Reran the full existing fixture suite (11 scenarios, all passing)
+  and the unrelated Stage-LimsSqlInstallationMedia.ps1 Pester suite (41
+  tests) to confirm no collateral regression.
+
+No change to targeting (DEV_SUBSCRIPTION_ID/RESOURCE_GROUP/VM_NAME),
+polling, or cleanup behavior -- cleanup-run-command.sh is untouched.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>

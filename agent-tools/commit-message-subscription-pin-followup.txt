@@ -1,0 +1,100 @@
+Pin subscription explicitly on every run-command call; retain-by-default cleanup
+
+Small follow-up to fe3b3c0 before the first live run of
+provision-lims-ws2025-dev-sql.yml, closing two robustness gaps in how
+the ad hoc Managed Run Command resource's subscription context and
+cleanup-safety are handled.
+
+scripts/submit-and-wait-run-command.sh:
+- Added DEV_SUBSCRIPTION_ID as a required environment variable, passed
+  explicitly as --subscription on both `az vm run-command create` and
+  `az vm run-command show` -- no longer relies on `az account set`/the
+  service connection's own default context for either call.
+- Inverted the stagingIndeterminate default: it is now set to "true"
+  (retain) in the same breath as runCommandName, before `create` is
+  even attempted, and is flipped to "false" (cleanup opted in) only
+  once a terminal execution state (Succeeded/Failed/Canceled) has
+  actually been observed in the poll loop -- flipped back to "true"
+  in the one remaining ambiguous case, a terminal "Succeeded" state
+  reported with no exit code. This means an interrupted `create` call
+  (lost response, authorization error, malformed request), a job
+  cancellation, or an agent disconnect at any point after submission
+  starts all leave the pipeline variable's last recorded value at
+  "true" -- never a silent "false" that could let a still-executing
+  command be deleted out from under itself.
+- Added a shared print_retention_guidance() helper, called at every
+  indeterminate exit point, that prints the run-command name and a
+  ready-to-run `az vm run-command show --subscription ...` inspection
+  command including the pinned DEV subscription.
+
+Added: .azuredevops/pipelines/scripts/cleanup-run-command.sh
+- Factored the pipeline's cleanup step out of inline YAML into its own
+  shared, independently testable script (mirroring
+  submit-and-wait-run-command.sh), so its subscription-pinning and
+  retain-by-default logic can be exercised directly against the same
+  fake-az harness used for the submit script.
+- Passes --subscription explicitly on `az vm run-command delete`.
+  Contains no `az account set ... || true` fallback at all -- that
+  pattern previously in the pipeline's inline cleanup step could let a
+  failed context switch silently fall through to whatever subscription
+  happened to already be selected; removed outright rather than
+  guarded.
+- Deletes only when STAGING_INDETERMINATE is exactly "false"; any
+  other value, including empty/unset entirely, retains the resource.
+  Always exits 0 (a best-effort step that must never fail the job by
+  itself); a definite deletion failure is still a non-fatal warning.
+
+.azuredevops/pipelines/provision-lims-ws2025-dev-sql.yml:
+- stage-only step now passes DEV_SUBSCRIPTION_ID: $(devSubscriptionId)
+  into submit-and-wait-run-command.sh.
+- Cleanup step now calls scripts/cleanup-run-command.sh (scriptPath)
+  instead of inline bash, passing DEV_SUBSCRIPTION_ID,
+  RESOURCE_GROUP, VM_NAME, RUN_COMMAND_NAME, and STAGING_INDETERMINATE
+  as environment variables. No functional change to the identity-guard
+  step (it already independently verifies the selected subscription
+  via az account show, a different, already-verified pattern -- not
+  the silent fallback being removed here).
+- Expanded the file's own header comment with "Subscription is pinned
+  explicitly, every call, never implicit" and "Cleanup is opt-in, not
+  opt-out" sections describing this design.
+
+stage-only and the guest staging script (Stage-LimsSqlInstallationMedia.ps1)
+are unchanged.
+
+Validation (agent-tools/run-run-command-fixtures.ps1, not committed,
+scratch only):
+- Extended the fake `az` CLI fixture (agent-tools/fake-az-for-run-command-tests.sh,
+  scratch) to assert every intercepted `create`/`show`/`delete` call
+  carries the expected --subscription value, failing loudly (distinct
+  exit code) on a missing or wrong value.
+- Ran the real, unmodified submit-and-wait-run-command.sh followed by
+  the real, unmodified cleanup-run-command.sh for each scenario:
+    1. Delayed startup then success -> submit exit 0,
+       stagingIndeterminate=false; cleanup deletes.
+    2. Permanent CLI failure (AuthorizationFailed) -> submit exit 1,
+       stagingIndeterminate=true; cleanup skips deletion.
+    3. Polling-deadline expiry -> submit exit 1,
+       stagingIndeterminate=true; cleanup skips deletion.
+    4. Nonzero guest exit code (a definite failure) -> submit exit 1,
+       stagingIndeterminate=false; cleanup still deletes (a definite
+       outcome is safe to clean up).
+    5. Negative control: deliberately passed the wrong subscription
+       into the submit script -- the fake-az harness correctly caught
+       the mismatch, confirming the assertion itself discriminates
+       between subscriptions rather than passing vacuously.
+    6. Cleanup invoked with no RUN_COMMAND_NAME at all -> no-op.
+    7. Cleanup invoked with STAGING_INDETERMINATE entirely unset (not
+       "true", not "false", genuinely absent) -> retained by default,
+       confirming the "default to retaining ... including if ... the
+       pipeline is interrupted before it can record the outcome"
+       requirement.
+  All seven produced the expected result.
+- PSScriptAnalyzer (PS5.1-targeted settings) on the staging script: 0
+  findings. Pester: all 41 existing tests still pass (staging script
+  untouched by this follow-up).
+- provision-lims-ws2025-dev-sql.yml re-parses cleanly (js-yaml);
+  structure re-confirmed unchanged (2 parameters, 9 pinned variables,
+  1 job, 4 steps).
+
+No execution against real Azure by this repository -- the first real
+run is left for the operator.

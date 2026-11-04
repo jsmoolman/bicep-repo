@@ -1,0 +1,74 @@
+Fix: parse Blob listing XML from raw bytes, not WinPS5.1's mis-decoded string
+
+Follow-up to e02deb5. Customer run #20261104.6 still failed at the Blob
+listing parser (System.Xml.XmlException at line 1, position 1) despite the
+U+FEFF string trim added in e02deb5.
+
+Root cause (confirmed via a live empirical probe against a genuine
+Invoke-WebRequest response under Windows PowerShell 5.1): when the Blob
+service response's Content-Type header carries no explicit charset (e.g.
+"application/xml"), WinPS5.1's own .Content string-decoding does not
+collapse a 3-byte UTF-8 BOM (EF BB BF) into a single U+FEFF character.
+It mis-decodes it into THREE unrelated characters (U+00EF, U+00BB,
+U+00BF) ahead of the literal "<?xml" text. There was never a U+FEFF
+character for the prior round's .TrimStart([char]0xFEFF) to strip, so
+that fix could never work against this real response shape.
+
+Fix: never decode the Blob listing response to a .NET string at all.
+
+- Invoke-BlobContainerListPageAdapter now reads the response's raw
+  RawContentStream bytes directly (explicitly resetting Position to 0
+  first, since it is a seekable MemoryStream that may already have been
+  read), returning plain {Bytes, StatusCode, ContentType} data. A
+  byte[]-Content and last-resort string-Content fallback remain for
+  robustness, but RawContentStream is preferred specifically to avoid
+  the mis-decode. Authorization headers and response bodies are never
+  interpolated into any logged/error text.
+
+- ConvertFrom-BlobListingXml now parses those raw bytes through a
+  stream-based System.Xml.XmlReader (XmlReader.Create over a
+  MemoryStream) instead of casting a decoded string to [xml]. This lets
+  .NET's own XML stack perform correct byte-level BOM/encoding
+  detection, confirmed against both BOM and non-BOM UTF-8 fixtures.
+  DtdProcessing is explicitly Prohibit and XmlResolver is $null, so DTD
+  processing and external entity/schema resolution are both refused
+  outright for this untrusted network input.
+
+- On a parse failure, the diagnostic now reports exactly five fields:
+  HTTP status, Content-Type, byte count, a new leading-byte BOM/XML
+  prefix classification (Get-XmlBytePrefixClassification), and the XML
+  error line/position -- never the exception's own Message and never
+  the response body itself. The MethodInvocationException PowerShell
+  wraps around a failed XmlReader/XmlDocument.Load() is unwrapped one
+  level to recover the real XmlException's LineNumber/LinePosition.
+
+- Root element validation (EnumerationResults), NextMarker pagination,
+  and "fail before any staging write" behavior are all unchanged.
+
+Verification:
+- Live in-process probes (agent-tools/, not committed) confirmed the
+  real WinPS5.1 Invoke-WebRequest response shape
+  (BasicHtmlWebResponseObject; Int32 StatusCode; Dictionary<string,
+  string> Headers; seekable RawContentStream with correct raw bytes;
+  .Content mis-decoding the BOM as described above) and validated the
+  byte-level XmlReader fix against BOM, non-BOM, wrong-root, malformed,
+  DTD-containing, and empty-body fixtures before this change was written.
+- Full Pester suite run under genuine Windows PowerShell 5.1
+  (powershell.exe, not pwsh): 56 passed, 0 failed. New coverage added:
+  Get-XmlBytePrefixClassification unit tests; a new end-to-end
+  "Invoke-BlobContainerListPageAdapter + ConvertFrom-BlobListingXml
+  together" Describe block that mocks only Invoke-WebRequest (not the
+  adapter) and exercises the real adapter and real parser together
+  against byte-level fixtures for UTF-8-with-BOM, UTF-8-without-BOM, and
+  a non-XML (JSON) response -- confirming the non-XML case fails closed
+  with the five-field diagnostic and never leaks the planted marker, the
+  bearer token, or the word "Bearer"; plus a RawContentStream.Position
+  reset case and an Invoke-WebRequest-failure case. All existing
+  Mock Invoke-BlobContainerListPageAdapter call sites were updated to
+  the adapter's new {Bytes, StatusCode, ContentType} return shape.
+- PSScriptAnalyzer (via this directory's PSScriptAnalyzerSettings.psd1)
+  against the modified script: no issues.
+
+Files to sync:
+- operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1
+- operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.Tests.ps1

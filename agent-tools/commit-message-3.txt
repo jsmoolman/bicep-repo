@@ -1,0 +1,147 @@
+Populate customer-attested disk bindings for the three real LIMS DEV v2 data disks; exact resource-ID fix; documentation corrections
+
+Starting from commit 16ffb9b (which proposed the customer-attested
+guest-disk-UniqueId binding mechanism disabled by default), this change
+populates it with reviewed, customer-supplied evidence for all three real
+disks, fixes a managed-disk resource-ID matching gap, corrects several
+over-claiming statements in comments/docs, and extends end-to-end test
+coverage accordingly.
+
+1) Populated bindings (Get-ApprovedDiskPreparationAllowlist), from
+   customer-supplied, read-only Azure/guest inventory evidence
+   (subscription 8ebb26a1-674a-40d1-97f8-e0a237e288a6, resource group
+   rg-compute-lims-dev-westeu):
+   - APP (vm-lims-dev-v2-westeu-001, appdata-vm-lims-dev-v2-westeu-001,
+     LUN 0): AttestedGuestUniqueId = 60022480D1B07E6ACD98417F86591F4B
+     (observed guest capacity 137436250112 bytes).
+   - SQL DATA (vm-lims-dev-v2-westeu-002, sqldata-vm-lims-dev-v2-westeu-002,
+     LUN 0): AttestedGuestUniqueId = 60022480FC5A2FF57B5FE802967E448E
+     (observed 1099506078720 bytes).
+   - SQL LOG (same VM, sqllog-vm-lims-dev-v2-westeu-002, LUN 1):
+     AttestedGuestUniqueId = 60022480042D640894BBE41BA513DCFC (observed
+     549753039360 bytes) -- this is the disk whose guest SCSILogicalUnit
+     collides with the temporary disk; the attested UniqueId is what
+     disambiguates it.
+   Both App and Sql are now in full, complete, mutually unique attested
+   mode (Test-AttestedGuestUniqueIdBindingConfiguration.IsAttestedMode=
+   $true for each). These values are documented as a reviewed,
+   customer-supplied diagnostic observation -- never independently
+   re-verified by this script, never cryptographic/platform-asserted
+   proof of the Azure-disk-to-guest-disk relationship (Azure exposes no
+   such mechanism), and never automatically discovered or refreshed; a
+   disk replacement/recreation/UniqueId change blocks and requires a new,
+   separately reviewed binding. Populating these bindings changes only
+   disk IDENTIFICATION -- it does not enable or authorize Apply or any
+   mutation, which remain gated entirely by -Mode Apply plus the module's
+   own independent enableGuestDiskPreparation/guestDiskPreparationExecutionTarget
+   opt-ins (both still committed as false/'None').
+
+2) Fixed an exact managed-disk resource-ID matching gap in
+   Resolve-ApprovedDiskTarget: replaced a StartsWith(prefix) +
+   EndsWith(diskName) check with a single, full, case-insensitive string
+   equality against one fully-constructed expected resource ID. The
+   previous combination could wrongly accept an ID containing an
+   unexpected intervening path segment between the resource-group/
+   provider prefix and the trailing disk-name segment (e.g.
+   ".../disks/unexpected-segment/appdata-vm-lims-dev-v2-westeu-001")
+   that is not the real disk's resource ID.
+
+3) Corrected unsupported documentation claims (script header comments,
+   Get-ImdsResourceDiskSizeBytes, the capacity-tolerance comment block,
+   and docs/operations.md):
+   - The IMDS resourceDisk.size discrepancy is now described as
+     "observed, currently unresolved" on these two VMs, not as
+     "permanent," a "proven platform defect," or specific to this VM
+     generation -- no authoritative Microsoft source for any of those
+     broader claims was found. The documented kB->bytes (x1024)
+     conversion is retained exactly as written.
+   - The 0.01% one-sided capacity tolerance is now described as a
+     conservative, FIXED application-level policy calibrated against the
+     specific real byte-count observations, explicitly not a
+     Microsoft-documented tolerance value.
+   - Removed reliance on the existence of DiskSizeGB/DiskSizeBytes
+     properties and Azure's billing-tier-rounding documentation as
+     "proof" of the capacity discrepancy's cause (they describe a
+     different, platform-side value than the guest's own Get-Disk.Size
+     report actually being compared here).
+   - Size remains explicitly corroborating evidence only; the reviewed
+     exact resource-ID/LUN (and now attested-UniqueId) bindings establish
+     the selected target.
+   - Clarified throughout that populating bindings enables identification
+     only, never deployment/Apply authorization.
+   - docs/operations.md's "Customer-attested guest-disk-UniqueId binding"
+     section and "Current status for the two real v2 VMs" section
+     rewritten to reflect the now-active, populated state (previously
+     described as a disabled, unexercised proposal); added customer
+     validation-sequence detail: exact files to sync, the minimal
+     enableGuestDiskPreparation=true/guestDiskPreparationExecutionTarget=
+     'ValidateBoth' edit (explicitly not to be committed), running
+     foundation what-if first and reviewing the complete result (noting a
+     foundation deployment may reapply other foundation resources even in
+     Validate mode, and that what-if never previews guest formatting),
+     retrieving Run Command execution state/exit code/report, capturing
+     complete read-only output without new infrastructure or a disposable
+     VM, and the unchanged later Apply/verify sequence.
+   - Get-LimsGuestDiskDiagnostics.ps1's own comments updated to match
+     (binding is active, not a future/disabled proposal).
+
+4) Extended end-to-end orchestration tests (Initialize-LimsGuestDataDisks.
+   Tests.ps1, mocking only the *Adapter functions), covering:
+   - New-AppRawGuestFixture/New-SqlRawGuestFixture now read their guest
+     disks' UniqueId directly from the real, live allowlist's own
+     populated AttestedGuestUniqueId values, so every existing test built
+     on these shared fixtures continues to resolve correctly now that the
+     real allowlist is attested.
+   - Validate App and Sql: correct plans, zero mutations (existing
+     coverage, now exercised against the real attested bindings).
+   - APP Apply: only the exact bound application disk is initialized/
+     partitioned/formatted; a second (idempotent) completed-A: run
+     performs zero mutations.
+   - SQL Apply: verified DVD movement first, then the exact bound DATA
+     and LOG disks, in LUN order; idempotent completed-E:/F:/Z: run
+     performs zero mutations.
+   - A dedicated real-evidence pair of tests: the UNBOUND/synthetic path
+     (AttestedGuestUniqueId forced empty via a mocked allowlist) still
+     blocks the whole plan with zero DiskPlans on the real, unresolved
+     IMDS resourceDisk.size="201728" discrepancy; the ATTESTED path (the
+     real, now-bound allowlist) resolves the exact bound APP disk despite
+     that same, unchanged, unrepaired discrepancy.
+   - New Resolve-ApprovedDiskTarget unit tests proving a correct attested
+     UniqueId does NOT bypass a wrong LUN, a size mismatch, or an offline
+     disk state -- only ANDs with those existing checks, never replaces
+     them -- plus an end-to-end test proving it does not bypass a
+     mismatched VM identity either.
+   - "Confirms the REAL fixed allowlist is now in attested mode for both
+     App and Sql" (replacing the now-false "confirms...entirely in
+     disabled mode" assertion), plus a dedicated test pinning the three
+     real attested UniqueId values and their mutual uniqueness.
+   - Retained a separate, explicit synthetic UNBOUND-allowlist-shape test
+     and a separate synthetic test using different UniqueId values than
+     the real allowlist, so disabled/unbound-path coverage is not lost.
+   - Missing/incorrect/duplicate guest UniqueIds, mixed/duplicate
+     allowlist bindings, and identity/state changes between planning,
+     whole-VM revalidation, and each destructive stage: existing coverage
+     retained and confirmed still passing against the real attested
+     bindings.
+
+   144 -> 153 Pester cases (9 added/restructured this round), all passing.
+
+5) Verification run locally (Windows PowerShell; Linux CI not executed in
+   this session):
+   - Pester 5.9.0: 153/153 passed.
+   - PSScriptAnalyzer 1.25.0 (incl. PSUseCompatibleSyntax/PSUseCompatibleCommands
+     pinned to the PS5.1 guest-runtime profile) against both
+     Initialize-LimsGuestDataDisks.ps1 and Get-LimsGuestDiskDiagnostics.ps1
+     (the two non-Tests.ps1 files in this module, exactly as ci.yml
+     scopes it): 0 issues.
+   - Bicep build (modules/compute/lims-ws2025-dev-foundation/main.bicep)
+     and bicepparam build (config/example and config/nfi/lims
+     lims-ws2025-dev-foundation.bicepparam): both succeed, 0 diagnostics.
+   - Confirmed enableGuestDiskPreparation=false and
+     guestDiskPreparationExecutionTarget='None' remain unchanged, committed,
+     in both parameter files.
+
+No Azure access, deployment, guest execution, merge, or PR performed.
+Preserves all unrelated foundation, patch-policy, and time-zone behavior.
+
+Co-authored-by: Cursor <cursoragent@cursor.com>

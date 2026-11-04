@@ -1,0 +1,41 @@
+Fix cross-subscription guard: decode parametersJson before extracting values
+
+The guard read `.parameters.<name>.value` directly off the raw
+`az bicep build-params --stdout` output. That command wraps the compiled
+parameters document as a JSON-encoded STRING under a top-level
+`parametersJson` key (alongside `templateJson` and `templateSpecId`) - it
+is not the parameters document itself. Reading `.parameters` off that outer
+object has no such key, so both `sqlVmResourceGroupResourceId` and
+`storageResourceGroupResourceId` silently resolved to null, and the guard's
+subscription-prefix checks ran against empty strings instead of real
+values.
+
+Fix: decode `parametersJson` with `jq -e -r '.parametersJson | fromjson'`
+first, then extract each resource-group ID from the decoded object with
+`jq -e` filters that explicitly validate the value is a non-empty string
+(`type == "string" and length > 0`), calling `error(...)` otherwise. A
+missing/null/malformed `parametersJson` field, or a missing/null/non-string
+parameter value, now fails the guard immediately with a clear parsing error
+- before either subscription-prefix comparison runs, rather than silently
+proceeding with an empty string.
+
+No change to the DEV/MGMT subscription-prefix guards themselves, the
+Bicep logic, role/scope, service connection, or any customer parameter
+value.
+
+Validated by extracting this task's AzureCLI@2 inlineScript verbatim into a
+standalone bash harness and running it against real `az bicep build-params
+--stdout`-shaped output (produced locally via the equivalent `bicep
+build-params --stdout`, since no `az` CLI is available in this
+environment):
+  - Real customer parameters (config/nfi/lims/compute/
+    lims-ws2025-dev-sql-media-rbac.bicepparam): both resource-group IDs
+    extracted successfully; guard passes.
+  - sqlVmResourceGroupResourceId value set to null: fails with a clear jq
+    parsing error ("... is missing, null, or not a non-empty string")
+    before any subscription comparison.
+  - sqlVmResourceGroupResourceId/storageResourceGroupResourceId values
+    swapped: both IDs extract successfully, then the existing DEV-prefix
+    guard correctly rejects the mismatch.
+
+Also re-validated: pipeline YAML re-parses cleanly with js-yaml.

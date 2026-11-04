@@ -1,0 +1,62 @@
+Add narrowly scoped cross-subscription RBAC: SQL v2 identity read access to installation-media container
+
+Grants the existing LIMS WS2025 DEV v2 SQL virtual machine's existing
+system-assigned managed identity (vm-lims-dev-v2-westeu-002) exactly one
+built-in Storage Blob Data Reader role assignment
+(2a2b9908-6ea1-4ae2-8e65-a410df84e7d1), scoped to exactly the existing
+mssql-2022-source blob container in the existing salimsmgmtwe storage
+account — never storage-account, resource-group, or subscription scope.
+Verified against Microsoft's built-in-roles documentation and the official
+container-scope RBAC documentation. Approved under a new, narrowly scoped
+exception recorded in docs/scope.md.
+
+Deliberately cross-subscription: the SQL VM lives in DEV
+(8ebb26a1-674a-40d1-97f8-e0a237e288a6, rg-compute-lims-dev-westeu); the
+storage account lives in MGMT (cd9bed50-c972-49d0-83b0-b97bf801c804,
+rg-core-lims-mgmt-westeu). The composition never deploys anything into DEV
+— identity resolution there is read-only.
+
+- modules/compute/lims-ws2025-dev-sql-media-rbac/resolve-sql-vm-identity.bicep:
+  resource-group-scoped module, deployed into DEV. Reads the existing VM's
+  identity.principalId and verifies it against a customer-attested
+  expectedSqlVmPrincipalId parameter via a fail-closed filter(...)[0]
+  check — the expected value is verification evidence only, never the
+  functional identity. Deploys zero resources.
+- modules/compute/lims-ws2025-dev-sql-media-rbac/main.bicep: resource-
+  group-scoped module, deployed into MGMT. References the existing storage
+  account/container and creates exactly the one role assignment described
+  above, with principalType: 'ServicePrincipal' and a deterministic
+  guid(container.id, principalId, roleDefinitionId) name for idempotency.
+- src/compute/lims-ws2025-dev-sql-media-rbac/main.bicep: subscription-
+  scoped orchestrator wiring the two modules above as explicitly,
+  separately scoped nested deployments (never conflated), each with its
+  own derived subscriptionId/resourceGroup. Also fails closed if the two
+  derived subscription IDs are ever equal (parameter-mix-up guard).
+- config/example and config/nfi parameter files (the nfi file uses the
+  real, customer-supplied subscription IDs/resource group names/VM/storage
+  account/container directly — no placeholder).
+- .azuredevops/pipelines/deploy-lims-ws2025-dev-sql-media-rbac.yml: manual
+  only (trigger/pr: none), what-if (default) or deploy action, reusing the
+  existing service connection for both subscriptions. Runs an explicit
+  cross-subscription guard step (independently re-verifying via Azure CLI
+  that the parameter file's two resource-group IDs resolve to the expected
+  DEV/MGMT subscriptions) before any Bicep build/what-if/deploy step.
+- docs/scope.md: new named exception recording this RBAC decision.
+- docs/operations.md: new section documenting the exact scope granted,
+  why this is cross-subscription, expected what-if behavior, the file-sync
+  list, and the customer deployment sequence.
+
+Validation performed with the local Bicep CLI (0.46.1): every .bicep file
+in the repository (16) and every .bicepparam file (12) builds and lints
+successfully. Inspected the compiled entrypoint template directly: the
+DEV-scoped nested deployment contains zero resources; the MGMT-scoped
+nested deployment contains exactly one Microsoft.Authorization/
+roleAssignments resource, scoped to the container resource ID — confirming
+no other resource mutation anywhere in this composition. Pipeline YAML
+validated with js-yaml (Node.js) against the same structural shape as the
+existing, working deploy-lims-ws2025-dev-timezone-policy.yml. Existing
+Pester suite (149/149) and PSScriptAnalyzer (0 issues) re-run to confirm no
+regression from this unrelated change.
+
+No Azure access, deployment, guest execution, media listing/download, SQL
+Setup, merge, or PR creation performed.

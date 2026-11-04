@@ -1,0 +1,151 @@
+﻿Pester v5.9.0
+
+Starting discovery in 1 files.
+Discovery found 111 tests in 462ms.
+Running tests.
+
+Running tests from 'C:\Source\bicep-repo\bicep-repo\modules\compute\lims-ws2025-dev-foundation\scripts\Initialize-LimsGuestDataDisks.Tests.ps1'
+Describing Get-ApprovedDiskPreparationAllowlist
+  [+] pins the exact approved APP target (independent of caller input) 117ms (87ms|29ms)
+  [+] pins the exact approved SQL target (independent of caller input) 87ms (85ms|1ms)
+
+Describing Test-TargetIdentityMatchesAllowlist
+  [+] returns null when caller params and IMDS each independently match the allowlist 27ms (25ms|2ms)
+  [+] rejects a caller-consistent v1 VM name even though caller and IMDS agree with EACH OTHER 11ms (5ms|6ms)
+  [+] rejects a caller-consistent other-subscription/resource-group combination 3ms (2ms|1ms)
+  [+] rejects when only IMDS disagrees with the allowlist, even though caller params match it 5ms (5ms|1ms)
+  [+] rejects when only the caller-supplied VM name disagrees with the allowlist, even though IMDS matches it 4ms (3ms|1ms)
+  [+] rejects a caller-supplied disk descriptor whose LUN is not part of the fixed allowlist 5ms (4ms|1ms)
+  [+] rejects a caller-supplied DvdLetterMoveTarget for App that is not empty 3ms (2ms|1ms)
+
+Describing Select-NonOsNonTemporaryDiskCandidates
+  [+] excludes OS and Temporary disks for APP via positive IMDS resourceDisk.size cross-reference, leaving only the real data disk 88ms (84ms|4ms)
+  [+] excludes OS and Temporary disks for SQL, leaving exactly DATA and LOG, even though the temporary disk's own guest-only SCSI numbering collides with LOG's Azure LUN 26ms (25ms|1ms)
+  [+] fails when zero disks are flagged boot/system 17ms (16ms|1ms)
+  [+] fails when more than one disk is flagged boot/system (ambiguous OS disk) 56ms (55ms|1ms)
+  [+] fails closed when IMDS does not report resourceDisk.size at all (as opposed to reporting it as zero) 14ms (13ms|1ms)
+  [+] treats resourceDisk.size=0 (no temporary disk for this VM size) as excluding nothing beyond the OS disk 16ms (14ms|1ms)
+  [+] fails when more than one non-OS disk's size matches Azure's own reported temporary disk size (ambiguous) 16ms (15ms|1ms)
+  [+] fails when a non-OS disk reports missing/invalid SCSI addressing 22ms (22ms|1ms)
+
+Describing Resolve-ApprovedDiskTarget
+  [+] resolves successfully, captures a stable UniqueId, and carries disk state fields through for reporting 46ms (43ms|2ms)
+  [+] rejects a wrong managed-disk resource ID (subscription substituted) 4ms (3ms|1ms)
+  [+] rejects when the LUN does not resolve to exactly one IMDS data disk (zero found) 3ms (2ms|1ms)
+  [+] rejects when the LUN resolves to more than one IMDS data disk (duplicate LUN) 4ms (3ms|1ms)
+  [+] rejects a size mismatch 4ms (3ms|1ms)
+  [+] rejects an ambiguous mapping: two non-OS/non-temporary candidate disks share the same LUN 8ms (7ms|1ms)
+  [+] rejects selecting a boot/system-flagged disk even if it otherwise matches the LUN (defense in depth, independent of the earlier exclusion step) 3ms (3ms|1ms)
+  [+] rejects an offline candidate disk 14ms (14ms|1ms)
+  [+] rejects a read-only candidate disk 14ms (13ms|1ms)
+  [+] rejects a candidate disk with a non-Online operational status 14ms (13ms|1ms)
+  [+] rejects when the resolved guest disk reports no stable UniqueId 3ms (3ms|1ms)
+
+Describing Get-DiskPreparationPlan
+  [+] plans Initialize for a RAW disk with zero partitions 8ms (6ms|2ms)
+  [+] fails a RAW disk that unexpectedly already has partitions (inconsistent state) 15ms (14ms|1ms)
+  [+] plans NoOp for an already-correct GPT layout with a realistic drive-root + volume-GUID AccessPaths pair, even when the volume already holds data 61ms (60ms|1ms)
+  [+] fails a GPT disk with no data partition yet (partial completion) 4ms (3ms|1ms)
+  [+] fails a GPT disk with more than one non-reserved partition 10ms (9ms|1ms)
+  [+] rejects an unexpected GPT partition type via the exact GptType GUID, even when the friendly Type string says Basic 16ms (15ms|1ms)
+  [+] fails an undersized data partition layout 14ms (14ms|1ms)
+  [+] fails an additional directory mount beyond the approved drive root and the partition's own volume GUID path 16ms (15ms|1ms)
+  [+] fails when the data partition is missing its own volume GUID access path entirely 14ms (14ms|1ms)
+  [+] fails when the partition reports more than one volume GUID access path (ambiguous) 14ms (13ms|1ms)
+  [+] fails when the partition's volume GUID path belongs to a different (foreign) volume than the one correlated 13ms (13ms|1ms)
+  [+] fails a data partition with no formatted volume yet (partial completion) 5ms (4ms|2ms)
+  [+] fails when the correlated volume's drive letter conflicts with the partition's own drive letter 12ms (11ms|1ms)
+  [+] fails (never auto-repairs) a volume with the wrong label, allocation unit size, or drive letter 19ms (18ms|1ms)
+  [+] fails an unexpected PartitionStyle (neither RAW nor GPT) 3ms (3ms|1ms)
+
+Describing Get-DvdPreparationPlan
+  [+] requires no action when DvdLetterMoveTarget is empty (APP never touches its DVD) 28ms (24ms|4ms)
+  [+] treats an already-NoOp (correctly prepared) E: data disk as AlreadyCorrect and never inspects E: for DVD-ness 12ms (12ms|1ms)
+  [+] requires no action when nothing currently occupies E: as an optical device or DVD volume 13ms (12ms|1ms)
+  [+] fails when exactly one of the optical device / DVD volume at E: is present but not the other (ambiguous correlation) 13ms (12ms|1ms)
+  [+] fails when more than one optical device reports E: (ambiguous) 13ms (13ms|1ms)
+  [+] fails when the optical device reports an unexpected device name 14ms (13ms|1ms)
+  [+] fails when the media-loaded state is unknown ($null) rather than positively confirmed empty 14ms (14ms|1ms)
+  [+] fails when media is loaded, even if the Win32_Volume label is empty 14ms (11ms|3ms)
+  [+] fails when MediaLoaded is false but the volume has a non-empty label (inconsistent state) 17ms (16ms|1ms)
+  [+] fails when the volume at E: is not CD-ROM-type (DriveType != 5) 12ms (12ms|1ms)
+  [+] fails when the target letter is already occupied 12ms (12ms|1ms)
+  [+] plans Move when the optical device at E: is positively verified and the destination is free, returning the device identity 12ms (11ms|1ms)
+
+Describing Test-DestinationLetterOccupied
+  [+] returns $false when the letter is free across every inventory 14ms (12ms|2ms)
+  [+] returns $true when an optical device reports the letter 24ms (23ms|1ms)
+  [+] returns $true when a DVD volume reports the letter 21ms (20ms|1ms)
+  [+] returns $true when an ordinary volume reports the letter 20ms (19ms|1ms)
+  [+] returns $true when a partition reports the letter 15ms (11ms|4ms)
+
+Describing Test-DiskReadyForInitializeStage
+  [+] returns $null (ready) for a healthy RAW disk with zero partitions and a free drive letter 23ms (21ms|2ms)
+  [+] fails when the disk can no longer be found 13ms (12ms|1ms)
+  [+] fails when the disk is offline 13ms (13ms|1ms)
+  [+] fails when the disk is no longer RAW 14ms (13ms|1ms)
+  [+] fails when the disk already has partitions 13ms (12ms|1ms)
+  [+] fails when the approved drive letter is now in use by a different disk 24ms (23ms|1ms)
+
+Describing Test-DiskReadyForNewPartitionStage
+  [+] returns $null (ready) for a healthy GPT disk with only the Windows-generated MSR partition 32ms (25ms|7ms)
+  [+] fails when the disk can no longer be found 13ms (12ms|1ms)
+  [+] fails when the disk is not GPT 12ms (12ms|1ms)
+  [+] fails when a non-reserved partition already exists (unexpectedly, before New-Partition was even called) 14ms (13ms|1ms)
+  [+] fails when zero Microsoft Reserved partitions are present 13ms (12ms|1ms)
+
+Describing Test-PartitionReadyForFormatStage
+  [+] returns $null (ready) for the exact newly created data partition with no existing filesystem 32ms (30ms|2ms)
+  [+] fails when there is not exactly one data partition 13ms (12ms|1ms)
+  [+] fails when the partition number no longer matches the one just created 16ms (15ms|1ms)
+  [+] fails when the GPT type is no longer the exact Basic Data type 13ms (12ms|1ms)
+  [+] fails when the size no longer matches the expected disk capacity 14ms (13ms|1ms)
+  [+] fails when the drive letter no longer matches the approved target 12ms (11ms|1ms)
+  [+] fails when a filesystem unexpectedly already appears on the target drive letter 26ms (25ms|1ms)
+
+Describing Get-GuestDiskPreparationPlan
+  [+] builds a correct, unblocked plan for a complete RAW APP inventory 69ms (66ms|3ms)
+  [+] builds a correct, unblocked plan for a complete RAW SQL inventory with a positively verified empty DVD at E:, including a Move DVD plan with the correct device identity 51ms (50ms|1ms)
+  [+] blocks the ENTIRE VM when SQL LOG validation fails, even though SQL DATA would independently resolve fine 28ms (27ms|1ms)
+  [+] blocks the ENTIRE VM when SQL LOG is offline 30ms (29ms|1ms)
+  [+] rejects a caller-consistent v1 VM/disk combination even when caller and IMDS fully agree with each other 16ms (15ms|1ms)
+  [+] blocks when an ambiguous IMDS LUN mapping exists (two IMDS data disks reporting the same LUN) 14ms (13ms|1ms)
+  [+] blocks when the actual Windows computer name does not match the allowlist (even if everything else matches) 15ms (14ms|1ms)
+  [+] blocks when a drive-letter conflict exists against an unrelated disk elsewhere in the guest 11ms (10ms|1ms)
+  [+] blocks when the data partition's volume GUID path matches more than one guest volume (ambiguous volume correlation) 44ms (43ms|1ms)
+
+Describing Invoke-GuestDiskPreparation
+ Context Apply mode, APP, RAW disk
+   [+] initializes, partitions, and formats the resolved disk with the exact target identity 866ms (859ms|7ms)
+   [+] never touches APP's DVD-ROM even if one exists at E: (DvdLetterMoveTarget is always empty for APP) 152ms (149ms|3ms)
+ Context Apply mode, SQL, RAW disks with a positively verified DVD at E:
+   [+] moves the DVD-ROM before creating the SQL DATA partition at E:, then initializes both disks in LUN order 343ms (341ms|2ms)
+   [+] produces zero mutations of any kind when SQL LOG fails validation -- SQL DATA remains completely untouched 136ms (135ms|1ms)
+   [+] produces zero mutations (DVD move AND every SQL DATA mutation) when SQL LOG is offline 116ms (115ms|1ms)
+   [+] produces zero mutations when the DVD at E: has loaded media 102ms (101ms|1ms)
+   [+] produces zero mutations when the optical device media state is unknown 106ms (105ms|1ms)
+   [+] produces zero mutations when the optical device reports an unexpected device name 107ms (106ms|1ms)
+   [+] produces zero mutations when more than one optical device ambiguously reports E: 103ms (102ms|1ms)
+   [+] produces zero mutations when the target letter Z: is already occupied 105ms (104ms|1ms)
+ Context Apply mode, SQL, second (idempotent) run with valid E:/F: already prepared and DVD already at Z:
+   [+] performs zero mutations of any kind and completes successfully 125ms (123ms|2ms)
+ Context Stable identity re-validation immediately before the whole-VM Apply preflight
+   [+] fails and performs zero mutations when a resolved disk's UniqueId changes between the first plan and the immediate pre-mutation re-check 113ms (111ms|2ms)
+ Context Immediate per-stage re-validation (Finding 4): identity/state changes DURING Apply, between individual mutating calls
+   [+] fails, and never calls New-Partition, when the target disk's UniqueId changes immediately after Initialize-Disk but before the New-Partition recheck 156ms (154ms|2ms)
+   [+] fails, and never calls Format-Volume, when a filesystem unexpectedly already appears on the new partition immediately after New-Partition but before the Format recheck 168ms (167ms|1ms)
+   [+] completes SQL DATA successfully but fails before touching SQL LOG when LOG's identity silently changes while DATA was being finished -- DATA's own completed mutations are never rolled back 189ms (188ms|1ms)
+   [+] moves the DVD-ROM successfully but never initializes any disk when SQL DATA's identity silently changes immediately after the DVD move 171ms (170ms|1ms)
+ Context Query failures must propagate as hard failures, never as benign empty results
+   [+] throws (and performs zero mutations) when the guest partition inventory query fails 68ms (66ms|2ms)
+ Context Non-administrator/non-SYSTEM execution context
+   [+] refuses to build any plan at all when not running as Administrator or SYSTEM 93ms (90ms|3ms)
+ Context Validate mode issues zero mutation calls, for every scenario -- including failing ones
+   [+] issues zero mutation calls for scenario "APP RAW happy path" 131ms (127ms|4ms)
+   [+] issues zero mutation calls for scenario "SQL RAW happy path with DVD move pending" 82ms (81ms|1ms)
+   [+] issues zero mutation calls for scenario "SQL LOG validation failure" 77ms (76ms|1ms)
+   [+] issues zero mutation calls for scenario "SQL LOG offline" 83ms (82ms|1ms)
+   [+] issues zero mutation calls for scenario "SQL loaded DVD media" 72ms (71ms|1ms)
+   [+] issues zero mutation calls for scenario "SQL unknown DVD media state" 85ms (81ms|4ms)
+Tests completed in 6.91s
+Tests Passed: 111, Failed: 0, Skipped: 0, Inconclusive: 0, NotRun: 0

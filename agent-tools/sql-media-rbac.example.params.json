@@ -1,0 +1,24 @@
+{
+  "$schema": "https://schema.management.azure.com/schemas/2019-04-01/deploymentParameters.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "sqlVmResourceGroupResourceId": {
+      "value": "/subscriptions/00000000-0000-0000-0000-000000000002/resourceGroups/rg-compute-lims-dev-westeu"
+    },
+    "sqlVmName": {
+      "value": "vm-lims-dev-v2-westeu-002"
+    },
+    "expectedSqlVmPrincipalId": {
+      "value": "00000000-0000-0000-0000-000000000099"
+    },
+    "storageResourceGroupResourceId": {
+      "value": "/subscriptions/00000000-0000-0000-0000-000000000001/resourceGroups/rg-core-lims-mgmt-westeu"
+    },
+    "storageAccountName": {
+      "value": "salimsmgmtwe"
+    },
+    "containerName": {
+      "value": "mssql-2022-source"
+    }
+  }
+}

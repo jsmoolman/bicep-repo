@@ -1,0 +1,8 @@
+{
+  "instanceView": {
+    "executionState": "Failed",
+    "exitCode": 1,
+    "output": "",
+    "error": "The term 'powershell' stopped on an unexpected guest-side failure before the script's own error handling ran."
+  }
+}
