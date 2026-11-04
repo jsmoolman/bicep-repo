@@ -4,19 +4,33 @@
 # Purpose:
 #   The one pipeline for guest-level provisioning steps on the existing
 #   LIMS WS2025 DEV v2 SQL virtual machine (vm-lims-dev-v2-westeu-002),
-#   selected by the `action` parameter. Today only `stage-only` exists:
-#   it submits this repository's own staging script
-#   (operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1)
-#   via a Microsoft.Compute/virtualMachines/runCommands ("Managed Run
-#   Command") resource, created ad hoc through the Azure CLI (never
-#   declared in Bicep), and waits for it to reach a terminal execution
-#   state. SQL Server Setup itself is explicitly out of scope for this
-#   revision -- a future `install` action is expected to extend the
-#   `action` parameter's `values:` list and add one more conditional step
-#   block below, reusing the exact same shared submit/poll/verify
-#   mechanism in scripts/submit-and-wait-run-command.sh (only the script
-#   submitted, and the run-command name prefix, would differ) -- not a
-#   new mechanism.
+#   selected by the `action` parameter:
+#     - `stage-only` (default): submits this repository's own staging
+#       script
+#       (operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1).
+#     - `install`: submits this repository's own SQL Server 2022
+#       installation script
+#       (operations/compute/lims-ws2025-dev-sql-install/Install-LimsSqlServer.ps1),
+#       approved under the "LIMS WS2025 DEV v2 — SQL Server 2022
+#       installation" exception in docs/scope.md, then, only on a fully
+#       successful (not reboot-pending) install, runs one Azure CLI step
+#       registering the VM with the SQL IaaS Agent Extension using Azure
+#       Hybrid Benefit (`az sql vm create --sql-mgmt-type LightWeight
+#       --license-type AHUB`) -- `LightWeight` is the only valid
+#       management type for a self-installed SQL Server 2022 instance
+#       (`NoAgent` only supports SQL Server 2008/2008 R2); `LightWeight`
+#       deliberately does not enable the extension's own automated-
+#       patching/automated-backup features, since post-install servicing
+#       stays with Azure Update Manager (see docs/operations.md's
+#       "SQL v2 patching handoff" runbook).
+#   Both actions submit via one Microsoft.Compute/virtualMachines/runCommands
+#   ("Managed Run Command") resource, created ad hoc through the Azure CLI
+#   (never declared in Bicep), and wait for it to reach a terminal
+#   execution state, through the exact same shared submit/poll/verify
+#   mechanism in scripts/submit-and-wait-run-command.sh -- only the script
+#   submitted, the run-command name prefix, and (for `install`) the
+#   `--parameters`/`--protected-parameters` forwarded to it differ. Not a
+#   duplicated mechanism per action.
 #
 #   The staging script itself independently re-verifies the guest
 #   hostname and the live Azure Instance Metadata Service identity before
@@ -65,16 +79,24 @@
 #   submit-and-wait-run-command.sh's own header comment for the exact
 #   `stagingIndeterminate` state machine both scripts rely on.
 #
-# What this pipeline does NOT do (for `stage-only`; see above for why an
-# `install` action is deliberately not implemented here yet):
-#   - No SQL Server Setup, installation, or configuration of any kind.
+# What this pipeline does NOT do, for either action:
 #   - No VM configuration, RBAC, or networking change of any kind.
-#   - No change to the existing SQL Server instance.
 #   - No foundation/compute or RBAC deployment of any kind -- this
 #     pipeline is deliberately independent of
 #     deploy-lims-ws2025-dev-foundation.yml and
 #     deploy-lims-ws2025-dev-sql-media-rbac.yml; it neither depends on
 #     nor triggers either.
+#   - For `stage-only` specifically: no SQL Server Setup, installation, or
+#     configuration of any kind; no change to the existing SQL Server
+#     instance.
+#   - For `install` specifically: see Install-LimsSqlServer.ps1's own
+#     header comment's "OUT OF SCOPE" list (no feature beyond the
+#     Database Engine, no named/multiple instance, no other service
+#     account, no SQL Server Agent actually running, no protocol/port
+#     beyond TCP 1433, no guessed admin principals, no change to the
+#     staged media, no SQL IaaS mgmt-type beyond LightWeight, no VM
+#     compute/disk/network/identity change, no Windows/Microsoft Update
+#     source change, no uninstall/repair/upgrade of an existing instance).
 #
 # Portal Run Command fallback:
 #   Azure Portal -> Run Command -> RunPowerShellScript, pointed at the
@@ -129,11 +151,61 @@ parameters:
     type: string
 
   - name: action
-    displayName: Provisioning action to run. Only 'stage-only' exists today (submits the repository's staging script and waits for it to finish). A future 'install' action for SQL Server Setup is out of scope for this revision and is not yet implemented — see this file's own header comment.
+    displayName: Provisioning action to run. 'stage-only' (default) submits the repository's staging script and waits for it to finish. 'install' runs SQL Server 2022 Setup against the already-staged media — see the install-only parameters below, all of which are ignored for 'stage-only'.
     type: string
     default: 'stage-only'
     values:
       - stage-only
+      - install
+
+  # ---- install-only parameters. Ignored (never read, never forwarded)
+  # when action is 'stage-only'. See docs/operations.md's "LIMS WS2025
+  # DEV v2 — SQL Server 2022 installation" section for the full
+  # Setup-option mapping of every one of these.
+  - name: windowsSqlAdminPrincipalsCsv
+    displayName: 'install only, REQUIRED — comma-separated list of approved Windows/Azure AD principals to grant SQL sysadmin (e.g. "BUILTIN\Administrators,AzureAD\group@tenant.onmicrosoft.com"). No default — this pipeline never defaults or guesses this value; the run fails immediately, before anything is submitted, if this is left empty while action=install.'
+    type: string
+    default: ''
+
+  - name: sqlDataPath
+    displayName: 'install only — SQL Server data file directory, on the E: (SQL-Data) volume.'
+    type: string
+    default: 'E:\MSSQL\DATA'
+
+  - name: sqlLogPath
+    displayName: 'install only — SQL Server transaction log file directory, on the F: (SQL-Logs) volume.'
+    type: string
+    default: 'F:\MSSQL\LOG'
+
+  - name: sqlTempDbPath
+    displayName: 'install only — TempDB data and log file directory, on the D: (Azure temporary/ephemeral) volume.'
+    type: string
+    default: 'D:\MSSQL\TempDB'
+
+  - name: sqlTempDbFileCount
+    displayName: 'install only — number of TempDB data files.'
+    type: number
+    default: 8
+
+  - name: sqlTempDbFileSizeMB
+    displayName: 'install only — initial size (MB) of each TempDB data file.'
+    type: number
+    default: 1024
+
+  - name: sqlTempDbFileGrowthMB
+    displayName: 'install only — autogrowth increment (MB) of each TempDB data file.'
+    type: number
+    default: 512
+
+  - name: sqlTempDbLogSizeMB
+    displayName: 'install only — initial size (MB) of the TempDB log file.'
+    type: number
+    default: 1024
+
+  - name: sqlTempDbLogGrowthMB
+    displayName: 'install only — autogrowth increment (MB) of the TempDB log file.'
+    type: number
+    default: 512
 
 variables:
   - name: devSubscriptionId
@@ -144,6 +216,8 @@ variables:
     value: 'vm-lims-dev-v2-westeu-002'
   - name: stagingScriptPath
     value: 'operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1'
+  - name: installScriptPath
+    value: 'operations/compute/lims-ws2025-dev-sql-install/Install-LimsSqlServer.ps1'
   - name: guestTimeoutSeconds
     value: '2400'
   - name: pollDeadlineSeconds
@@ -154,6 +228,13 @@ variables:
     value: '15'
   - name: normalPollIntervalSeconds
     value: '20'
+  # The sa mixed-mode password (secret variable `limsSqlInstallSaPassword`)
+  # comes from this variable group — referenced only when action=install,
+  # so a 'stage-only' run neither requires the group to exist nor fails if
+  # it does not. Must be created and populated in Azure DevOps Library
+  # before the first 'install' run.
+  - ${{ if eq(parameters.action, 'install') }}:
+      - group: lims-ws2025-dev-sql-install-secrets
 
 jobs:
   - job: Provision
@@ -214,12 +295,91 @@ jobs:
               STARTUP_RETRY_INTERVAL_SECONDS: $(startupRetryIntervalSeconds)
               NORMAL_POLL_INTERVAL_SECONDS: $(normalPollIntervalSeconds)
 
-      # A future 'install' action would add one more conditional block
-      # here (`${{ if eq(parameters.action, 'install') }}`), pointing
-      # SCRIPT_TO_SUBMIT and RUN_COMMAND_NAME at the SQL Server Setup
-      # script instead, and reusing this exact same
-      # submit-and-wait-run-command.sh invocation unchanged. Not
-      # implemented in this revision.
+      - ${{ if and(eq(parameters.action, 'install'), eq(parameters.windowsSqlAdminPrincipalsCsv, '')) }}:
+          - script: |
+              echo "##vso[task.logissue type=error]parameters.windowsSqlAdminPrincipalsCsv was not supplied. This pipeline never defaults or guesses the approved Windows SQL administrator principals -- re-run with an explicit value (e.g. 'BUILTIN\Administrators' or 'AzureAD\group@tenant.onmicrosoft.com')."
+              exit 1
+            displayName: 'install: FAIL before any submission — windowsSqlAdminPrincipalsCsv was not supplied'
+
+      - ${{ if eq(parameters.action, 'install') }}:
+          - task: AzureCLI@2
+            displayName: 'install: submit SQL Server 2022 installation script via Managed Run Command and wait for a terminal execution state'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              # Wrapped in an inline script (rather than scriptLocation:
+              # scriptPath, used for stage-only above) only so this step
+              # can inspect the shared script's own stdout afterward and
+              # set installRebootRequired -- submit-and-wait-run-command.sh
+              # itself is still the one, unmodified, shared mechanism;
+              # nothing about its own submit/poll/verify logic is
+              # duplicated here. `set -o pipefail` only, deliberately no
+              # `-e`, so the capture below always runs and the real exit
+              # code is still captured and returned explicitly at the end
+              # -- matching the shared script's own no-`-e` style.
+              inlineScript: |
+                set -uo pipefail
+                output=$(bash .azuredevops/pipelines/scripts/submit-and-wait-run-command.sh 2>&1)
+                exitCode=$?
+                echo "$output"
+                if echo "$output" | grep -qF '===== LIMS SQL Server 2022 installation: REBOOT REQUIRED ====='; then
+                  echo "##vso[task.setvariable variable=installRebootRequired]true"
+                  echo "NOTE: Setup succeeded but requires a reboot before the instance can be used. The SQL IaaS/Azure Hybrid Benefit registration step below is SKIPPED until a reboot and a successful rerun of this same 'install' action complete without a reboot requirement."
+                else
+                  echo "##vso[task.setvariable variable=installRebootRequired]false"
+                fi
+                exit $exitCode
+            env:
+              DEV_SUBSCRIPTION_ID: $(devSubscriptionId)
+              RESOURCE_GROUP: $(resourceGroupName)
+              VM_NAME: $(vmName)
+              SCRIPT_TO_SUBMIT: $(installScriptPath)
+              RUN_COMMAND_NAME: 'provision-lims-sql-install-$(Build.BuildId)'
+              GUEST_TIMEOUT_SECONDS: $(guestTimeoutSeconds)
+              POLL_DEADLINE_SECONDS: $(pollDeadlineSeconds)
+              STARTUP_MAX_RETRIES: $(startupMaxRetries)
+              STARTUP_RETRY_INTERVAL_SECONDS: $(startupRetryIntervalSeconds)
+              NORMAL_POLL_INTERVAL_SECONDS: $(normalPollIntervalSeconds)
+              # Non-secret explicit inputs -- one "name=value" pair per
+              # line. Every value below comes directly from this
+              # pipeline's own parameters; none is hardcoded or guessed
+              # here.
+              RUN_COMMAND_PARAMETERS: |
+                WindowsSqlAdminPrincipalsCsv=${{ parameters.windowsSqlAdminPrincipalsCsv }}
+                DataPath=${{ parameters.sqlDataPath }}
+                LogPath=${{ parameters.sqlLogPath }}
+                TempDbPath=${{ parameters.sqlTempDbPath }}
+                TempDbFileCount=${{ parameters.sqlTempDbFileCount }}
+                TempDbFileSizeMB=${{ parameters.sqlTempDbFileSizeMB }}
+                TempDbFileGrowthMB=${{ parameters.sqlTempDbFileGrowthMB }}
+                TempDbLogSizeMB=${{ parameters.sqlTempDbLogSizeMB }}
+                TempDbLogGrowthMB=${{ parameters.sqlTempDbLogGrowthMB }}
+              # The one secret input -- sourced only from the
+              # lims-ws2025-dev-sql-install-secrets variable group
+              # referenced above, never hardcoded here. Delivered via
+              # `az vm run-command create --protected-parameters`, kept
+              # out of the run-command resource's own settings and out of
+              # activity logs.
+              RUN_COMMAND_PROTECTED_PARAMETERS: 'SaPassword=$(limsSqlInstallSaPassword)'
+
+      - ${{ if eq(parameters.action, 'install') }}:
+          - task: AzureCLI@2
+            displayName: 'install: register SQL IaaS Agent Extension with Azure Hybrid Benefit (only after a fully successful, non-reboot-pending install)'
+            condition: and(succeeded(), ne(variables['installRebootRequired'], 'true'))
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: |
+                set -euo pipefail
+                az sql vm create \
+                  --name "$(vmName)" \
+                  --resource-group "$(resourceGroupName)" \
+                  --subscription "$(devSubscriptionId)" \
+                  --license-type AHUB \
+                  --sql-mgmt-type LightWeight
+                echo "SQL IaaS Agent Extension registration submitted for $(vmName) (license-type=AHUB, sql-mgmt-type=LightWeight)."
 
       - task: AzureCLI@2
         displayName: 'Delete the ad hoc Managed Run Command resource unless its result is indeterminate (best effort, always runs)'

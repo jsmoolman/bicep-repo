@@ -962,12 +962,21 @@ function Test-LimsSqlMediaStagingComplete {
     <#
         Post-copy verification: re-checks EVERY entry in the plan (not only
         the ones just downloaded) against its destination file's actual
-        current length, and confirms a case-insensitive 'SETUP.EXE' leaf
-        name exists among the verified entries. Throws with a clear reason
-        on any gap -- this script never reports success without this check
-        passing.
+        current length, and confirms a verified entry exists at EXACTLY
+        $Config.StagingRoot\SETUP.EXE (case-insensitive full-path match --
+        not merely a 'SETUP.EXE' leaf name anywhere in the tree). This is
+        the one pinned path the installation capability (see
+        operations/compute/lims-ws2025-dev-sql-install) itself independently
+        re-verifies via Authenticode signature before ever executing it;
+        pinning the exact path here too means staging can never report
+        success over a same-named file sitting in an unexpected
+        subdirectory. Throws with a clear reason on any gap -- this script
+        never reports success without this check passing.
     #>
-    param([Parameter(Mandatory = $true)] $Plan)
+    param(
+        [Parameter(Mandatory = $true)] $Plan,
+        [Parameter(Mandatory = $true)] $Config
+    )
 
     $verified = @()
     $missingOrMismatched = @()
@@ -985,9 +994,10 @@ function Test-LimsSqlMediaStagingComplete {
         Assert-LimsSqlMediaStagingFailure "Final inventory verification failed: $($missingOrMismatched.Count) file(s) missing or length-mismatched, including '$($missingOrMismatched[0])'."
     }
 
-    $setupExeEntry = $verified | Where-Object { (Split-Path -Path $_.DestinationPath -Leaf) -eq 'SETUP.EXE' } | Select-Object -First 1
+    $pinnedSetupExePath = Join-Path -Path $Config.StagingRoot -ChildPath 'SETUP.EXE'
+    $setupExeEntry = $verified | Where-Object { $_.DestinationPath -eq $pinnedSetupExePath } | Select-Object -First 1
     if (-not $setupExeEntry) {
-        Assert-LimsSqlMediaStagingFailure "Final inventory verification failed: no verified file named SETUP.EXE (case-insensitive) was found under the staged media."
+        Assert-LimsSqlMediaStagingFailure "Final inventory verification failed: no verified file was found at the pinned path '$pinnedSetupExePath'."
     }
 
     return [pscustomobject]@{ VerifiedCount = $verified.Count; SetupExePath = $setupExeEntry.DestinationPath }
@@ -1013,7 +1023,7 @@ function Invoke-LimsSqlMediaStaging {
     }
 
     $applyResult = Invoke-LimsSqlMediaStagingPlanApply -AccessToken $accessToken -Config $config -Plan $plan
-    $verification = Test-LimsSqlMediaStagingComplete -Plan $plan
+    $verification = Test-LimsSqlMediaStagingComplete -Plan $plan -Config $config
 
     $summary = [pscustomobject]@{
         Destination        = $config.StagingRoot

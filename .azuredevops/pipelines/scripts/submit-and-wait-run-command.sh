@@ -7,11 +7,11 @@
 # =============================================================================
 #
 # This is the one shared mechanism provision-lims-ws2025-dev-sql.yml's
-# `stage-only` action uses today, and the one a future `install` action
-# (SQL Server Setup, not in scope yet) is expected to reuse unchanged --
-# only the script it submits (and the run-command name prefix) differs.
-# Nothing about target resolution, polling, or result verification is
-# duplicated per action.
+# `stage-only` AND `install` actions both use -- only the script submitted
+# (and the run-command name prefix, and whether RUN_COMMAND_PARAMETERS /
+# RUN_COMMAND_PROTECTED_PARAMETERS are set) differs per action. Nothing
+# about target resolution, polling, or result verification is duplicated
+# per action.
 #
 # Required environment variables:
 #   DEV_SUBSCRIPTION_ID         Pinned DEV subscription ID. Passed
@@ -58,6 +58,33 @@
 #                                executionState has been observed at least
 #                                once (including a non-terminal one, e.g.
 #                                "Running").
+#
+# Optional environment variables (both default to empty, which reproduces
+# today's `stage-only` behavior exactly -- no `--parameters` or
+# `--protected-parameters` flag is passed to `az vm run-command create` at
+# all when the corresponding variable is unset or empty):
+#   RUN_COMMAND_PARAMETERS      Non-secret "name=value" pairs forwarded to
+#                                `az vm run-command create --parameters`,
+#                                one pair per line (newline-separated, not
+#                                space-separated, so a value may itself
+#                                contain spaces). Delivered to a Windows
+#                                guest PowerShell script as ordinary named
+#                                parameters, e.g. a line "Foo=bar" arrives
+#                                as `-Foo bar`. These values ARE visible in
+#                                the run-command resource's own settings
+#                                and in Azure activity logs -- never put a
+#                                secret here.
+#   RUN_COMMAND_PROTECTED_PARAMETERS
+#                                Secret "name=value" pairs forwarded to
+#                                `az vm run-command create
+#                                --protected-parameters`, in the same
+#                                newline-separated "name=value" format.
+#                                Azure keeps these out of the run-command
+#                                resource's own settings and out of
+#                                activity logs. This script never echoes,
+#                                logs, or otherwise prints the content of
+#                                this variable anywhere below -- only
+#                                whether it was supplied (true/false).
 #
 # Side effects visible to the calling Azure Pipelines job (via `##vso`
 # logging commands, so this works whether invoked as an inline script or
@@ -134,7 +161,34 @@ fi
 echo "##vso[task.setvariable variable=runCommandName]$RUN_COMMAND_NAME"
 echo "##vso[task.setvariable variable=stagingIndeterminate]true"
 
-echo "Submitting Managed Run Command '$RUN_COMMAND_NAME' (subscription: $DEV_SUBSCRIPTION_ID, script: $SCRIPT_TO_SUBMIT, guest timeout: ${GUEST_TIMEOUT_SECONDS}s, poll deadline: ${POLL_DEADLINE_SECONDS}s)..."
+# Build the optional --parameters / --protected-parameters argument arrays
+# from newline-separated "name=value" input. Each non-empty line becomes
+# exactly one array element, so a value containing spaces survives intact
+# (space-splitting is only ever applied between lines, never within one).
+# Both arrays stay empty -- and the corresponding flag is never passed to
+# `az vm run-command create` at all -- when the variable is unset/empty,
+# reproducing today's `stage-only` behavior exactly.
+runCommandParametersArgs=()
+if [[ -n "${RUN_COMMAND_PARAMETERS:-}" ]]; then
+  runCommandParametersArgs+=(--parameters)
+  while IFS= read -r parameterLine; do
+    [[ -z "$parameterLine" ]] && continue
+    runCommandParametersArgs+=("$parameterLine")
+  done <<<"$RUN_COMMAND_PARAMETERS"
+fi
+
+runCommandProtectedParametersArgs=()
+protectedParametersSupplied=false
+if [[ -n "${RUN_COMMAND_PROTECTED_PARAMETERS:-}" ]]; then
+  protectedParametersSupplied=true
+  runCommandProtectedParametersArgs+=(--protected-parameters)
+  while IFS= read -r protectedParameterLine; do
+    [[ -z "$protectedParameterLine" ]] && continue
+    runCommandProtectedParametersArgs+=("$protectedParameterLine")
+  done <<<"$RUN_COMMAND_PROTECTED_PARAMETERS"
+fi
+
+echo "Submitting Managed Run Command '$RUN_COMMAND_NAME' (subscription: $DEV_SUBSCRIPTION_ID, script: $SCRIPT_TO_SUBMIT, guest timeout: ${GUEST_TIMEOUT_SECONDS}s, poll deadline: ${POLL_DEADLINE_SECONDS}s, protected parameters supplied: $protectedParametersSupplied)..."
 if ! az vm run-command create \
   --subscription "$DEV_SUBSCRIPTION_ID" \
   --resource-group "$RESOURCE_GROUP" \
@@ -142,6 +196,8 @@ if ! az vm run-command create \
   --name "$RUN_COMMAND_NAME" \
   --script "$script_content" \
   --timeout-in-seconds "$GUEST_TIMEOUT_SECONDS" \
+  "${runCommandParametersArgs[@]+"${runCommandParametersArgs[@]}"}" \
+  "${runCommandProtectedParametersArgs[@]+"${runCommandProtectedParametersArgs[@]}"}" \
   --no-wait; then
   echo "ERROR: 'az vm run-command create' itself failed, or its response was lost -- whether Azure actually accepted this submission cannot be determined, so it is treated as indeterminate rather than 'nothing was created'." >&2
   print_retention_guidance
