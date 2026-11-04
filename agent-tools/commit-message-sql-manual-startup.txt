@@ -1,0 +1,7 @@
+Set MSSQLSERVER startup type to Manual so the TempDB task can start it at boot
+
+Disabled prevented the SCM from auto-starting the engine but also made a
+task-issued Start-Service less appropriate; Manual still keeps Windows from
+starting SQL on its own while allowing LIMS-SQL-TempDb-PrepareAndStart to
+start it after D: and the ACL are ready. SQLSERVERAGENT stays Disabled.
+The reboot and temporary-disk recovery checks are unchanged.
