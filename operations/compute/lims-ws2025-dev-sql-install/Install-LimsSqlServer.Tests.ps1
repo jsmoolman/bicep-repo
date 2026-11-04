@@ -408,18 +408,18 @@ Describe 'Set-LimsSqlServerTcpPort1433 (orchestration, mocked adapters)' {
 }
 
 Describe 'Install-LimsSqlTempDbStartupSequence (orchestration, mocked adapters)' {
-    It 'writes the preparation script, registers the AtStartup task, disables Windows auto-start, and smoke-tests the script without deleting TempDB' {
+    It 'writes the preparation script, registers the AtStartup task, sets the engine to Manual, and smoke-tests the script without deleting TempDB' {
         $script:writtenContent = $null
         Mock Write-TextFileAdapter { param($Path, $Content) $script:writtenContent = $Content }
         Mock Register-TempDbPreparationScheduledTaskAdapter { }
         Mock Set-ServiceStartupTypeAdapter { }
         Mock Invoke-TempDbPreparationScriptAdapter { }
-        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Manual' } }
 
         $result = Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB'
         $result | Should -Be $true
         Should -Invoke Register-TempDbPreparationScheduledTaskAdapter -Times 1 -ParameterFilter { $TaskName -eq 'LIMS-SQL-TempDb-PrepareAndStart' }
-        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $Name -eq 'MSSQLSERVER' -and $StartupType -eq 'Disabled' }
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $Name -eq 'MSSQLSERVER' -and $StartupType -eq 'Manual' }
         Should -Invoke Invoke-TempDbPreparationScriptAdapter -Times 1
         $script:writtenContent | Should -Not -Match 'Remove-Item'
         $script:writtenContent | Should -Match 'icacls\.exe'
@@ -433,7 +433,7 @@ Describe 'Install-LimsSqlTempDbStartupSequence (orchestration, mocked adapters)'
         Mock Invoke-TempDbPreparationScriptAdapter {
             Assert-LimsSqlInstallFailure "TempDB preparation script 'C:\SQLMedia\SQL2022\Start-LimsSqlServerAfterTempDbPreparation.ps1' exited with code 1."
         }
-        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Running'; StartType = 'Manual' } }
 
         { Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB' } | Should -Throw -ExpectedMessage '*exited with code 1*'
         Should -Invoke Get-ServiceStateAdapter -Times 0
@@ -444,7 +444,7 @@ Describe 'Install-LimsSqlTempDbStartupSequence (orchestration, mocked adapters)'
         Mock Register-TempDbPreparationScheduledTaskAdapter { }
         Mock Set-ServiceStartupTypeAdapter { }
         Mock Invoke-TempDbPreparationScriptAdapter { }
-        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
+        Mock Get-ServiceStateAdapter { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Manual' } }
 
         { Install-LimsSqlTempDbStartupSequence -Config $script:TestConfig -TempDbPath 'D:\MSSQL\TempDB' } | Should -Throw -ExpectedMessage '*is not in the Running state*'
     }
@@ -580,7 +580,7 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
         Mock Get-ServiceStateAdapter {
             param($Name)
             if ($Name -eq $script:TestConfig.AgentServiceName) { return [pscustomobject]@{ Status = 'Stopped'; StartType = 'Disabled' } }
-            if ($script:sqlAssessed) { return [pscustomobject]@{ Status = 'Running'; StartType = 'Disabled' } }
+            if ($script:sqlAssessed) { return [pscustomobject]@{ Status = 'Running'; StartType = 'Manual' } }
             $script:sqlAssessed = $true
             return $null
         }
@@ -646,7 +646,7 @@ Describe 'Invoke-LimsSqlServerInstall (end-to-end orchestration, mocked adapters
         $result.SaDisableStatus | Should -Be 'PendingManualOperatorVerification'
         Should -Invoke Invoke-SqlSetupProcessAdapter -Times 1
         Should -Invoke Invoke-SqlWindowsAuthNonQueryAdapter -Times 0
-        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $StartupType -eq 'Disabled' }
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 1 -ParameterFilter { $StartupType -eq 'Manual' }
         Should -Invoke Register-TempDbPreparationScheduledTaskAdapter -Times 1
     }
 

@@ -84,10 +84,13 @@
     plain TempDB placement there would otherwise leave the Database Engine
     unable to start after such an event. Rather than relying on the
     Database Engine's own "Automatic (Delayed Start)" timing to race a
-    separate preparation task, this script disables the Database Engine
-    service's own startup type entirely and installs a single Windows
-    Scheduled Task (AtStartup, running as SYSTEM) that is the ONLY thing
-    that ever starts it after a reboot: the task's own script waits for
+    separate preparation task, this script sets the Database Engine
+    service's Windows startup type to Manual (never Automatic, never
+    Disabled -- SQLSERVERAGENT stays Disabled) and installs a single
+    Windows Scheduled Task (AtStartup, running as SYSTEM) that is the
+    ONLY thing that ever starts it after a reboot -- SQL still starts
+    automatically at boot, but through that task, not through the SCM.
+    The task's own script waits for
     D: to become available, creates the TempDB directory if missing,
     grants the Database Engine's service account the permissions it needs
     there via icacls.exe (checking its exit code and refusing to proceed
@@ -368,9 +371,10 @@ function New-LimsSqlTempDbPreparationScriptContent {
         Engine's service account permissions there via icacls.exe,
         checking its exit code and refusing to start the service if it
         fails, and only then start the Database Engine -- the service's
-        own Windows startup type is set to Disabled by the caller, so this
+        own Windows startup type is set to Manual by the caller, so this
         script, run by the scheduled task, is the ONLY thing that ever
-        starts it after a reboot. This function never includes any
+        starts it after a reboot (SQL still starts automatically at boot,
+        through that task, not through the SCM). This function never includes any
         directory-deletion logic -- recreation is handled entirely by
         "create if missing", never by first removing an existing
         directory.
@@ -523,10 +527,12 @@ function Get-ServiceStateAdapter {
 function Set-ServiceStartupTypeAdapter {
     <#
         Used to set the Database Engine's own Windows startup type to
-        Disabled, so Windows never starts it independently after a
+        Manual, so the SCM never starts it independently after a
         reboot -- the AtStartup scheduled task registered by
         Install-LimsSqlTempDbStartupSequence becomes the only thing that
-        ever starts it, removing any timing race between the two.
+        ever starts it, removing any timing race between the two. Manual
+        (not Disabled) still allows Start-Service from that task, so SQL
+        still starts automatically at boot through the scheduled task.
         Disabled/Automatic/Manual are all natively supported by
         Set-Service -- unlike "Automatic (Delayed Start)", no sc.exe
         fallback is needed here.
@@ -850,13 +856,15 @@ function Install-LimsSqlTempDbStartupSequence {
         Writes the one TempDB preparation-then-start script (the single
         implementation shared by the AtStartup scheduled task and this
         function's own smoke test below -- never duplicated), registers
-        it as an AtStartup scheduled task, and disables the Database
-        Engine service's own Windows startup type so that scheduled task
-        is the ONLY thing that ever starts it after a reboot -- an
-        explicit, deterministic sequence (wait for the volume, create the
-        directory, apply the ACL and check icacls.exe's exit code, only
-        then start the service), never a "delayed start plus hope the
-        task wins the race" timing assumption.
+        it as an AtStartup scheduled task, and sets the Database
+        Engine service's own Windows startup type to Manual so that
+        scheduled task is the ONLY thing that ever starts it after a
+        reboot -- SQL still starts automatically at boot, through that
+        task, not through the SCM. Explicit, deterministic sequence
+        (wait for the volume, create the directory, apply the ACL and
+        check icacls.exe's exit code, only then start the service),
+        never a "delayed start plus hope the task wins the race" timing
+        assumption. SQLSERVERAGENT is left Disabled.
 
         Then runs that exact script once, as a non-destructive smoke
         test: the directory-create and ACL-grant steps are idempotent and
@@ -877,7 +885,7 @@ function Install-LimsSqlTempDbStartupSequence {
     $prepScriptContent = New-LimsSqlTempDbPreparationScriptContent -Config $Config -TempDbPath $TempDbPath
     Write-TextFileAdapter -Path $prepScriptPath -Content $prepScriptContent
     Register-TempDbPreparationScheduledTaskAdapter -TaskName $Config.ScheduledTaskName -ScriptPath $prepScriptPath
-    Set-ServiceStartupTypeAdapter -Name $Config.InstanceName -StartupType 'Disabled'
+    Set-ServiceStartupTypeAdapter -Name $Config.InstanceName -StartupType 'Manual'
 
     # Non-destructive smoke test. Invoke-TempDbPreparationScriptAdapter
     # itself throws if the script exits non-zero (volume-wait timeout,
