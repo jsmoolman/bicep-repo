@@ -46,16 +46,22 @@ BeforeAll {
         param(
             [string] $Name,
             [object[]] $DataDisks,
-            [object] $Tags = $null
+            [object] $Tags = $null,
+            [Parameter(Mandatory = $false)]
+            [AllowNull()]
+            $Zones
         )
-        return [pscustomobject]@{
+        $vm = [pscustomobject]@{
             id             = (New-FakeVmId -Name $Name)
             name           = $Name
             location       = $script:Dev.Location
-            zones          = @()
             tags           = $Tags
             storageProfile = [pscustomobject]@{ dataDisks = $DataDisks }
         }
+        if ($PSBoundParameters.ContainsKey('Zones')) {
+            $vm | Add-Member -NotePropertyName 'zones' -NotePropertyValue $Zones
+        }
+        return $vm
     }
 
     function New-FakeDisk {
@@ -209,6 +215,53 @@ Describe 'Get-CleanupTargetDecision (pure)' {
     }
 }
 
+Describe 'Get-VmZoneDecision (pure)' {
+    It 'treats an omitted zones property as regional' {
+        $vm = New-FakeVm -Name 'vm' -DataDisks @()
+        $vm.PSObject.Properties['zones'] | Should -BeNullOrEmpty
+        $result = Get-VmZoneDecision -Vm $vm
+        $result.Accepted | Should -Be $true
+        $result.Regional | Should -Be $true
+        $result.Zone | Should -Be ''
+    }
+
+    It 'treats a null zones value as regional' {
+        $result = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones $null)
+        $result.Accepted | Should -Be $true
+        $result.Regional | Should -Be $true
+        $result.Zone | Should -Be ''
+    }
+
+    It 'treats an empty zones array or empty string as regional' {
+        $emptyArray = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones @())
+        $emptyArray.Accepted | Should -Be $true
+        $emptyArray.Regional | Should -Be $true
+        $emptyArray.Zone | Should -Be ''
+
+        $emptyString = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones '')
+        $emptyString.Accepted | Should -Be $true
+        $emptyString.Regional | Should -Be $true
+        $emptyString.Zone | Should -Be ''
+    }
+
+    It 'preserves a single canonical Azure zone' {
+        $result = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones @('1'))
+        $result.Accepted | Should -Be $true
+        $result.Regional | Should -Be $false
+        $result.Zone | Should -Be '1'
+    }
+
+    It 'rejects multiple zones as ambiguous and rejects a malformed zone' {
+        $ambiguous = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones @('1', '2'))
+        $ambiguous.Accepted | Should -Be $false
+        $ambiguous.Reason | Should -Match 'more than one availability zone'
+
+        $invalid = Get-VmZoneDecision -Vm (New-FakeVm -Name 'vm' -DataDisks @() -Zones @('west-europe-1'))
+        $invalid.Accepted | Should -Be $false
+        $invalid.Reason | Should -Match 'not a canonical Azure availability zone'
+    }
+}
+
 Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapters)' {
     BeforeEach {
         $script:des = New-FakeDesId
@@ -225,6 +278,14 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
             param($DiskName)
             return New-FakeDisk -Name $DiskName -DesId $script:des
         }
+        Mock New-AzIncrementalSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock New-AzDiskFromSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Add-AzVmDataDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzVmDataDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Set-AzResourceTagsMergeAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzResourceTagsAdapter { throw 'Azure write adapter should not run during plan.' }
     }
 
     It 'fails when the source VM resource ID does not match the mapping' {
@@ -268,10 +329,63 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         $result.DestinationDiskId | Should -Be (New-FakeManagedDiskId -Name $script:Dev.DestinationDataDiskName)
         $result.DiskEncryptionSetId | Should -Be $script:des
         $result.CandidateTemporaryLun | Should -Be 1
+        $result.Zone | Should -Be ''
     }
 
-    It 'lets plan report the live DES, then fails until the mapping pin is filled' {
-        { Invoke-LimsAppDataDiskMigrationPlan -Environment $script:Dev } | Should -Throw -ExpectedMessage '*DiskEncryptionSetResourceId is empty*'
+    It 'preserves a single destination VM zone from the ARM response' {
+        Mock Get-AzVmAdapter {
+            param($VmName)
+            if ($VmName -eq $script:Dev.SourceVmName) {
+                return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+            }
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Zones @('1')
+        }
+        $result = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment (New-MatchingEnvironment)
+        $result.Zone | Should -Be '1'
+    }
+
+    It 'rejects an invalid destination VM zone before any Azure write' {
+        Mock Get-AzVmAdapter {
+            param($VmName)
+            if ($VmName -eq $script:Dev.SourceVmName) {
+                return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+            }
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Zones @('not-a-zone')
+        }
+        { Invoke-LimsAppDataDiskMigrationPlanChecks -Environment (New-MatchingEnvironment) } |
+            Should -Throw -ExpectedMessage '*not a canonical Azure availability zone*'
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+    }
+
+    It 'DEV plan with zones omitted and an empty DES pin prints the live DES ID and stops at the pin guard' {
+        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        [string]::IsNullOrWhiteSpace($script:Dev.DiskEncryptionSetResourceId) | Should -Be $true
+
+        $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $script:Dev -RequireEncryptionPin $false
+        $checks.Zone | Should -Be ''
+        $summary = @(Write-LimsAppDataDiskMigrationPlanSummary -Environment $script:Dev -Checks $checks) -join [Environment]::NewLine
+        $summary | Should -BeLike "*$($script:des)*"
+
+        $failure = $null
+        try {
+            Invoke-LimsAppDataDiskMigrationPlan -Environment $script:Dev
+        }
+        catch {
+            $failure = $_.Exception.Message
+        }
+        $failure | Should -Match 'DiskEncryptionSetResourceId is empty'
+        $failure | Should -BeLike "*$($script:des)*"
+
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Remove-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+        Should -Invoke Remove-AzSnapshotAdapter -Times 0
+        Should -Invoke Set-AzResourceTagsMergeAdapter -Times 0
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
     }
 }
 

@@ -664,12 +664,85 @@ function Assert-DiskIdentityMatchesMapping {
     }
 }
 
-function Get-VmZoneOrEmpty {
+function Get-VmZoneDecision {
+    <#
+        Pure: read VM.zones only after confirming the property exists.
+        Omitted, null, or empty means regional (no --zone). A single
+        canonical Azure zone is preserved. Multiple or malformed values
+        are rejected before any write.
+    #>
     param([Parameter(Mandatory = $true)] $Vm)
-    if ($Vm.zones -and @($Vm.zones).Count -gt 0) {
-        return [string](@($Vm.zones)[0])
+
+    $zonesProperty = $Vm.PSObject.Properties['zones']
+    if ($null -eq $zonesProperty) {
+        return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
     }
-    return ''
+
+    $raw = $zonesProperty.Value
+    if ($null -eq $raw) {
+        return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
+    }
+
+    if ($raw -is [string] -or $raw -is [ValueType]) {
+        $text = [string]$raw
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
+        }
+        return Resolve-SingleVmZoneValue -Value $raw
+    }
+
+    $items = @($raw)
+    if ($items.Count -eq 0) {
+        return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
+    }
+    if ($items.Count -gt 1) {
+        $shown = ($items | ForEach-Object { [string]$_ }) -join ', '
+        return [pscustomobject]@{
+            Accepted = $false
+            Regional = $false
+            Zone     = ''
+            Reason   = "Destination VM reports more than one availability zone ($shown). Refusing to guess which zone to use for the temporary disk."
+        }
+    }
+    return Resolve-SingleVmZoneValue -Value $items[0]
+}
+
+function Resolve-SingleVmZoneValue {
+    param([Parameter(Mandatory = $false)] [AllowNull()] $Value)
+
+    if ($null -eq $Value) {
+        return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
+    }
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        return [pscustomobject]@{
+            Accepted = $false
+            Regional = $false
+            Zone     = ''
+            Reason   = 'Destination VM zone value is nested or structured rather than a single zone string. Refusing to create a temporary disk.'
+        }
+    }
+
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) {
+        return [pscustomobject]@{ Accepted = $true; Regional = $true; Zone = ''; Reason = $null }
+    }
+    if ($text.Trim() -ne $text) {
+        return [pscustomobject]@{
+            Accepted = $false
+            Regional = $false
+            Zone     = ''
+            Reason   = "Destination VM zone '$text' is malformed (leading or trailing whitespace). Refusing to create a temporary disk."
+        }
+    }
+    if ($text -notmatch '^[1-9][0-9]*$') {
+        return [pscustomobject]@{
+            Accepted = $false
+            Regional = $false
+            Zone     = ''
+            Reason   = "Destination VM zone '$text' is not a canonical Azure availability zone. Refusing to create a temporary disk."
+        }
+    }
+    return [pscustomobject]@{ Accepted = $true; Regional = $false; Zone = $text; Reason = $null }
 }
 
 function Get-DiskEncryptionSetIdFromDisk {
@@ -760,6 +833,11 @@ function Invoke-LimsAppDataDiskMigrationPlanChecks {
         Assert-LimsAppMigControlFailure $lunSelection.Reason
     }
 
+    $zoneDecision = Get-VmZoneDecision -Vm $destinationVm
+    if (-not $zoneDecision.Accepted) {
+        Assert-LimsAppMigControlFailure $zoneDecision.Reason
+    }
+
     return [pscustomobject]@{
         SourceVm                  = $sourceVm
         DestinationVm             = $destinationVm
@@ -770,7 +848,7 @@ function Invoke-LimsAppDataDiskMigrationPlanChecks {
         SourceDiskId              = [string]$sourceDisk.id
         DestinationDiskId         = [string]$destinationDisk.id
         Location                  = $Environment.Location
-        Zone                      = Get-VmZoneOrEmpty -Vm $destinationVm
+        Zone                      = $zoneDecision.Zone
         DiskEncryptionSetId       = $sourceDes
         CandidateTemporaryLun          = [int]$lunSelection.Lun
         OccupiedLuns                   = $occupiedLuns
