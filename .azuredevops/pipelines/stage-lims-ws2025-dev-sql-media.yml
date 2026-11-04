@@ -1,0 +1,244 @@
+# =============================================================================
+# Stage LIMS WS2025 DEV v2 SQL Server 2022 Installation Media
+# =============================================================================
+# Purpose:
+#   Submits this repository's own staging script
+#   (operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1)
+#   to the existing LIMS WS2025 DEV v2 SQL virtual machine
+#   (vm-lims-dev-v2-westeu-002) via a Microsoft.Compute/virtualMachines/
+#   runCommands ("Managed Run Command") resource, created ad hoc by this
+#   pipeline through the Azure CLI (never declared in Bicep), then polled
+#   until it reaches a terminal execution state. The script itself
+#   independently re-verifies the guest hostname and the live Azure
+#   Instance Metadata Service identity before performing any write (see
+#   that script's own header comment) and reads the source container
+#   using the VM's own existing system-assigned managed identity -- already
+#   granted Storage Blob Data Reader on that one container by the separate
+#   deploy-lims-ws2025-dev-sql-media-rbac.yml pipeline. This pipeline
+#   additionally, independently re-verifies the target VM's exact resource
+#   ID before ever submitting the script (duplicated verification -- never
+#   trusted only against the script's own identity checks).
+#
+#   Permissions: the Azure DevOps service connection reused below already
+#   has customer-confirmed Owner access across all LIMS subscriptions,
+#   which covers creating, polling, and deleting the ad hoc Managed Run
+#   Command resource on the target VM in the DEV subscription -- this
+#   pipeline requires and grants no new permission.
+#
+# What this pipeline does NOT do:
+#   - No SQL Server Setup, installation, or configuration of any kind.
+#   - No VM configuration, RBAC, or networking change of any kind.
+#   - No change to the existing SQL Server instance.
+#   - No foundation/compute or RBAC deployment of any kind -- this pipeline
+#     is deliberately independent of deploy-lims-ws2025-dev-foundation.yml
+#     and deploy-lims-ws2025-dev-sql-media-rbac.yml; it neither depends on
+#     nor triggers either.
+#
+# Portal Run Command fallback:
+#   Azure Portal -> Run Command -> RunPowerShellScript, pointed at the same
+#   script file, remains available as a manual fallback. See that script's
+#   own header comment for the portal blade's documented 90-minute
+#   execution-timeout limit. This pipeline is the primary, recommended
+#   route specifically because Managed Run Command accepts its own
+#   explicit, independently configurable timeout (see
+#   timeoutInSeconds below), unconstrained by that 90-minute limit or by
+#   any portal browser session remaining open.
+#
+# Manual only by design: trigger/pr are disabled; run via "Run pipeline".
+# Kept independently runnable from every other LIMS WS2025 DEV v2 pipeline.
+# =============================================================================
+
+trigger: none
+
+pr: none
+
+parameters:
+  - name: serviceConnection
+    displayName: Azure DevOps service connection — its underlying managed identity already has customer-confirmed Owner access across all LIMS subscriptions, which covers creating/polling/deleting the ad hoc Managed Run Command resource on the target VM in the DEV subscription. This is a record of existing, already-confirmed access; this pipeline does not request, grant, or change any permission. No default; the real value is customer-specific configuration.
+    type: string
+
+  - name: devSubscriptionId
+    displayName: Expected DEV subscription ID hosting the SQL VM (guard only — independently re-verified against the target VM's exact resource ID before the script is ever submitted)
+    type: string
+    default: '8ebb26a1-674a-40d1-97f8-e0a237e288a6'
+
+  - name: resourceGroupName
+    displayName: Expected resource group hosting the SQL VM (guard only)
+    type: string
+    default: 'rg-compute-lims-dev-westeu'
+
+  - name: vmName
+    displayName: Expected SQL VM name (guard only — the only VM this pipeline will ever target)
+    type: string
+    default: 'vm-lims-dev-v2-westeu-002'
+
+  - name: scriptPath
+    displayName: Repository path to the staging script submitted via Managed Run Command
+    type: string
+    default: 'operations/compute/lims-ws2025-dev-sql-media-staging/Stage-LimsSqlInstallationMedia.ps1'
+
+  - name: timeoutInSeconds
+    displayName: Managed Run Command script timeout, in seconds (deliberately well beyond the Azure Portal Run Command blade's documented 90-minute/5400-second limit — see the staging script's own header comment for when a longer run needs this pipeline instead of the portal)
+    type: number
+    default: 7200
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - checkout: self
+
+  - task: AzureCLI@2
+    displayName: 'Validate target VM identity before invoking the script'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        az account set --subscription "${{ parameters.devSubscriptionId }}"
+        selectedSubscriptionId=$(az account show --query id --output tsv)
+        if [[ "${selectedSubscriptionId,,}" != "${{ parameters.devSubscriptionId }}" ]]; then
+          echo "ERROR: selected subscription '$selectedSubscriptionId' does not match the expected DEV subscription '${{ parameters.devSubscriptionId }}'." >&2
+          exit 1
+        fi
+
+        expectedVmId="/subscriptions/${{ parameters.devSubscriptionId }}/resourceGroups/${{ parameters.resourceGroupName }}/providers/Microsoft.Compute/virtualMachines/${{ parameters.vmName }}"
+        actualVmId=$(az vm show --resource-group "${{ parameters.resourceGroupName }}" --name "${{ parameters.vmName }}" --query id --output tsv) || {
+          echo "ERROR: 'az vm show' failed to resolve ${{ parameters.vmName }} in ${{ parameters.resourceGroupName }}; refusing to proceed." >&2
+          exit 1
+        }
+        shopt -s nocasematch
+        if [[ "$actualVmId" != "$expectedVmId" ]]; then
+          echo "ERROR: resolved VM resource ID ('$actualVmId') does not exactly match the expected target ('$expectedVmId'); refusing to proceed. This guard exists specifically to catch a parameter mix-up before any script is ever submitted to any VM." >&2
+          exit 1
+        fi
+        shopt -u nocasematch
+
+        echo "Target VM identity verified: $actualVmId"
+
+  - task: AzureCLI@2
+    displayName: 'Submit Managed Run Command and wait for a terminal execution state'
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -euo pipefail
+
+        az account set --subscription "${{ parameters.devSubscriptionId }}"
+
+        runCommandName="stage-lims-sql-media-$(Build.BuildId)"
+        echo "##vso[task.setvariable variable=runCommandName]$runCommandName"
+
+        scriptTimeoutSeconds="${{ parameters.timeoutInSeconds }}"
+        # Generous poll budget beyond the script's own requested timeout --
+        # allows for Azure's own provisioning/start overhead around the
+        # actual in-guest script execution window, without ever waiting
+        # indefinitely.
+        pollBudgetSeconds=$((scriptTimeoutSeconds + 600))
+        pollIntervalSeconds=30
+
+        echo "Submitting Managed Run Command '$runCommandName' (script timeout: ${scriptTimeoutSeconds}s, poll budget: ${pollBudgetSeconds}s)..."
+        az vm run-command create \
+          --resource-group "${{ parameters.resourceGroupName }}" \
+          --vm-name "${{ parameters.vmName }}" \
+          --name "$runCommandName" \
+          --script "@${{ parameters.scriptPath }}" \
+          --timeout-in-seconds "$scriptTimeoutSeconds" \
+          --no-wait
+
+        elapsed=0
+        executionState=""
+        showOutput=""
+        while :; do
+          if [[ $elapsed -ge $pollBudgetSeconds ]]; then
+            echo "ERROR: Managed Run Command '$runCommandName' did not reach a terminal execution state within the ${pollBudgetSeconds}s poll budget; staging result cannot be verified." >&2
+            exit 1
+          fi
+
+          showOutput=$(az vm run-command show \
+            --resource-group "${{ parameters.resourceGroupName }}" \
+            --vm-name "${{ parameters.vmName }}" \
+            --name "$runCommandName" \
+            --instance-view \
+            --output json) || {
+            echo "ERROR: 'az vm run-command show --instance-view' failed for '$runCommandName'; staging result cannot be verified." >&2
+            exit 1
+          }
+
+          executionState=$(echo "$showOutput" | jq -e -r '.instanceView.executionState // empty') || {
+            echo "ERROR: could not decode instanceView.executionState from 'az vm run-command show' output for '$runCommandName'; staging result cannot be verified." >&2
+            exit 1
+          }
+          if [[ -z "$executionState" ]]; then
+            echo "ERROR: 'az vm run-command show' returned an empty instanceView.executionState for '$runCommandName'; staging result cannot be verified." >&2
+            exit 1
+          fi
+
+          echo "Poll at ${elapsed}s: executionState=$executionState"
+          if [[ "$executionState" == "Succeeded" || "$executionState" == "Failed" || "$executionState" == "Canceled" ]]; then
+            break
+          fi
+          sleep "$pollIntervalSeconds"
+          elapsed=$((elapsed + pollIntervalSeconds))
+        done
+
+        exitCode=$(echo "$showOutput" | jq -e -r '.instanceView.exitCode // empty') || {
+          echo "ERROR: could not decode instanceView.exitCode from 'az vm run-command show' output for '$runCommandName'; staging result cannot be verified." >&2
+          exit 1
+        }
+        outputText=$(echo "$showOutput" | jq -r '.instanceView.output // empty')
+        errorText=$(echo "$showOutput" | jq -r '.instanceView.error // empty')
+
+        echo "===== Managed Run Command result ====="
+        echo "Name           : $runCommandName"
+        echo "ExecutionState : $executionState"
+        echo "ExitCode       : ${exitCode:-<missing>}"
+        echo "---- Guest script output (compact staging summary) ----"
+        echo "$outputText"
+        if [[ -n "$errorText" ]]; then
+          echo "---- Guest script error ----"
+          echo "$errorText"
+        fi
+        echo "======================================="
+
+        if [[ "$executionState" != "Succeeded" ]]; then
+          echo "ERROR: Managed Run Command executionState was '$executionState' (expected 'Succeeded'); staging failed." >&2
+          exit 1
+        fi
+        if [[ -z "$exitCode" ]]; then
+          echo "ERROR: Managed Run Command did not report an exitCode; staging result cannot be verified." >&2
+          exit 1
+        fi
+        if [[ "$exitCode" != "0" ]]; then
+          echo "ERROR: guest script exited with code $exitCode (expected 0); staging failed." >&2
+          exit 1
+        fi
+
+        echo "Managed Run Command '$runCommandName' succeeded with exit code 0."
+
+  - task: AzureCLI@2
+    displayName: 'Delete the ad hoc Managed Run Command resource (best effort, always runs)'
+    condition: always()
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: |
+        set -uo pipefail
+        if [[ -z "${RUNCOMMANDNAME:-}" ]]; then
+          echo "No Managed Run Command resource was ever submitted this run; nothing to delete."
+          exit 0
+        fi
+        az account set --subscription "${{ parameters.devSubscriptionId }}" || true
+        az vm run-command delete \
+          --resource-group "${{ parameters.resourceGroupName }}" \
+          --vm-name "${{ parameters.vmName }}" \
+          --name "$RUNCOMMANDNAME" \
+          --yes \
+          --only-show-errors \
+          || echo "WARNING: failed to delete Managed Run Command resource '$RUNCOMMANDNAME' (non-fatal; this resource can be deleted manually later and never performs or re-performs any guest action by existing)."
+    env:
+      RUNCOMMANDNAME: $(runCommandName)
