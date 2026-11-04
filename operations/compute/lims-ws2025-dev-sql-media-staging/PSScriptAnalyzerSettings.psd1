@@ -1,7 +1,7 @@
 @{
     # Static-analysis settings for Stage-LimsSqlInstallationMedia.ps1, which
     # is delivered either via the Azure Portal "Run Command" blade or via
-    # Managed Run Command (.azuredevops/pipelines/stage-lims-ws2025-dev-sql-media.yml),
+    # Managed Run Command (.azuredevops/pipelines/provision-lims-ws2025-dev-sql.yml),
     # both of which execute under Windows PowerShell 5.1 by default on
     # Windows (see that script's own header comment for the Microsoft
     # documentation this repository already relies on for the sibling

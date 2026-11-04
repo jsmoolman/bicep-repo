@@ -14,8 +14,8 @@
       1. Azure Portal -> Run Command -> RunPowerShellScript (manual fallback;
          paste this file's content, or point the portal's "Load script"
          picker at it).
-      2. .azuredevops/pipelines/stage-lims-ws2025-dev-sql-media.yml (primary
-         route), which submits this exact file via a
+      2. .azuredevops/pipelines/provision-lims-ws2025-dev-sql.yml (primary
+         route, action 'stage-only'), which submits this exact file via a
          Microsoft.Compute/virtualMachines/runCommands ("Managed Run
          Command") resource created ad hoc via `az vm run-command create`,
          waits for completion, and checks the execution state/exit code.
