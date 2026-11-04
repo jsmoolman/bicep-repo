@@ -96,7 +96,7 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
             resourceGroupName = $script:Dev.ResourceGroupName
             name              = $script:Dev.DestinationVmName
             storageProfile    = [pscustomobject]@{
-                resourceDisk = [pscustomobject]@{ size = 0 }
+                resourceDisk = [pscustomobject]@{ size = 201728 }
                 dataDisks    = @(
                     [pscustomobject]@{ lun = 0; name = $script:Dev.DestinationDataDiskName; managedDisk = [pscustomobject]@{ id = $script:destDiskId } }
                     [pscustomobject]@{ lun = 1; name = $script:tempDiskName; managedDisk = [pscustomobject]@{ id = $script:tempDiskId } }
@@ -105,8 +105,9 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         }
         $script:guestDisks = @(
             [pscustomobject]@{ Number = 0; UniqueId = 'OSDISK'; IsBoot = $true; IsSystem = $true; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 127GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 1; UniqueId = $script:destUid; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 512GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 2; UniqueId = $script:tempUid; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 512GB; ScsiLogicalUnit = 1 }
+            [pscustomobject]@{ Number = 1; UniqueId = $script:destUid; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 128GB; ScsiLogicalUnit = 0 }
+            [pscustomobject]@{ Number = 2; UniqueId = $script:tempUid; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 128GB; ScsiLogicalUnit = 1 }
+            [pscustomobject]@{ Number = 3; UniqueId = 'RESOURCEDISK'; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = [int64]161059207680; ScsiLogicalUnit = 1 }
         )
         $script:partitions = @(
             [pscustomobject]@{ DiskNumber = 1; PartitionNumber = 2; DriveLetter = 'A'; IsSystem = $false; IsBoot = $false }
@@ -175,10 +176,36 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
     }
 
-    It 'fails on duplicate guest SCSI LUNs for the temporary disk' {
-        $script:guestDisks += [pscustomobject]@{ Number = 4; UniqueId = 'OTHER'; IsBoot = $false; IsSystem = $false; IsOffline = $false; IsReadOnly = $false; PartitionStyle = 'GPT'; SizeBytes = 256GB; ScsiLogicalUnit = 1 }
-        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*duplicate guest SCSI LUN 1*'
+    It 'copies despite the DEV IMDS/Windows temporary-disk size discrepancy and SCSI LUN 1 collision' {
+        Mock Invoke-RobocopyAdapter {
+            param($Arguments)
+            if ($Arguments -contains '/L') { return 0 }
+            return 1
+        }
+        $null = Invoke-LimsAppDataDiskContentsCopy @script:CopyParams
+        Should -Invoke Invoke-RobocopyAdapter -Times 3
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+    }
+
+    It 'dumps inventory and stops before Set-Disk when the snapshot-disk UniqueId is missing' {
+        $script:CopyParams.ExpectedTemporaryDiskUniqueId = ''
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*no attested or captured UniqueId*'
         Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+        Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
+    }
+
+    It 'collects read-only inventory, proves the UniqueId binding, and stops before mutation' {
+        $stream = @(Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly)
+        $result = @($stream | Where-Object { $_ -is [pscustomobject] -and $_.PSObject.Properties['Status'] -and $_.Status -eq 'InventoryOnly' }) | Select-Object -Last 1
+        $result | Should -Not -BeNullOrEmpty
+        $result.DestinationDisk.Number | Should -Be 1
+        $result.DestinationDisk.UniqueId | Should -Be $script:destUid
+        $result.TemporaryDisk.Number | Should -Be 2
+        $result.TemporaryDisk.UniqueId | Should -Be $script:tempUid
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+        Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
     }
 
     It 'fails when the snapshot volume would require initialization or formatting' {
@@ -264,8 +291,8 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
     }
 }
 
-Describe 'Real Windows Robocopy reparse-point exercise' {
-    It 'copies local files, excludes lv89\sdmshome, and does not follow source or destination junctions/symlinks' {
+Describe 'Real Windows Robocopy junction exercise' {
+    It 'copies local files, excludes lv89\sdmshome, and does not follow source or destination junctions' {
         $isWindows = $env:OS -eq 'Windows_NT' -or $PSVersionTable.PSEdition -eq 'Desktop'
         if (-not $isWindows) {
             Set-ItResult -Skipped -Because 'Not a Windows host; Robocopy/mklink cannot be exercised. Stage and cleanup stay BlockedPendingValidation.'
@@ -290,7 +317,6 @@ Describe 'Real Windows Robocopy reparse-point exercise' {
         Set-Content -LiteralPath (Join-Path $outside 'secret.txt') -Value 'should-not-copy' -Encoding ascii
 
         $createdJunction = $false
-        $createdSymlink = $false
         $sdms = Join-Path $source 'lv89\sdmshome'
         cmd.exe /c "mklink /J `"$sdms`" `"$outside`"" | Out-Null
         if (Test-Path -LiteralPath $sdms) { $createdJunction = $true }
@@ -326,6 +352,106 @@ Describe 'Real Windows Robocopy reparse-point exercise' {
             cmd.exe /c "rmdir `"$sdms`"" 2>$null | Out-Null
             cmd.exe /c "rmdir `"$srcLink`"" 2>$null | Out-Null
             cmd.exe /c "rmdir `"$destLink`"" 2>$null | Out-Null
+            Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+Describe 'Real Windows Robocopy directory-symbolic-link exercise' {
+    It 'neither previews nor copies through a directory symbolic link at lv89\sdmshome, and a destination symbolic link blocks the copy' {
+        $isWindows = $env:OS -eq 'Windows_NT' -or $PSVersionTable.PSEdition -eq 'Desktop'
+        if (-not $isWindows) {
+            Set-ItResult -Skipped -Because 'Not a Windows host; directory symbolic links cannot be exercised. Stage and cleanup stay BlockedPendingValidation.'
+            return
+        }
+        $robocopy = Get-Command robocopy.exe -ErrorAction SilentlyContinue
+        if (-not $robocopy) {
+            Set-ItResult -Skipped -Because 'robocopy.exe is not on PATH. Stage and cleanup stay BlockedPendingValidation.'
+            return
+        }
+
+        function New-DirectorySymbolicLink {
+            param([string] $LinkPath, [string] $TargetPath)
+            New-Item -ItemType SymbolicLink -Path $LinkPath -Target $TargetPath -ErrorAction SilentlyContinue | Out-Null
+            if (-not (Test-Path -LiteralPath $LinkPath)) {
+                cmd.exe /c "mklink /D `"$LinkPath`" `"$TargetPath`"" | Out-Null
+            }
+            if (-not (Test-Path -LiteralPath $LinkPath)) { return $false }
+            $item = Get-Item -LiteralPath $LinkPath -Force
+            if (-not ($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)) { return $false }
+            if ($item.PSObject.Properties['LinkType'] -and [string]$item.LinkType -eq 'Junction') { return $false }
+            return $true
+        }
+
+        $root = Join-Path ([System.IO.Path]::GetTempPath()) ("lims-app-mig-symlink-" + [guid]::NewGuid().ToString('N'))
+        $source = Join-Path $root 'source'
+        $dest = Join-Path $root 'dest'
+        $standIn = Join-Path $root 'share-stand-in'
+        New-Item -ItemType Directory -Path (Join-Path $source 'temp') -Force | Out-Null
+        New-Item -ItemType Directory -Path (Join-Path $source 'lv89') -Force | Out-Null
+        New-Item -ItemType Directory -Path $dest -Force | Out-Null
+        New-Item -ItemType Directory -Path $standIn -Force | Out-Null
+        Set-Content -LiteralPath (Join-Path $source 'keep.txt') -Value 'keep-local' -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $source 'temp\work.txt') -Value 'temp-ok' -Encoding ascii
+        Set-Content -LiteralPath (Join-Path $standIn 'secret.txt') -Value 'should-not-copy' -Encoding ascii
+
+        $sdms = Join-Path $source 'lv89\sdmshome'
+        $createdSymlink = New-DirectorySymbolicLink -LinkPath $sdms -TargetPath $standIn
+        $destBlockRoot = Join-Path $root 'dest-with-link'
+        $destApp = Join-Path $destBlockRoot 'app'
+        New-Item -ItemType Directory -Path $destApp -Force | Out-Null
+        $destLink = Join-Path $destApp 'redirect'
+        $createdDestSymlink = New-DirectorySymbolicLink -LinkPath $destLink -TargetPath $standIn
+
+        try {
+            if (-not $createdSymlink) {
+                Set-ItResult -Skipped -Because 'Unable to create a directory symbolic link at lv89\sdmshome (privilege or Developer Mode required). Stage and cleanup stay BlockedPendingValidation.'
+                return
+            }
+            $sdmsItem = Get-Item -LiteralPath $sdms -Force
+            [string]$sdmsItem.LinkType | Should -Be 'SymbolicLink'
+
+            $exclude = @('lv89\sdmshome')
+            $sourceReparse = @(Get-ReparseRelativePathsUnderRoot -Root $source -ExcludeRelativePaths $exclude)
+            $sourceReparse | Should -Contain 'lv89\sdmshome'
+            $previewPolicy = Test-ReparsePointPolicy -SourceReparseRelativePaths $sourceReparse -DestinationReparseRelativePaths @() -ExcludeRelativePaths $exclude
+            $previewPolicy.Accepted | Should -Be $true
+
+            $log = Join-Path $root 'robocopy.log'
+            $previewArgs = New-RobocopyArgumentList -SourceRoot $source -DestinationRoot $dest -LogPath $log -ExcludeRelativePaths $exclude -ListOnly
+            $null = & robocopy.exe @previewArgs
+            $previewClass = Get-RobocopyCopyExitCodeClassification -ExitCode ([int]$LASTEXITCODE)
+            $previewClass | Should -Be 'Succeeded'
+            Test-Path -LiteralPath (Join-Path $dest 'keep.txt') | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $dest 'lv89\sdmshome') | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $dest 'lv89\sdmshome\secret.txt') | Should -Be $false
+
+            $copyArgs = New-RobocopyArgumentList -SourceRoot $source -DestinationRoot $dest -LogPath $log -ExcludeRelativePaths $exclude
+            $null = & robocopy.exe @copyArgs
+            $copyClass = Get-RobocopyCopyExitCodeClassification -ExitCode ([int]$LASTEXITCODE)
+            $copyClass | Should -Be 'Succeeded'
+            (Join-Path $dest 'keep.txt') | Should -Exist
+            (Join-Path $dest 'temp\work.txt') | Should -Exist
+            Test-Path -LiteralPath (Join-Path $dest 'lv89\sdmshome') | Should -Be $false
+            Test-Path -LiteralPath (Join-Path $dest 'secret.txt') | Should -Be $false
+            Get-Content -LiteralPath (Join-Path $standIn 'secret.txt') -Raw | Should -Match 'should-not-copy'
+
+            if (-not $createdDestSymlink) {
+                Set-ItResult -Skipped -Because 'Source directory symbolic link was proven, but a destination directory symbolic link could not be created. Stage and cleanup stay BlockedPendingValidation.'
+                return
+            }
+            $destReparse = @(Get-ReparseRelativePathsUnderRoot -Root $destBlockRoot -ExcludeRelativePaths $exclude)
+            $destReparse | Should -Contain 'app\redirect'
+            $block = Test-ReparsePointPolicy -SourceReparseRelativePaths @('lv89\sdmshome') -DestinationReparseRelativePaths $destReparse -ExcludeRelativePaths $exclude
+            $block.Accepted | Should -Be $false
+            $block.Reason | Should -Match 'Destination reparse'
+        }
+        finally {
+            foreach ($linkPath in @($sdms, $destLink)) {
+                if ($linkPath -and (Test-Path -LiteralPath $linkPath)) {
+                    cmd.exe /c "rmdir `"$linkPath`" >nul 2>&1" | Out-Null
+                }
+            }
             Remove-Item -LiteralPath $root -Recurse -Force -ErrorAction SilentlyContinue
         }
     }

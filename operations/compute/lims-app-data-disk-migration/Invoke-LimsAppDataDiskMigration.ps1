@@ -325,7 +325,7 @@ function Assert-EnvironmentEnabledAndComplete {
         'PreferredTemporaryDriveLetter', 'DiskEncryptionSetName',
         'SnapshotNamePrefix', 'TemporaryDiskNamePrefix',
         'DestinationAttestedGuestUniqueId', 'GuestCommandNamePrefix',
-        'WindowsReparseValidationStatus'
+        'WindowsReparseValidationStatus', 'WindowsSymlinkValidationStatus'
     )
     foreach ($name in $requiredStrings) {
         $value = [string]$Environment.$name
@@ -1004,7 +1004,6 @@ function Invoke-LimsAppDataDiskMigrationStage {
     $tempLookup = Get-AzDiskLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName
     Assert-LookupFoundOrGone -Lookup $tempLookup -Role 'Temporary disk'
 
-    $resume = $false
     $snapshot = $null
     $tempDisk = $null
 
@@ -1014,22 +1013,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' exists without limsAppMigLockRunId. Refusing to reuse or steal the environment lock. Evidence needed: lock-owner tag set at create."
         }
-        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId
+        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose 'Stage'
         if (-not $lockDecision.Allowed) {
             Assert-LimsAppMigControlFailure $lockDecision.Reason
         }
-        $snapshotLookup = Get-AzSnapshotLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName
-        Assert-LookupFoundOrGone -Lookup $snapshotLookup -Role 'Snapshot'
-        if ($snapshotLookup.Classification -ne 'Found') {
-            Assert-LimsAppMigControlFailure "Same-ID retry found the environment lock disk but snapshot '$($names.SnapshotName)' lookup is '$($snapshotLookup.Classification)'. Refusing to recreate from an unproven snapshot."
-        }
-        $snapshot = $snapshotLookup.Resource
-        $lineage = Get-TemporaryDiskLineageDecision -TemporaryDiskId ([string]$tempDisk.id) -TemporaryDiskSourceId (Get-CreationSourceId -Resource $tempDisk) -SnapshotId ([string]$snapshot.id) -SnapshotSourceId (Get-CreationSourceId -Resource $snapshot) -OriginalSourceDiskId $checks.SourceDiskId -RecordedTemporaryDiskId ([string]$tempDisk.id) -RecordedSnapshotId ([string]$snapshot.id)
-        if (-not $lineage.Matches) {
-            Assert-LimsAppMigControlFailure $lineage.Reason
-        }
-        $resume = $true
-        Write-Output "Reusing temporary disk '$($tempDisk.id)' (environment lock, same-ID retry)."
+        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' already holds the environment lock for run '$owner'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
     }
     else {
         $snapshotLookup = Get-AzSnapshotLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName
@@ -1062,16 +1050,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
             if ([string]::IsNullOrWhiteSpace($owner)) {
                 Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' exists without limsAppMigLockRunId after a create conflict. Refusing to steal the lock."
             }
-            $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId
+            $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose 'Stage'
             if (-not $lockDecision.Allowed) {
                 Assert-LimsAppMigControlFailure $lockDecision.Reason
             }
-            $lineage = Get-TemporaryDiskLineageDecision -TemporaryDiskId ([string]$tempDisk.id) -TemporaryDiskSourceId (Get-CreationSourceId -Resource $tempDisk) -SnapshotId ([string]$snapshot.id) -SnapshotSourceId (Get-CreationSourceId -Resource $snapshot) -OriginalSourceDiskId $checks.SourceDiskId -RecordedTemporaryDiskId ([string]$tempDisk.id) -RecordedSnapshotId ([string]$snapshot.id)
-            if (-not $lineage.Matches) {
-                Assert-LimsAppMigControlFailure $lineage.Reason
-            }
-            $resume = $true
-            Write-Output "Create collided; reusing temporary disk '$($tempDisk.id)' for same-ID retry."
+            Assert-LimsAppMigControlFailure "Temporary disk create collided with '$($tempDisk.id)' owned by run '$owner'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
         }
         elseif ($createResult.Classification -eq 'Found') {
             $tempDisk = $createResult.Resource
@@ -1079,6 +1062,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
         else {
             Assert-LimsAppMigControlFailure "Temporary disk create classified as '$($createResult.Classification)'. $($createResult.Text)"
         }
+    }
+
+    $tempUniqueId = Get-DiskUniqueIdFromResource -Disk $tempDisk
+    if ([string]::IsNullOrWhiteSpace($tempUniqueId)) {
+        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' has no ARM uniqueId. Refusing to attach or change guest disk state. Collect a read-only guest disk inventory only after ARM uniqueId is present; binding is ARM uniqueId matching Get-Disk UniqueId. Evidence needed: Microsoft.Compute/disks uniqueId."
     }
 
     $attachedAlready = $false
@@ -1097,10 +1085,6 @@ function Invoke-LimsAppDataDiskMigrationStage {
         Add-AzVmDataDiskAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -DiskName $names.TemporaryDiskName -Lun ([int]$checks.CandidateTemporaryLun)
     }
 
-    $tempUniqueId = Get-DiskUniqueIdFromResource -Disk $tempDisk
-    if ([string]::IsNullOrWhiteSpace($tempUniqueId)) {
-        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' has no ARM uniqueId. Guest identity cannot be proven. Evidence needed: Microsoft.Compute/disks uniqueId."
-    }
     Set-AzResourceTagsMergeAdapter -ResourceId $checks.DestinationVmId -Tags @{
         $tagKeys.RunId            = $MigrationRunId
         $tagKeys.SnapshotId       = [string]$snapshot.id
@@ -1111,6 +1095,7 @@ function Invoke-LimsAppDataDiskMigrationStage {
         $tagKeys.CopyStatus       = $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
         $tagKeys.TemporaryLun     = [string]$checks.CandidateTemporaryLun
         $tagKeys.GuestCommand     = $guestCommandName
+        $tagKeys.Phase            = 'GuestPending'
     }
 
     Write-Output '===== LIMS APP data-disk migration: STAGE (Azure) ====='
@@ -1145,7 +1130,7 @@ function Invoke-LimsAppDataDiskMigrationStage {
         TemporaryDiskId   = [string]$tempDisk.id
         TemporaryDiskName = $names.TemporaryDiskName
         TemporaryLun      = [int]$checks.CandidateTemporaryLun
-        Resumed           = $resume
+        Resumed           = $false
     }
 }
 
@@ -1211,7 +1196,7 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         }
         $effectiveOwner = $owner
         if ([string]::IsNullOrWhiteSpace($effectiveOwner)) { $effectiveOwner = $recordedRunId }
-        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $effectiveOwner -ThisRunId $MigrationRunId
+        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $effectiveOwner -ThisRunId $MigrationRunId -Purpose 'Cleanup'
         if (-not $lockDecision.Allowed) {
             Assert-LimsAppMigControlFailure $lockDecision.Reason
         }
@@ -1285,7 +1270,7 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         Remove-AzResourceTagsAdapter -ResourceId $checks.DestinationVmId -TagKeys @(
             $tagKeys.RunId, $tagKeys.SnapshotId, $tagKeys.TempDiskId, $tagKeys.TempDiskUniqueId,
             $tagKeys.DestDiskUniqueId, $tagKeys.CaptureMode, $tagKeys.CopyStatus,
-            $tagKeys.TemporaryLun, $tagKeys.GuestCommand
+            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.Phase
         )
     }
 

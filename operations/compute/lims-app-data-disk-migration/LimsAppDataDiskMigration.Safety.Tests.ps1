@@ -87,20 +87,28 @@ Describe 'Get-AzureCliErrorClassification' {
 }
 
 Describe 'Get-MigrationLockAcquireDecision' {
-    It 'allows a first acquire and a same-ID retry, and refuses a concurrent different ID' {
-        (Get-MigrationLockAcquireDecision -ExistingLockRunId '' -ThisRunId '10').Allowed | Should -Be $true
-        $retry = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '10'
-        $retry.Allowed | Should -Be $true
-        $retry.Resume | Should -Be $true
-        $concurrent = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '11'
+    It 'allows a first stage acquire, refuses overlapping stage even with the same run ID, and lets cleanup of the holding run proceed' {
+        (Get-MigrationLockAcquireDecision -ExistingLockRunId '' -ThisRunId '10' -Purpose 'Stage').Allowed | Should -Be $true
+        $sameIdStage = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '10' -Purpose 'Stage'
+        $sameIdStage.Allowed | Should -Be $false
+        $sameIdStage.Reason | Should -Match 'same run ID'
+        $cleanup = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '10' -Purpose 'Cleanup'
+        $cleanup.Allowed | Should -Be $true
+        $cleanup.Resume | Should -Be $true
+        $concurrent = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '11' -Purpose 'Stage'
         $concurrent.Allowed | Should -Be $false
         $concurrent.Reason | Should -Match 'concurrent'
+        $concurrentCleanup = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '11' -Purpose 'Cleanup'
+        $concurrentCleanup.Allowed | Should -Be $false
     }
 }
 
 Describe 'Get-GuestCommandCleanupDecision' {
-    It 'allows cleanup only when the command was never submitted or is terminal' {
-        (Get-GuestCommandCleanupDecision -LookupClassification 'NotFound' -ExecutionState '').State | Should -Be 'NeverSubmitted'
+    It 'allows cleanup only when the command is Found and terminal; NotFound is indeterminate' {
+        $notFound = Get-GuestCommandCleanupDecision -LookupClassification 'NotFound' -ExecutionState ''
+        $notFound.Allowed | Should -Be $false
+        $notFound.State | Should -Be 'Indeterminate'
+        $notFound.Reason | Should -Match 'does not prove the guest command was never submitted'
         (Get-GuestCommandCleanupDecision -LookupClassification 'Found' -ExecutionState 'Succeeded').Allowed | Should -Be $true
         (Get-GuestCommandCleanupDecision -LookupClassification 'Found' -ExecutionState 'Failed').Allowed | Should -Be $true
         (Get-GuestCommandCleanupDecision -LookupClassification 'Found' -ExecutionState 'Canceled').Allowed | Should -Be $true
@@ -147,9 +155,14 @@ Describe 'Resolve-GuestDiskIdentity and Test-DriveLetterOnResolvedDisk' {
         $script:destId = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/disks/appdata'
         $script:tempId = '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/disks/tmp'
         $script:attested = '60022480D1B07E6ACD98417F86591F4B'
+        # DEV evidence: IMDS resourceDisk.size is 201728 kB; the Windows
+        # temporary disk is 161059207680 bytes. They must not be required
+        # to match in order to identify A: or the snapshot disk.
+        $script:imdsResourceDiskSizeKb = 201728
+        $script:windowsTempDiskBytes = [int64]161059207680
         $script:imds = [pscustomobject]@{
             storageProfile = [pscustomobject]@{
-                resourceDisk = [pscustomobject]@{ size = 102400 }
+                resourceDisk = [pscustomobject]@{ size = $script:imdsResourceDiskSizeKb }
                 dataDisks    = @(
                     [pscustomobject]@{ lun = 0; managedDisk = [pscustomobject]@{ id = $script:destId } }
                     [pscustomobject]@{ lun = 1; managedDisk = [pscustomobject]@{ id = $script:tempId } }
@@ -158,19 +171,28 @@ Describe 'Resolve-GuestDiskIdentity and Test-DriveLetterOnResolvedDisk' {
         }
         $script:guestDisks = @(
             [pscustomobject]@{ Number = 0; UniqueId = 'OSDISK'; IsBoot = $true; IsSystem = $true; SizeBytes = 127GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 1; UniqueId = $script:attested; IsBoot = $false; IsSystem = $false; SizeBytes = 512GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 2; UniqueId = 'TEMPDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = 512GB; ScsiLogicalUnit = 1 }
-            [pscustomobject]@{ Number = 3; UniqueId = 'RESOURCEDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = 102400KB; ScsiLogicalUnit = 1 }
+            [pscustomobject]@{ Number = 1; UniqueId = $script:attested; IsBoot = $false; IsSystem = $false; SizeBytes = 128GB; ScsiLogicalUnit = 0 }
+            [pscustomobject]@{ Number = 2; UniqueId = 'TEMPDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = 128GB; ScsiLogicalUnit = 1 }
+            [pscustomobject]@{ Number = 3; UniqueId = 'RESOURCEDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = $script:windowsTempDiskBytes; ScsiLogicalUnit = 1 }
         )
     }
 
-    It 'resolves destination A: by ARM id + UniqueId after excluding the LUN 1 resource disk' {
+    It 'does not treat the DEV IMDS resource-disk size as a match for the Windows temporary disk' {
+        $imdsBytes = Get-ImdsResourceDiskSizeBytes -ImdsCompute $script:imds
+        $imdsBytes | Should -Be ([int64]$script:imdsResourceDiskSizeKb * 1024)
+        $imdsBytes | Should -Not -Be $script:windowsTempDiskBytes
+        @($script:guestDisks | Where-Object { [int64]$_.SizeBytes -eq $imdsBytes }).Count | Should -Be 0
+    }
+
+    It 'resolves destination A: by attested UniqueId and the snapshot disk by ARM uniqueId despite the DEV size discrepancy and LUN 1 collision' {
         $dest = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId $script:attested -Role 'Destination A:'
         $dest.Resolved | Should -Be $true
         $dest.Disk.Number | Should -Be 1
+        $dest.Disk.UniqueId | Should -Be $script:attested
         $temp = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId 'TEMPDISK' -Role 'Temporary snapshot disk'
         $temp.Resolved | Should -Be $true
         $temp.Disk.Number | Should -Be 2
+        $temp.Disk.ScsiLogicalUnit | Should -Be 1
     }
 
     It 'fails when A: is on a different Windows disk even if the volume label matches' {
@@ -183,22 +205,31 @@ Describe 'Resolve-GuestDiskIdentity and Test-DriveLetterOnResolvedDisk' {
         $result.Reason | Should -Match 'matching volume label or letter is insufficient'
     }
 
-    It 'fails closed on duplicate guest SCSI LUNs after excluding OS and resource disks' {
+    It 'still resolves the snapshot disk when another non-OS disk shares SCSI LUN 1, as long as UniqueId is unique' {
         $dupes = $script:guestDisks + [pscustomobject]@{ Number = 4; UniqueId = 'OTHERTEMP'; IsBoot = $false; IsSystem = $false; SizeBytes = 256GB; ScsiLogicalUnit = 1 }
-        $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $dupes -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId '' -Role 'Temporary snapshot disk'
-        $result.Resolved | Should -Be $false
-        $result.Reason | Should -Match 'duplicate guest SCSI LUN 1'
+        $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $dupes -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId 'TEMPDISK' -Role 'Temporary snapshot disk'
+        $result.Resolved | Should -Be $true
+        $result.Disk.Number | Should -Be 2
     }
 
-    It 'reports the evidence needed when UniqueId is empty' {
+    It 'dumps inventory and stops when no UniqueId was supplied' {
+        $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId '' -Role 'Destination A:'
+        $result.Resolved | Should -Be $false
+        $result.Reason | Should -Match 'no attested or captured UniqueId'
+        $result.Reason | Should -Match 'Inventory:'
+        $result.Reason | Should -Match $script:attested
+    }
+
+    It 'dumps inventory when the expected UniqueId is not present on any non-OS disk' {
         $empty = @(
             [pscustomobject]@{ Number = 0; UniqueId = 'OSDISK'; IsBoot = $true; IsSystem = $true; SizeBytes = 127GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 1; UniqueId = ''; IsBoot = $false; IsSystem = $false; SizeBytes = 512GB; ScsiLogicalUnit = 0 }
-            [pscustomobject]@{ Number = 3; UniqueId = 'RESOURCEDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = 102400KB; ScsiLogicalUnit = 1 }
+            [pscustomobject]@{ Number = 1; UniqueId = ''; IsBoot = $false; IsSystem = $false; SizeBytes = 128GB; ScsiLogicalUnit = 0 }
+            [pscustomobject]@{ Number = 3; UniqueId = 'RESOURCEDISK'; IsBoot = $false; IsSystem = $false; SizeBytes = $script:windowsTempDiskBytes; ScsiLogicalUnit = 1 }
         )
-        $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $empty -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId '' -Role 'Destination A:'
+        $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $empty -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId $script:attested -Role 'Destination A:'
         $result.Resolved | Should -Be $false
-        $result.Reason | Should -Match 'empty UniqueId'
+        $result.Reason | Should -Match 'resolved to 0 guest disk'
+        $result.Reason | Should -Match 'Inventory:'
     }
 }
 
@@ -224,13 +255,21 @@ Describe 'Test-CopyRootIsLocalVolume and Test-ReparsePointPolicy' {
 }
 
 Describe 'Test-LimsAppMigStageCleanupAllowed' {
-    It 'blocks stage and cleanup while Windows reparse validation is pending' {
+    It 'blocks stage and cleanup while junction or directory-symlink validation is pending' {
         $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
         $dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        $dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
         $blocked = Test-LimsAppMigStageCleanupAllowed -Environment $dev
         $blocked.Allowed | Should -Be $false
-        $clone = $dev.PSObject.Copy()
-        $clone.WindowsReparseValidationStatus = 'Passed'
-        (Test-LimsAppMigStageCleanupAllowed -Environment $clone).Allowed | Should -Be $true
+        $junctionOnly = $dev.PSObject.Copy()
+        $junctionOnly.WindowsReparseValidationStatus = 'Passed'
+        (Test-LimsAppMigStageCleanupAllowed -Environment $junctionOnly).Allowed | Should -Be $false
+        $symlinkOnly = $dev.PSObject.Copy()
+        $symlinkOnly.WindowsSymlinkValidationStatus = 'Passed'
+        (Test-LimsAppMigStageCleanupAllowed -Environment $symlinkOnly).Allowed | Should -Be $false
+        $both = $dev.PSObject.Copy()
+        $both.WindowsReparseValidationStatus = 'Passed'
+        $both.WindowsSymlinkValidationStatus = 'Passed'
+        (Test-LimsAppMigStageCleanupAllowed -Environment $both).Allowed | Should -Be $true
     }
 }

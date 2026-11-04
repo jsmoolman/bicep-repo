@@ -160,25 +160,35 @@ function Get-AzureCliErrorClassification {
 
 function Get-MigrationLockAcquireDecision {
     <#
-        Enforceable lock: acquire only when the recorded lock is empty or
-        already this run (same-ID retry). Concurrent different IDs fail.
-        Callers must pair this with If-Match on the tags resource.
+        Per-environment lock held across stage, guest submission/execution,
+        and cleanup. Stage may acquire only when the lock is empty.
+        Overlapping stage attempts are refused even with the same run ID.
+        Cleanup of the holding run is allowed so that run can recover after
+        the guest command is terminal. The run ID remains the ownership key.
     #>
     param(
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExistingLockRunId,
-        [Parameter(Mandatory = $true)] [string] $ThisRunId
+        [Parameter(Mandatory = $true)] [string] $ThisRunId,
+        [Parameter(Mandatory = $false)] [ValidateSet('Stage', 'Cleanup')] [string] $Purpose = 'Stage'
     )
 
     if ([string]::IsNullOrWhiteSpace($ExistingLockRunId)) {
         return [pscustomobject]@{ Allowed = $true; Resume = $false; Reason = $null }
     }
     if ($ExistingLockRunId -eq $ThisRunId) {
+        if ($Purpose -eq 'Stage') {
+            return [pscustomobject]@{
+                Allowed = $false
+                Resume  = $false
+                Reason  = "Environment lock is already held by migration run '$ThisRunId'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt to finish, then run cleanup after the guest command is terminal."
+            }
+        }
         return [pscustomobject]@{ Allowed = $true; Resume = $true; Reason = $null }
     }
     return [pscustomobject]@{
         Allowed = $false
         Resume  = $false
-        Reason  = "Environment lock is held by migration run '$ExistingLockRunId'. Refusing concurrent run '$ThisRunId'. Run cleanup for the holding run first."
+        Reason  = "Environment lock is held by migration run '$ExistingLockRunId'. Refusing concurrent run '$ThisRunId'. Run cleanup for the holding run first, after its guest command is terminal."
     }
 }
 
@@ -189,7 +199,11 @@ function Get-GuestCommandCleanupDecision {
     )
 
     if ($LookupClassification -eq 'NotFound') {
-        return [pscustomobject]@{ Allowed = $true; State = 'NeverSubmitted'; Reason = $null }
+        return [pscustomobject]@{
+            Allowed = $false
+            State   = 'Indeterminate'
+            Reason  = 'Run Command NotFound does not prove the guest command was never submitted. Submission may still be in flight (the window after disk attach and before the command resource exists). Cleanup retains resources until the command is Found and terminal (Succeeded, Failed, or Canceled).'
+        }
     }
     if ($LookupClassification -eq 'Authorization' -or $LookupClassification -eq 'Network' -or $LookupClassification -eq 'Other') {
         return [pscustomobject]@{
@@ -221,7 +235,7 @@ function Get-GuestCommandCleanupDecision {
     return [pscustomobject]@{
         Allowed = $false
         State   = $state
-        Reason  = "Guest command executionState is '$state' (not terminal). Cleanup retains resources until Succeeded, Failed, or Canceled, or until the command is confirmed never submitted."
+        Reason  = "Guest command executionState is '$state' (not terminal). Cleanup retains resources until Succeeded, Failed, or Canceled. NotFound is not treated as never submitted."
     }
 }
 
@@ -264,16 +278,16 @@ function Get-ImdsResourceDiskSizeBytes {
     return [int64]$storageProfile.resourceDisk.size * 1024
 }
 
-function Select-NonOsNonResourceGuestDisks {
+function Select-NonOsGuestDisks {
     <#
-        Excludes the OS disk (IsBoot/IsSystem) and the Azure temporary
-        resource disk, identified only by IMDS resourceDisk.size vs
-        Get-Disk Size -- never by LUN, because LUN 1 collides with Azure
-        temporary storage on this SKU.
+        Excludes only the OS disk (IsBoot/IsSystem). IMDS resourceDisk.size
+        is not used: on DEV that value does not match the Windows temporary
+        disk size, and LUN 1 collides with Azure temporary storage.
+        Independently attested UniqueId (or a captured ARM uniqueId) is
+        required to pick a managed disk from this pool.
     #>
     param(
-        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDisks,
-        [Parameter(Mandatory = $true)] [AllowNull()] $ImdsResourceDiskSizeBytes
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDisks
     )
 
     $osDisks = @($GuestDisks | Where-Object { $_.IsBoot -or $_.IsSystem })
@@ -290,29 +304,16 @@ function Select-NonOsNonResourceGuestDisks {
         return [pscustomobject]@{ Candidates = @(); Reason = "Windows disk(s) $numbers reported missing SCSI Logical Unit; cannot map Azure LUNs. Evidence needed: Win32_DiskDrive.SCSILogicalUnit for every non-OS disk." }
     }
 
-    if ($null -eq $ImdsResourceDiskSizeBytes) {
-        return [pscustomobject]@{ Candidates = @(); Reason = 'IMDS did not report compute.storageProfile.resourceDisk.size; cannot exclude the Azure temporary disk (LUN 1 collision). Evidence needed: IMDS resourceDisk.size.' }
-    }
-    if ([int64]$ImdsResourceDiskSizeBytes -lt 0) {
-        return [pscustomobject]@{ Candidates = @(); Reason = "IMDS resourceDisk.size is negative ($ImdsResourceDiskSizeBytes)." }
-    }
+    return [pscustomobject]@{ Candidates = $nonOs; Reason = $null }
+}
 
-    if ([int64]$ImdsResourceDiskSizeBytes -eq 0) {
-        return [pscustomobject]@{ Candidates = $nonOs; Reason = $null }
-    }
+function Format-GuestDiskInventoryEvidence {
+    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDisks)
 
-    $tempMatches = @($nonOs | Where-Object { [int64]$_.SizeBytes -eq [int64]$ImdsResourceDiskSizeBytes })
-    if ($tempMatches.Count -eq 0) {
-        return [pscustomobject]@{ Candidates = @(); Reason = "IMDS resourceDisk.size is $ImdsResourceDiskSizeBytes bytes but no non-OS Windows disk has that size; refusing to guess which disk is Azure temporary storage." }
-    }
-    if ($tempMatches.Count -gt 1) {
-        $numbers = ($tempMatches | ForEach-Object { $_.Number }) -join ', '
-        return [pscustomobject]@{ Candidates = @(); Reason = "IMDS resourceDisk.size $ImdsResourceDiskSizeBytes bytes matches more than one non-OS disk ($numbers); LUN 1 collision cannot be resolved by size." }
-    }
-
-    $tempNumber = [int]$tempMatches[0].Number
-    $candidates = @($nonOs | Where-Object { [int]$_.Number -ne $tempNumber })
-    return [pscustomobject]@{ Candidates = $candidates; Reason = $null }
+    if (@($GuestDisks).Count -eq 0) { return '(no Windows disks reported)' }
+    return ((@($GuestDisks) | ForEach-Object {
+                "Number=$($_.Number);UniqueId='$($_.UniqueId)';Size=$($_.SizeBytes);ScsiLun=$($_.ScsiLogicalUnit);IsBoot=$($_.IsBoot);IsSystem=$($_.IsSystem)"
+            }) -join ' | ')
 }
 
 function Get-ImdsDataDiskByResourceId {
@@ -345,9 +346,12 @@ function Get-ImdsDataDiskByResourceId {
 function Resolve-GuestDiskIdentity {
     <#
         Correlates an exact Azure managed-disk resource ID to one Windows
-        disk and (via caller) its partition. LUN, label, letter, or disk
-        number alone is insufficient. Duplicate guest LUNs after excluding
-        OS and resource disks fail closed.
+        disk by independently attested UniqueId (destination A:) or the
+        captured ARM uniqueId (snapshot-derived temporary disk), then the
+        caller proves the partition. IMDS resourceDisk.size is not used:
+        on DEV that value does not match the Windows temporary disk, and
+        SCSI LUN 1 collides with Azure temporary storage. Duplicate SCSI
+        LUNs are allowed when UniqueId uniquely identifies the disk.
     #>
     param(
         [Parameter(Mandatory = $true)] $ImdsCompute,
@@ -367,57 +371,28 @@ function Resolve-GuestDiskIdentity {
         return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role IMDS LUN $imdsLun for '$ExpectedManagedDiskId' does not match mapped LUN $ExpectedLun." }
     }
 
-    $resourceSize = Get-ImdsResourceDiskSizeBytes -ImdsCompute $ImdsCompute
-    $pool = Select-NonOsNonResourceGuestDisks -GuestDisks $GuestDisks -ImdsResourceDiskSizeBytes $resourceSize
+    $pool = Select-NonOsGuestDisks -GuestDisks $GuestDisks
     if ($pool.Reason) {
-        return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role identity failed: $($pool.Reason)" }
+        return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role identity failed: $($pool.Reason) Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)" }
     }
 
-    $lunMatches = @($pool.Candidates | Where-Object { [int]$_.ScsiLogicalUnit -eq $ExpectedLun })
-    if ($lunMatches.Count -gt 1) {
-        $evidence = ($lunMatches | ForEach-Object { "Number=$($_.Number);UniqueId='$($_.UniqueId)';Size=$($_.SizeBytes);ScsiLun=$($_.ScsiLogicalUnit)" }) -join ' | '
+    if ([string]::IsNullOrWhiteSpace($ExpectedUniqueId)) {
         return [pscustomobject]@{
             Resolved = $false
             Disk     = $null
-            Reason   = "${Role}: duplicate guest SCSI LUN $ExpectedLun after excluding OS and Azure temporary storage (known LUN 1 collision). Evidence: $evidence. Needed: a unique UniqueId match for '$ExpectedManagedDiskId'."
+            Reason   = "${Role}: no attested or captured UniqueId was supplied. IMDS resourceDisk.size is not used to pick a Windows disk (DEV size discrepancy / LUN 1 collision). Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks). Needed: ARM uniqueId of '$ExpectedManagedDiskId' matching Get-Disk UniqueId."
         }
     }
 
-    if (-not [string]::IsNullOrWhiteSpace($ExpectedUniqueId)) {
-        $uniqueMatches = @($pool.Candidates | Where-Object { Test-NormalizedUniqueIdEquals -Left ([string]$_.UniqueId) -Right $ExpectedUniqueId })
-        if ($uniqueMatches.Count -ne 1) {
-            $evidence = ($pool.Candidates | ForEach-Object { "Number=$($_.Number);UniqueId='$($_.UniqueId)';ScsiLun=$($_.ScsiLogicalUnit)" }) -join ' | '
-            return [pscustomobject]@{
-                Resolved = $false
-                Disk     = $null
-                Reason   = "${Role}: expected UniqueId '$ExpectedUniqueId' resolved to $($uniqueMatches.Count) guest disk(s). Evidence: $evidence."
-            }
-        }
-        $disk = $uniqueMatches[0]
-        if ([int]$disk.ScsiLogicalUnit -ne $ExpectedLun) {
-            return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role UniqueId '$ExpectedUniqueId' is on SCSI LUN $($disk.ScsiLogicalUnit), not mapped LUN $ExpectedLun." }
-        }
-        return [pscustomobject]@{ Resolved = $true; Disk = $disk; Reason = $null }
-    }
-
-    if ($lunMatches.Count -eq 0) {
-        $evidence = ($pool.Candidates | ForEach-Object { "Number=$($_.Number);UniqueId='$($_.UniqueId)';ScsiLun=$($_.ScsiLogicalUnit)" }) -join ' | '
+    $uniqueMatches = @($pool.Candidates | Where-Object { Test-NormalizedUniqueIdEquals -Left ([string]$_.UniqueId) -Right $ExpectedUniqueId })
+    if ($uniqueMatches.Count -ne 1) {
         return [pscustomobject]@{
             Resolved = $false
             Disk     = $null
-            Reason   = "${Role}: no remaining guest disk has SCSI LUN $ExpectedLun for '$ExpectedManagedDiskId'. Evidence: $evidence. Needed: Win32_DiskDrive.SCSILogicalUnit matching the IMDS LUN after excluding OS and resource disks, plus a non-empty UniqueId."
+            Reason   = "${Role}: expected UniqueId '$ExpectedUniqueId' resolved to $($uniqueMatches.Count) guest disk(s) among non-OS disks. Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)."
         }
     }
-
-    $disk = $lunMatches[0]
-    if ([string]::IsNullOrWhiteSpace([string]$disk.UniqueId)) {
-        return [pscustomobject]@{
-            Resolved = $false
-            Disk     = $null
-            Reason   = "${Role}: Windows disk $($disk.Number) at SCSI LUN $ExpectedLun has an empty UniqueId. Cannot correlate '$ExpectedManagedDiskId' to a stable guest disk. Evidence needed: non-empty Get-Disk UniqueId."
-        }
-    }
-    return [pscustomobject]@{ Resolved = $true; Disk = $disk; Reason = $null }
+    return [pscustomobject]@{ Resolved = $true; Disk = $uniqueMatches[0]; Reason = $null }
 }
 
 function Test-DriveLetterOnResolvedDisk {
@@ -533,12 +508,13 @@ function ConvertTo-RelativeWindowsPath {
 function Test-LimsAppMigStageCleanupAllowed {
     param([Parameter(Mandatory = $true)] $Environment)
 
-    $status = [string]$Environment.WindowsReparseValidationStatus
-    if ($status -eq 'Passed') {
+    $reparse = [string]$Environment.WindowsReparseValidationStatus
+    $symlink = [string]$Environment.WindowsSymlinkValidationStatus
+    if ($reparse -eq 'Passed' -and $symlink -eq 'Passed') {
         return [pscustomobject]@{ Allowed = $true; Reason = $null }
     }
     return [pscustomobject]@{
         Allowed = $false
-        Reason  = "Stage and cleanup are blocked pending Windows reparse-point validation (mapping WindowsReparseValidationStatus='$status'). Plan remains available. See docs/operations.md."
+        Reason  = "Stage and cleanup are blocked pending Windows reparse-point validation (junction status='$reparse', directory-symlink status='$symlink'). Plan remains available. See docs/operations.md."
     }
 }

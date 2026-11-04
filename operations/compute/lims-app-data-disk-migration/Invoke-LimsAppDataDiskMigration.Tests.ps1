@@ -108,6 +108,13 @@ BeforeAll {
     function New-UnblockedMatchingEnvironment {
         $clone = New-MatchingEnvironment
         $clone.WindowsReparseValidationStatus = 'Passed'
+        $clone.WindowsSymlinkValidationStatus = 'Passed'
+        return $clone
+    }
+
+    function New-EmptyPinEnvironment {
+        $clone = $script:Dev.PSObject.Copy()
+        $clone.DiskEncryptionSetResourceId = ''
         return $clone
     }
 }
@@ -132,7 +139,9 @@ Describe 'Get-LimsAppDataDiskMigrationEnvironmentMapping' {
         $script:Dev.PreferredTemporaryLun | Should -Be 1
         $script:Dev.ExcludeRelativePaths | Should -Contain 'lv89\sdmshome'
         $script:Dev.DestinationAttestedGuestUniqueId | Should -Be '60022480D1B07E6ACD98417F86591F4B'
+        $script:Dev.DiskEncryptionSetResourceId | Should -Be (New-FakeDesId)
         $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
         (Get-MigrationRunResourceNames -Environment $script:Dev -MigrationRunId '10').TemporaryDiskName | Should -Be 'lims-app-mig-dev-tmp'
     }
 
@@ -164,7 +173,8 @@ Describe 'Select-CandidateTemporaryLun (pure)' {
 Describe 'Test-EncryptionMatchesMapping (pure)' {
     It 'fails when the mapping pin is empty even if live source and destination DES IDs match' {
         $des = New-FakeDesId
-        $result = Test-EncryptionMatchesMapping -SourceDiskEncryptionSetId $des -DestinationDiskEncryptionSetId $des -Environment $script:Dev
+        $emptyPin = New-EmptyPinEnvironment
+        $result = Test-EncryptionMatchesMapping -SourceDiskEncryptionSetId $des -DestinationDiskEncryptionSetId $des -Environment $emptyPin
         $result.Matches | Should -Be $false
         $result.Reason | Should -Match 'DiskEncryptionSetResourceId is empty'
         $result.Reason | Should -BeLike "*$des*"
@@ -360,17 +370,18 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
     }
 
     It 'DEV plan with zones omitted and an empty DES pin stops at the pin guard with no success summary' {
-        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
-        [string]::IsNullOrWhiteSpace($script:Dev.DiskEncryptionSetResourceId) | Should -Be $true
+        $emptyPin = New-EmptyPinEnvironment
+        $emptyPin.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        [string]::IsNullOrWhiteSpace($emptyPin.DiskEncryptionSetResourceId) | Should -Be $true
         $script:operatorLog = New-Object System.Collections.Generic.List[string]
         Mock Write-OperatorLog { param($Message) $script:operatorLog.Add([string]$Message) }
 
-        $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $script:Dev -RequireEncryptionPin $false
+        $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $emptyPin -RequireEncryptionPin $false
         $checks.Zone | Should -Be ''
 
         $failure = $null
         try {
-            Invoke-LimsAppDataDiskMigrationPlan -Environment $script:Dev
+            Invoke-LimsAppDataDiskMigrationPlan -Environment $emptyPin
         }
         catch {
             $failure = $_.Exception.Message
@@ -515,15 +526,14 @@ Describe 'Invoke-LimsAppDataDiskMigrationStage (orchestration, mocked adapters)'
         Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
     }
 
-    It 'allows a same-ID retry against the environment lock after proving lineage' {
-        $snap = [pscustomobject]@{ id = $script:snapId; creationData = [pscustomobject]@{ sourceResourceId = $script:sourceId } }
+    It 'refuses an overlapping stage attempt even when it uses the same run ID' {
         $held = New-FakeDisk -Name $script:names.TemporaryDiskName -DesId $script:des -SourceId $script:snapId -UniqueId 'TEMPDISKUID' -Tags ([pscustomobject]@{ limsAppMigLockRunId = '10' })
         Mock Get-AzDiskLookupAdapter { return (New-Lookup -Classification 'Found' -Resource $held) }
-        Mock Get-AzSnapshotLookupAdapter { return (New-Lookup -Classification 'Found' -Resource $snap) }
-        $null = Invoke-LimsAppDataDiskMigrationStage -Environment (New-UnblockedMatchingEnvironment) -MigrationRunId '10' -CaptureMode 'online'
+        { Invoke-LimsAppDataDiskMigrationStage -Environment (New-UnblockedMatchingEnvironment) -MigrationRunId '10' -CaptureMode 'online' } |
+            Should -Throw -ExpectedMessage '*same run ID*'
         Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
         Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
-        Should -Invoke Add-AzVmDataDiskAdapter -Times 1
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
     }
 
     It 'creates the snapshot and temp disk, attaches at LUN 1, and records resource IDs' {
@@ -572,7 +582,9 @@ Describe 'Invoke-LimsAppDataDiskMigrationCleanup after an interrupted run (mocke
         Mock Get-AzDiskAdapter { param($DiskName) return New-FakeDisk -Name $DiskName -DesId $script:des }
         Mock Get-AzDiskLookupAdapter { return (New-Lookup -Classification 'Found' -Resource $script:tempDisk) }
         Mock Get-AzSnapshotLookupAdapter { return (New-Lookup -Classification 'Found' -Resource $script:snapshot) }
-        Mock Get-AzRunCommandLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Get-AzRunCommandLookupAdapter {
+            return (New-Lookup -Classification 'Found' -Resource ([pscustomobject]@{ instanceView = [pscustomobject]@{ executionState = 'Failed' } }))
+        }
         Mock Remove-AzVmDataDiskAdapter { }
         Mock Remove-AzDiskAdapter { }
         Mock Remove-AzSnapshotAdapter { }
@@ -598,12 +610,22 @@ Describe 'Invoke-LimsAppDataDiskMigrationCleanup after an interrupted run (mocke
         Should -Invoke Remove-AzSnapshotAdapter -Times 1 -ParameterFilter { $SnapshotName -eq $script:names.SnapshotName }
     }
 
-    It 'still releases the lock when the temporary disk is confirmed NotFound' {
+    It 'still releases the lock when the temporary disk is confirmed NotFound after the guest command is terminal' {
         Mock Get-AzDiskLookupAdapter { return (New-Lookup -Classification 'NotFound') }
         Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-UnblockedMatchingEnvironment) -MigrationRunId $script:runId -DeleteSnapshot $false
         Should -Invoke Remove-AzVmDataDiskAdapter -Times 0
         Should -Invoke Remove-AzDiskAdapter -Times 0
         Should -Invoke Remove-AzResourceTagsAdapter -Times 1
+    }
+
+    It 'retains the attached temporary disk when cleanup arrives between attach and guest submission (Run Command NotFound)' {
+        Mock Get-AzRunCommandLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-UnblockedMatchingEnvironment) -MigrationRunId $script:runId -DeleteSnapshot $false } |
+            Should -Throw -ExpectedMessage '*does not prove the guest command was never submitted*'
+        Should -Invoke Remove-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+        Should -Invoke Remove-AzSnapshotAdapter -Times 0
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
     }
 
     It 'retains resources while the guest command is still Running' {

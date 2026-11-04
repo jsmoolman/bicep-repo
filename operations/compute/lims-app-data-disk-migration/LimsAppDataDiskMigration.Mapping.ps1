@@ -10,11 +10,11 @@
     the same schema so they can be onboarded by filling the reviewed
     values and flipping Enabled -- not by copying the pipeline or scripts.
 
-    DiskEncryptionSetResourceId is the full ARM ID pin. Leave it empty
-    until the live ID is recorded from a plan run; plan and stage then
-    fail closed until it is filled and matches both live disks. The DES
-    *name* is still required so a live ID whose last segment differs from
-    the reviewed name fails even before the full ID is pinned.
+    DiskEncryptionSetResourceId is the full ARM ID pin. DEV is pinned to
+    the customer Disk Encryption Set reported by plan #20261104.4. Plan
+    and stage fail closed unless that pin matches both live disks. The
+    DES *name* is still required so a live ID whose last segment differs
+    from the reviewed name fails even before the full ID is compared.
 #>
 
 Set-StrictMode -Version Latest
@@ -49,6 +49,7 @@ function New-DisabledLimsAppDataDiskMigrationEnvironment {
         DestinationAttestedGuestUniqueId = ''
         GuestCommandNamePrefix          = ''
         WindowsReparseValidationStatus  = 'BlockedPendingValidation'
+        WindowsSymlinkValidationStatus  = 'BlockedPendingValidation'
     }
 }
 
@@ -77,11 +78,9 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             PreferredTemporaryLun           = 1
             PreferredTemporaryDriveLetter   = 'S'
             DiskEncryptionSetName           = 'des-lims-dev-westeu'
-            # Full ARM ID is not stored in this repository (the compute-
-            # foundation parameter file still uses REPLACE_WITH_REAL_VALUE).
-            # Plan reports the live IDs and fails closed until this pin
-            # equals both the source disk and the destination data disk.
-            DiskEncryptionSetResourceId     = ''
+            # Customer DEV pin from plan #20261104.4. Do not replace with a
+            # different Disk Encryption Set.
+            DiskEncryptionSetResourceId     = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
             SnapshotNamePrefix              = 'lims-app-mig-dev'
             TemporaryDiskNamePrefix         = 'lims-app-mig-dev'
             ExcludeRelativePaths            = @('lv89\sdmshome')
@@ -89,9 +88,11 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             RobocopyLogDirectory            = 'C:\LimsAppMigration\logs'
             DestinationAttestedGuestUniqueId = '60022480D1B07E6ACD98417F86591F4B'
             GuestCommandNamePrefix          = 'migrate-lims-app-data'
-            # Stage/cleanup stay blocked until a real Windows Robocopy
-            # reparse-point test has been reviewed. Plan remains enabled.
+            # Stage/cleanup stay blocked until both the junction and the
+            # directory-symbolic-link Robocopy tests have been reviewed.
+            # Plan remains enabled.
             WindowsReparseValidationStatus  = 'BlockedPendingValidation'
+            WindowsSymlinkValidationStatus  = 'BlockedPendingValidation'
         }
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'tst')
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'acc')
@@ -122,6 +123,7 @@ function Get-LimsAppDataDiskMigrationLockTagKeys {
         CopyStatus      = 'limsAppMigCopyStatus'
         TemporaryLun    = 'limsAppMigTemporaryLun'
         GuestCommand    = 'limsAppMigGuestCommand'
+        Phase           = 'limsAppMigPhase'
     }
 }
 

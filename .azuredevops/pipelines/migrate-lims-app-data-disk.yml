@@ -33,8 +33,11 @@
 #   mechanism the SQL provision pipeline uses. The guest script is
 #   concatenated with the mapping and safety files first so the guest
 #   independently re-verifies destination identity against that same
-#   mapping. Stage and cleanup stay blocked until
-#   WindowsReparseValidationStatus is Passed in the mapping.
+#   mapping. Stage and cleanup stay blocked until both
+#   WindowsReparseValidationStatus and WindowsSymlinkValidationStatus
+#   are Passed in the mapping. The per-environment lock is held across
+#   stage, guest command submission/execution, and cleanup; overlapping
+#   attempts are refused even with the same migration run ID.
 #
 #   migrationRunId is passed only through task environment values and is
 #   validated as a numeric Azure DevOps Build.BuildId before it is

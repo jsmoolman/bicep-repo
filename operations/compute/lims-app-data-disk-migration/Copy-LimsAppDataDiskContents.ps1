@@ -5,9 +5,11 @@
 
 .DESCRIPTION
     Delivered via Managed Run Command on APP v2 only. Identifies the
-    temporary snapshot disk by the verified Azure LUN/name attachment,
-    presents its existing volume under an unused drive letter, and fails
-    closed if Windows would require initialization or formatting.
+    destination A: disk by the attested UniqueId plus ARM resource ID and
+    partition, and the snapshot-derived disk by ARM uniqueId matching
+    Get-Disk UniqueId among non-OS disks. IMDS resourceDisk.size is not
+    used. Dumps a read-only guest disk inventory and stops before Set-Disk
+    or copy when that binding cannot be proven.
 
     Independently re-verifies destination identity (computer name + IMDS)
     against the reviewed environment mapping, then re-verifies the source
@@ -46,13 +48,18 @@ param(
     [string] $ExpectedDestinationDiskResourceId = '',
 
     [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
     [string] $ExpectedTemporaryDiskUniqueId = '',
 
     [Parameter(Mandatory = $false)]
+    [AllowEmptyString()]
     [string] $ExpectedDestinationDiskUniqueId = '',
 
     [Parameter(Mandatory = $false)]
-    [string] $CaptureMode = 'unspecified'
+    [string] $CaptureMode = 'unspecified',
+
+    [Parameter(Mandatory = $false)]
+    [switch] $CollectInventoryOnly
 )
 
 $ErrorActionPreference = 'Stop'
@@ -478,9 +485,9 @@ function Assert-ResolvedDiskIdentities {
         [Parameter(Mandatory = $true)] $ImdsCompute,
         [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskResourceId,
         [Parameter(Mandatory = $true)] [int] $ExpectedTemporaryLun,
-        [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskUniqueId,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $ExpectedTemporaryDiskUniqueId,
         [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskResourceId,
-        [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskUniqueId
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $ExpectedDestinationDiskUniqueId
     )
 
     if ([string]::IsNullOrWhiteSpace($ExpectedTemporaryDiskResourceId) -or [string]::IsNullOrWhiteSpace($ExpectedDestinationDiskResourceId)) {
@@ -678,9 +685,10 @@ function Invoke-LimsAppDataDiskContentsCopy {
         [Parameter(Mandatory = $true)] [string] $ExpectedTemporaryDiskName,
         [Parameter(Mandatory = $false)] [string] $ExpectedTemporaryDiskResourceId = '',
         [Parameter(Mandatory = $false)] [string] $ExpectedDestinationDiskResourceId = '',
-        [Parameter(Mandatory = $false)] [string] $ExpectedTemporaryDiskUniqueId = '',
-        [Parameter(Mandatory = $false)] [string] $ExpectedDestinationDiskUniqueId = '',
-        [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified'
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $ExpectedTemporaryDiskUniqueId = '',
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $ExpectedDestinationDiskUniqueId = '',
+        [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
+        [Parameter(Mandatory = $false)] [switch] $CollectInventoryOnly
     )
 
     $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
@@ -699,7 +707,25 @@ function Invoke-LimsAppDataDiskContentsCopy {
         $ExpectedDestinationDiskUniqueId = $environment.DestinationAttestedGuestUniqueId
     }
 
+    $inventory = @(Get-GuestDiskInventoryAdapter)
+    Write-Output '===== LIMS APP data-disk migration: GUEST DISK INVENTORY (read-only) ====='
+    Write-Output (Format-GuestDiskInventoryEvidence -GuestDisks $inventory)
+    Write-Output 'Binding is ARM uniqueId / attested UniqueId matching Get-Disk UniqueId among non-OS disks. IMDS resourceDisk.size is not used (DEV size discrepancy / LUN 1 collision).'
+    Write-Output '=========================================================================='
+
     $identities = Assert-ResolvedDiskIdentities -Environment $environment -ImdsCompute $imdsCompute -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId
+
+    if ($CollectInventoryOnly) {
+        Write-Output "Destination A: Windows disk $($identities.DestinationDisk.Number) UniqueId='$($identities.DestinationDisk.UniqueId)' is bound to '$ExpectedDestinationDiskResourceId'."
+        Write-Output "Temporary snapshot Windows disk $($identities.TemporaryDisk.Number) UniqueId='$($identities.TemporaryDisk.UniqueId)' is bound to '$ExpectedTemporaryDiskResourceId'."
+        Write-Output 'CollectInventoryOnly: stopping before Set-Disk, Set-Partition, or Robocopy.'
+        return [pscustomobject]@{
+            Status            = 'InventoryOnly'
+            DestinationDisk   = $identities.DestinationDisk
+            TemporaryDisk     = $identities.TemporaryDisk
+            DestinationVolume = $identities.DestinationVolume
+        }
+    }
 
     $presented = Set-TemporarySnapshotVolumePresented -Disk $identities.TemporaryDisk -Environment $environment
 
@@ -782,7 +808,7 @@ function Invoke-LimsAppDataDiskContentsCopy {
 
 if ($env:LIMS_APP_MIG_COPY_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppDataDiskContentsCopy -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskName $ExpectedTemporaryDiskName -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId -CaptureMode $CaptureMode | Out-Null
+        Invoke-LimsAppDataDiskContentsCopy -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -ExpectedTemporaryLun $ExpectedTemporaryLun -ExpectedTemporaryDiskName $ExpectedTemporaryDiskName -ExpectedTemporaryDiskResourceId $ExpectedTemporaryDiskResourceId -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedTemporaryDiskUniqueId $ExpectedTemporaryDiskUniqueId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId -CaptureMode $CaptureMode -CollectInventoryOnly:$CollectInventoryOnly | Out-Null
         exit 0
     }
     catch {
