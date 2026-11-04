@@ -359,14 +359,14 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         Should -Invoke Add-AzVmDataDiskAdapter -Times 0
     }
 
-    It 'DEV plan with zones omitted and an empty DES pin prints the live DES ID and stops at the pin guard' {
+    It 'DEV plan with zones omitted and an empty DES pin stops at the pin guard with no success summary' {
         $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
         [string]::IsNullOrWhiteSpace($script:Dev.DiskEncryptionSetResourceId) | Should -Be $true
+        $script:operatorLog = New-Object System.Collections.Generic.List[string]
+        Mock Write-OperatorLog { param($Message) $script:operatorLog.Add([string]$Message) }
 
         $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $script:Dev -RequireEncryptionPin $false
         $checks.Zone | Should -Be ''
-        $summary = @(Write-LimsAppDataDiskMigrationPlanSummary -Environment $script:Dev -Checks $checks) -join [Environment]::NewLine
-        $summary | Should -BeLike "*$($script:des)*"
 
         $failure = $null
         try {
@@ -377,6 +377,7 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         }
         $failure | Should -Match 'DiskEncryptionSetResourceId is empty'
         $failure | Should -BeLike "*$($script:des)*"
+        ($script:operatorLog -join "`n") | Should -Not -Match '===== LIMS APP data-disk migration: PLAN ====='
 
         Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
         Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
@@ -386,6 +387,80 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         Should -Invoke Remove-AzSnapshotAdapter -Times 0
         Should -Invoke Set-AzResourceTagsMergeAdapter -Times 0
         Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+    }
+}
+
+Describe 'Invoke-LimsAppDataDiskMigrationEntry (script entry point, mocked Azure)' {
+    BeforeEach {
+        $script:des = New-FakeDesId
+        $script:sourceDisks = @(New-FakeDataDisk -Lun 1 -Name $script:Dev.SourceDataDiskName)
+        $script:destDisks = @(New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName)
+        $script:operatorLog = New-Object System.Collections.Generic.List[string]
+        $env:LIMS_APP_MIG_ACTION = $null
+        $env:LIMS_APP_MIG_ENVIRONMENT = $null
+        $env:LIMS_APP_MIG_RUN_ID = $null
+        Mock Write-OperatorLog { param($Message) $script:operatorLog.Add([string]$Message) }
+        Mock Get-AzVmAdapter {
+            param($VmName)
+            if ($VmName -eq $script:Dev.SourceVmName) {
+                return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+            }
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks
+        }
+        Mock Get-AzDiskAdapter {
+            param($DiskName)
+            return New-FakeDisk -Name $DiskName -DesId $script:des
+        }
+        Mock New-AzIncrementalSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock New-AzDiskFromSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Add-AzVmDataDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzVmDataDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzDiskAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzSnapshotAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Set-AzResourceTagsMergeAdapter { throw 'Azure write adapter should not run during plan.' }
+        Mock Remove-AzResourceTagsAdapter { throw 'Azure write adapter should not run during plan.' }
+    }
+
+    It 'emits the success summary to the operator log after every plan check passes, even when the entry discards the success stream' {
+        Mock Get-LimsAppDataDiskMigrationEnvironment { return (New-MatchingEnvironment) }
+        $returned = Invoke-LimsAppDataDiskMigrationEntry -Action 'plan' -EnvironmentName 'dev'
+        $returned | Should -BeNullOrEmpty
+
+        $log = $script:operatorLog -join [Environment]::NewLine
+        $log | Should -Match '===== LIMS APP data-disk migration: PLAN ====='
+        $log | Should -BeLike "*$($script:Dev.SubscriptionId)*"
+        $log | Should -BeLike "*$($script:Dev.Location)*"
+        $log | Should -BeLike "*$(New-FakeVmId -Name $script:Dev.SourceVmName)*"
+        $log | Should -BeLike "*$(New-FakeManagedDiskId -Name $script:Dev.SourceDataDiskName)*"
+        $log | Should -Match 'LUN 1'
+        $log | Should -BeLike "*$(New-FakeVmId -Name $script:Dev.DestinationVmName)*"
+        $log | Should -BeLike "*$(New-FakeManagedDiskId -Name $script:Dev.DestinationDataDiskName)*"
+        $log | Should -Match 'LUN 0'
+        $log | Should -Match 'LIMS-App'
+        $log | Should -Match 'expected guest values'
+        $log | Should -BeLike "*$($script:des)*"
+        $log | Should -Match 'available on APP v2'
+        $log | Should -Match 'Candidate temporary LUN'
+
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Set-AzResourceTagsMergeAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+    }
+
+    It 'produces no success summary when a plan check fails, and does not call Azure write adapters' {
+        $script:destDisks = @(New-FakeDataDisk -Lun 0 -Name 'some-other-app-disk')
+        { Invoke-LimsAppDataDiskMigrationEntry -Action 'plan' -EnvironmentName 'dev' } |
+            Should -Throw -ExpectedMessage '*Destination attachment check failed*'
+
+        ($script:operatorLog -join [Environment]::NewLine) | Should -Not -Match '===== LIMS APP data-disk migration: PLAN ====='
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke New-AzDiskFromSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Set-AzResourceTagsMergeAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
     }
 }
 

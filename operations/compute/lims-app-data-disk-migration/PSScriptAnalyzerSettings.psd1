@@ -8,6 +8,10 @@
     ExcludeRules        = @(
         'PSUseSingularNouns'
         'PSUseShouldProcessForStateChangingFunctions'
+        # Write-Host is the operator log: the script entry point Out-Nulls
+        # structured returns, so success-stream Write-Output never reaches
+        # the Azure DevOps log.
+        'PSAvoidUsingWriteHost'
     )
     Rules               = @{
         PSUseCompatibleSyntax   = @{

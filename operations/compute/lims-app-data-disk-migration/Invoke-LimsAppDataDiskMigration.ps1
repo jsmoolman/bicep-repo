@@ -858,26 +858,46 @@ function Invoke-LimsAppDataDiskMigrationPlanChecks {
     }
 }
 
+function Write-OperatorLog {
+    <#
+        Operator-facing lines for the pipeline log. Must not use the
+        success stream: the script entry point discards structured
+        return values with Out-Null.
+    #>
+    param([Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $Message)
+    Write-Host $Message
+}
+
 function Write-LimsAppDataDiskMigrationPlanSummary {
     param(
         [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] $Checks
     )
 
-    Write-Output '===== LIMS APP data-disk migration: PLAN ====='
-    Write-Output "Environment                 : $($Environment.EnvironmentName) (enabled=$($Environment.Enabled))"
-    Write-Output "Region                      : $($Checks.Location)"
-    Write-Output "Source VM                   : $($Checks.SourceVmId)"
-    Write-Output "Source data disk            : $($Checks.SourceDiskId) (LUN $($Environment.SourceDataDiskLun), name $($Environment.SourceDataDiskName))"
-    Write-Output "Destination VM              : $($Checks.DestinationVmId)"
-    Write-Output "Destination computer        : $($Environment.DestinationComputerName)"
-    Write-Output "Destination data disk       : $($Checks.DestinationDiskId) (LUN $($Environment.DestinationDataDiskLun), letter $($Environment.DestinationDriveLetter):, label $($Environment.DestinationVolumeLabel))"
-    Write-Output "Disk Encryption Set         : $($Checks.DiskEncryptionSetId)"
-    Write-Output "Candidate temporary LUN     : $($Checks.CandidateTemporaryLun) (must be unused on APP v2 except this run's own temp disk)"
-    Write-Output "Preferred temp drive letter : $($Environment.PreferredTemporaryDriveLetter): (guest picks an unused letter if occupied)"
-    Write-Output "Exclude relative paths      : $($Environment.ExcludeRelativePaths -join ', ')"
-    Write-Output 'Original source disk and destination A: are not modified by plan.'
-    Write-Output '=============================================='
+    $occupied = @($Checks.OccupiedLuns)
+    $candidate = [int]$Checks.CandidateTemporaryLun
+    if ($occupied -contains $candidate) {
+        $lunAvailability = "available on APP v2 for this run (LUN $candidate is occupied only by this run's own temporary disk)"
+    }
+    else {
+        $lunAvailability = "available on APP v2 (LUN $candidate is not occupied)"
+    }
+
+    Write-OperatorLog '===== LIMS APP data-disk migration: PLAN ====='
+    Write-OperatorLog "Environment                 : $($Environment.EnvironmentName) (enabled=$($Environment.Enabled))"
+    Write-OperatorLog "Subscription                : $($Environment.SubscriptionId)"
+    Write-OperatorLog "Region                      : $($Checks.Location)"
+    Write-OperatorLog "Legacy APP VM               : $($Checks.SourceVmId)"
+    Write-OperatorLog "Source data disk            : $($Checks.SourceDiskId) (LUN $($Environment.SourceDataDiskLun), name $($Environment.SourceDataDiskName))"
+    Write-OperatorLog "APP v2 VM                   : $($Checks.DestinationVmId)"
+    Write-OperatorLog "Destination data disk       : $($Checks.DestinationDiskId) (LUN $($Environment.DestinationDataDiskLun))"
+    Write-OperatorLog "Expected guest volume       : $($Environment.DestinationDriveLetter): labeled '$($Environment.DestinationVolumeLabel)' (expected guest values; plan verified Azure disk identity and LUN attachment only)"
+    Write-OperatorLog "Verified Disk Encryption Set: $($Checks.DiskEncryptionSetId)"
+    Write-OperatorLog "Candidate temporary LUN     : $candidate ($lunAvailability)"
+    Write-OperatorLog "Preferred temp drive letter : $($Environment.PreferredTemporaryDriveLetter): (expected guest value; not verified by plan)"
+    Write-OperatorLog "Exclude relative paths      : $($Environment.ExcludeRelativePaths -join ', ')"
+    Write-OperatorLog 'Original source disk and destination A: are not modified by plan.'
+    Write-OperatorLog '=============================================='
 }
 
 function Write-PipelineVariable {
@@ -889,7 +909,7 @@ function Write-PipelineVariable {
     if (-not $safe.Accepted) {
         Assert-LimsAppMigControlFailure $safe.Reason
     }
-    Write-Output "##vso[task.setvariable variable=$Name]$Value"
+    Write-OperatorLog "##vso[task.setvariable variable=$Name]$Value"
 }
 
 function Assert-LookupFoundOrGone {
@@ -933,12 +953,8 @@ function Get-RunCommandExecutionState {
 function Invoke-LimsAppDataDiskMigrationPlan {
     param([Parameter(Mandatory = $true)] $Environment)
 
-    $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $Environment -RequireEncryptionPin $false
+    $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $Environment -RequireEncryptionPin $true
     Write-LimsAppDataDiskMigrationPlanSummary -Environment $Environment -Checks $checks
-    $pinCheck = Test-EncryptionMatchesMapping -SourceDiskEncryptionSetId $checks.DiskEncryptionSetId -DestinationDiskEncryptionSetId $checks.DiskEncryptionSetId -Environment $Environment -RequirePin $true
-    if (-not $pinCheck.Matches) {
-        Assert-LimsAppMigControlFailure $pinCheck.Reason
-    }
     Write-PipelineVariable -Name 'limsAppMigSubscriptionId' -Value $Environment.SubscriptionId
     Write-PipelineVariable -Name 'limsAppMigResourceGroupName' -Value $Environment.ResourceGroupName
     Write-PipelineVariable -Name 'limsAppMigDestinationVmName' -Value $Environment.DestinationVmName
@@ -1344,9 +1360,28 @@ function Invoke-LimsAppDataDiskMigration {
     }
 }
 
+function Invoke-LimsAppDataDiskMigrationEntry {
+    <#
+        Script entry point used by the pipeline. Structured return values
+        stay on the success stream for callers/tests; the entry discards
+        them so they do not become CLI output. Operator-facing lines go
+        through Write-OperatorLog / Write-Host.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [string] $Action = 'plan',
+        [Parameter(Mandatory = $false)] [string] $EnvironmentName = 'dev',
+        [Parameter(Mandatory = $false)] [string] $MigrationRunId = '',
+        [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
+        [Parameter(Mandatory = $false)] [bool] $DeleteSnapshot = $false,
+        [Parameter(Mandatory = $false)] [string] $CopyStatus = ''
+    )
+
+    Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus | Out-Null
+}
+
 if ($env:LIMS_APP_MIG_CONTROL_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus | Out-Null
+        Invoke-LimsAppDataDiskMigrationEntry -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus
         exit 0
     }
     catch {
