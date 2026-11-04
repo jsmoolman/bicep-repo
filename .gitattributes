@@ -1,0 +1,6 @@
+# Bash scripts invoked directly by Azure Pipelines (AzureCLI@2
+# scriptLocation: scriptPath) must always have LF line endings -- a CRLF
+# shebang/script body fails on the Ubuntu-hosted agent's bash
+# interpreter. Force LF regardless of the committer's platform or local
+# core.autocrlf setting.
+.azuredevops/pipelines/scripts/*.sh text eol=lf
