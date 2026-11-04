@@ -163,59 +163,120 @@ function Get-LimsSqlMediaStagingFixedConfig {
 # or network call anywhere below. Fully unit-testable on any platform.
 # =============================================================================
 
+function Get-XmlBytePrefixClassification {
+    <#
+        Pure, read-only classification of a byte array's leading bytes,
+        for a parsing-failure diagnostic only -- it never influences how
+        parsing is actually done (XmlReader does its own correct,
+        byte-level encoding/BOM detection; see ConvertFrom-BlobListingXml
+        below). Produces one short, safe-to-log label; never echoes the
+        bytes/content themselves.
+    #>
+    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] [byte[]] $Bytes)
+
+    if ($Bytes.Length -eq 0) { return 'empty response body' }
+    if ($Bytes.Length -ge 3 -and $Bytes[0] -eq 0xEF -and $Bytes[1] -eq 0xBB -and $Bytes[2] -eq 0xBF) {
+        return 'UTF-8 BOM'
+    }
+    if ($Bytes.Length -ge 4 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE -and $Bytes[2] -eq 0x00 -and $Bytes[3] -eq 0x00) {
+        return 'UTF-32 LE BOM'
+    }
+    if ($Bytes.Length -ge 4 -and $Bytes[0] -eq 0x00 -and $Bytes[1] -eq 0x00 -and $Bytes[2] -eq 0xFE -and $Bytes[3] -eq 0xFF) {
+        return 'UTF-32 BE BOM'
+    }
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFF -and $Bytes[1] -eq 0xFE) {
+        return 'UTF-16 LE BOM'
+    }
+    if ($Bytes.Length -ge 2 -and $Bytes[0] -eq 0xFE -and $Bytes[1] -eq 0xFF) {
+        return 'UTF-16 BE BOM'
+    }
+
+    if ($Bytes[0] -eq [byte][char]'<') {
+        $prefixLength = [Math]::Min(5, $Bytes.Length)
+        $prefixAscii = [System.Text.Encoding]::ASCII.GetString($Bytes, 0, $prefixLength)
+        if ($prefixAscii -eq '<?xml') { return "no BOM, '<?xml' prefix" }
+        return "no BOM, '<' prefix"
+    }
+    return 'no BOM, non-XML-looking prefix'
+}
+
 function ConvertFrom-BlobListingXml {
     <#
         Parses ONE page of an Azure Blob "List Blobs" REST response
         (EnumerationResults XML) into a plain array of {Name, Length} blob
         entries plus the page's own NextMarker ('' when there is no further
-        page). Never calls a real cmdlet -- XML parsing is pure .NET XML
-        parsing, available and pure on any platform.
+        page). Takes the response as plain data (raw bytes plus HTTP
+        status/content-type metadata, all gathered by the
+        Invoke-BlobContainerListPageAdapter below) -- never calls a real
+        cmdlet itself, so this stays a PURE, Pester-testable function.
 
-        A UTF-8 BOM (U+FEFF) sometimes survives as a literal leading
-        character once the response body has already been decoded to a
-        .NET string -- at that point it is ordinary string content, not an
-        encoding marker a byte-stream-based parser would silently consume,
-        so it is stripped here before parsing, the same way the diagnostic
-        used while investigating the live failure stripped it.
+        Parses the RAW BYTES directly through a stream-based XmlReader
+        rather than ever decoding to a .NET string first. This is not
+        just a style choice: Windows PowerShell 5.1's own
+        Invoke-WebRequest -UseBasicParsing .Content string decoding has
+        been observed, when the Content-Type header carries no explicit
+        charset (e.g. 'application/xml'), to mis-decode a UTF-8 BOM
+        (bytes EF BB BF) into three separate, unrelated characters
+        (U+00EF, U+00BB, U+00BF) rather than the single U+FEFF character
+        a correct UTF-8 decode would produce -- so a leading-U+FEFF
+        string trim (the prior fix for this exact symptom) never matches
+        and parsing still fails at line 1, position 1. XmlReader created
+        directly over the byte stream performs its own correct BOM/
+        encoding detection at the byte level, which is unaffected by any
+        of PowerShell's own string-decoding behavior.
 
-        Deliberately uses XmlDocument.LoadXml() rather than the PowerShell
-        [xml] cast operator: a failed [xml] cast wraps the real parser
-        exception in a PSInvalidCastException whose own Message embeds the
-        entire input value being cast -- i.e. the full raw response body --
-        which is exactly what must never reach the pipeline log. A failed
-        LoadXml() call is instead wrapped by PowerShell in a
-        MethodInvocationException (calling any .NET method directly, as
-        opposed to a cmdlet, gets this treatment) whose InnerException is
-        the real XmlException -- unwrapped below to report its type and,
-        for well-formedness errors, LineNumber/LinePosition. Neither
-        exception's own Message nor the response body is ever
-        interpolated into this function's own failure message.
+        DtdProcessing is explicitly Prohibit and XmlResolver is $null --
+        this response is untrusted input from the network; DTD
+        processing and external entity/schema resolution are both
+        refused outright, never merely limited.
+
+        A failed Load() is wrapped by PowerShell in a
+        MethodInvocationException (any direct .NET method call, as
+        opposed to a cmdlet, gets this treatment); its InnerException is
+        the real XmlException, unwrapped below to report line/position
+        when available. On failure, only HTTP status, content type,
+        byte count, a leading-byte BOM/prefix classification, and the
+        XML error position are reported -- never the exception's own
+        Message, and never the response body itself.
     #>
-    param([Parameter(Mandatory = $true)] [string] $XmlText)
-
-    $cleanedXmlText = $XmlText.TrimStart([char]0xFEFF)
+    param(
+        [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [byte[]] $ResponseBytes,
+        [Parameter(Mandatory = $true)] [int] $HttpStatusCode,
+        [Parameter(Mandatory = $false)] [string] $ContentType = ''
+    )
 
     $doc = New-Object System.Xml.XmlDocument
+    $memoryStream = $null
+    $xmlReader = $null
     try {
-        $doc.LoadXml($cleanedXmlText)
+        $memoryStream = [System.IO.MemoryStream]::new($ResponseBytes)
+        $readerSettings = [System.Xml.XmlReaderSettings]::new()
+        $readerSettings.DtdProcessing = [System.Xml.DtdProcessing]::Prohibit
+        $readerSettings.XmlResolver = $null
+        $readerSettings.CloseInput = $true
+        $xmlReader = [System.Xml.XmlReader]::Create($memoryStream, $readerSettings)
+        $doc.Load($xmlReader)
     }
     catch {
-        # A direct .NET method call (LoadXml(), as opposed to a cmdlet)
-        # that throws has PowerShell wrap the real exception in a
-        # MethodInvocationException -- unwrap one level so the reported
-        # type/line/position describe the actual XmlException, not just
-        # PowerShell's own invocation wrapper.
         $reportedException = $_.Exception
         if ($reportedException.InnerException) { $reportedException = $reportedException.InnerException }
-        $exceptionTypeName = $reportedException.GetType().FullName
-        $positionSuffix = ''
+        $positionText = '<unavailable>'
         if ($reportedException -is [System.Xml.XmlException]) {
             $xmlException = [System.Xml.XmlException]$reportedException
             if ($xmlException.LineNumber -gt 0 -or $xmlException.LinePosition -gt 0) {
-                $positionSuffix = " at line $($xmlException.LineNumber), position $($xmlException.LinePosition)"
+                $positionText = "line $($xmlException.LineNumber), position $($xmlException.LinePosition)"
             }
         }
-        Assert-LimsSqlMediaStagingFailure "Blob listing page could not be parsed as XML ($exceptionTypeName$positionSuffix)."
+        $byteClassification = Get-XmlBytePrefixClassification -Bytes $ResponseBytes
+        Assert-LimsSqlMediaStagingFailure (
+            "Blob listing page could not be parsed as XML. HTTP status: $HttpStatusCode. " +
+            "Content-Type: '$ContentType'. Byte count: $($ResponseBytes.Length). " +
+            "Leading-byte classification: $byteClassification. XML error position: $positionText."
+        )
+    }
+    finally {
+        if ($xmlReader) { $xmlReader.Dispose() }
+        if ($memoryStream) { $memoryStream.Dispose() }
     }
 
     if (-not $doc.DocumentElement -or $doc.DocumentElement.LocalName -ne 'EnumerationResults') {
@@ -534,9 +595,23 @@ function Get-ManagedIdentityAccessTokenAdapter {
 function Invoke-BlobContainerListPageAdapter {
     <#
         Fetches ONE page of the container's "List Blobs" response as raw
-        XML text (never pre-parsed here -- parsing is the pure
-        ConvertFrom-BlobListingXml function above, so it stays testable
-        without this adapter).
+        response BYTES plus HTTP status/content-type metadata -- never
+        pre-parsed, and deliberately never string-decoded here, either.
+        Parsing (including correct byte-level BOM/encoding detection) is
+        the pure ConvertFrom-BlobListingXml function above, so it stays
+        testable without this adapter.
+
+        Reads the response's own raw byte stream (RawContentStream)
+        rather than its already-string-decoded Content property: Windows
+        PowerShell 5.1's own Content-Type-based encoding detection for
+        .Content has been observed to mis-decode a UTF-8 BOM into
+        unrelated garbage characters when the Content-Type header (e.g.
+        'application/xml') carries no explicit charset -- exactly the
+        live-incident symptom this adapter exists to avoid entirely by
+        never going through that string decode in the first place.
+        RawContentStream is a seekable MemoryStream that may already have
+        been read by other code; its Position is explicitly verified and
+        reset to 0 before this adapter reads from it, regardless.
     #>
     param(
         [Parameter(Mandatory = $true)] [string] $AccessToken,
@@ -557,9 +632,52 @@ function Invoke-BlobContainerListPageAdapter {
         $response = Invoke-WebRequest -Uri $uri -Headers $headers -Method Get -UseBasicParsing -WebSession (New-NoProxyWebSessionAdapter) -TimeoutSec 100
     }
     catch {
+        # Deliberately interpolates only the exception's own Message --
+        # never $headers (which carries the bearer token) or any response
+        # body.
         Assert-LimsSqlMediaStagingFailure "Blob container list request failed: $($_.Exception.Message)"
     }
-    return [string]$response.Content
+
+    $rawStream = $response.RawContentStream
+    if ($rawStream) {
+        if ($rawStream.CanSeek) { $rawStream.Position = 0 }
+        $byteCount = [int64]$rawStream.Length
+        $bytes = [byte[]]::new($byteCount)
+        $totalRead = 0
+        while ($totalRead -lt $byteCount) {
+            $read = $rawStream.Read($bytes, $totalRead, $byteCount - $totalRead)
+            if ($read -le 0) { break }
+            $totalRead += $read
+        }
+    }
+    elseif ($response.Content -is [byte[]]) {
+        # RawContentStream is expected to be present for every real
+        # Invoke-WebRequest response in Windows PowerShell 5.1; this and
+        # the string fallback below exist only so an unexpected future
+        # runtime change can't silently become a null-reference failure
+        # here. Preferring an already-byte[] Content (binary content
+        # types are returned this way) still avoids any string decode.
+        $bytes = $response.Content
+    }
+    else {
+        # Last-resort fallback: Content was already decoded to a string
+        # by PowerShell itself before this adapter ever saw it -- any
+        # BOM-related mis-decoding has already happened by this point.
+        # Re-encoding it does not undo that; this path is intentionally
+        # only reachable when neither byte-level source above exists.
+        $bytes = [System.Text.Encoding]::UTF8.GetBytes([string]$response.Content)
+    }
+
+    $contentType = ''
+    if ($response.Headers -and $response.Headers.ContainsKey('Content-Type')) {
+        $contentType = [string]$response.Headers['Content-Type']
+    }
+
+    return [pscustomobject]@{
+        Bytes       = $bytes
+        StatusCode  = [int]$response.StatusCode
+        ContentType = $contentType
+    }
 }
 
 function Invoke-BlobDownloadToFileAdapter {
@@ -712,9 +830,9 @@ function Get-LimsSqlMediaStagingFullListing {
         if ($pageCount -gt $maxPages) {
             Assert-LimsSqlMediaStagingFailure "Blob listing did not terminate after $maxPages pages; refusing to loop further."
         }
-        $xmlText = Invoke-BlobContainerListPageAdapter -AccessToken $AccessToken -Config $Config -Marker $marker
-        Write-Verbose "Blob listing page $pageCount (marker='$marker') raw XML length: $($xmlText.Length) characters."
-        $page = ConvertFrom-BlobListingXml -XmlText $xmlText
+        $pageResponse = Invoke-BlobContainerListPageAdapter -AccessToken $AccessToken -Config $Config -Marker $marker
+        Write-Verbose "Blob listing page $pageCount (marker='$marker'): HTTP $($pageResponse.StatusCode), Content-Type '$($pageResponse.ContentType)', $($pageResponse.Bytes.Length) byte(s)."
+        $page = ConvertFrom-BlobListingXml -ResponseBytes $pageResponse.Bytes -HttpStatusCode $pageResponse.StatusCode -ContentType $pageResponse.ContentType
         $allBlobs += $page.Blobs
         $marker = $page.NextMarker
     } while (-not [string]::IsNullOrWhiteSpace($marker))

@@ -53,6 +53,52 @@ BeforeAll {
             }) -join ''
         return "<?xml version=`"1.0`" encoding=`"utf-8`"?><EnumerationResults><Blobs>$blobXml</Blobs><NextMarker>$NextMarker</NextMarker></EnumerationResults>"
     }
+
+    function New-BlobListingPageResponse {
+        <#
+            Wraps XML text (typically from New-BlobListingXmlPage) into the
+            plain-data shape Invoke-BlobContainerListPageAdapter itself
+            returns -- raw UTF-8 bytes plus HTTP status/content-type
+            metadata -- for use in Mock Invoke-BlobContainerListPageAdapter
+            blocks throughout this file.
+        #>
+        param(
+            [Parameter(Mandatory = $true)] [string] $XmlText,
+            [int] $StatusCode = 200,
+            [string] $ContentType = 'application/xml'
+        )
+        return [pscustomobject]@{
+            Bytes       = [System.Text.Encoding]::UTF8.GetBytes($XmlText)
+            StatusCode  = $StatusCode
+            ContentType = $ContentType
+        }
+    }
+
+    function New-FakeInvokeWebRequestResponse {
+        <#
+            A plain object duck-typed to match the subset of a real
+            Windows PowerShell 5.1 Invoke-WebRequest response that
+            Invoke-BlobContainerListPageAdapter actually reads
+            (RawContentStream, StatusCode, Headers) -- confirmed against a
+            genuine Invoke-WebRequest response object, not assumed. Used
+            only to Mock Invoke-WebRequest itself, so the real (unmocked)
+            Invoke-BlobContainerListPageAdapter and ConvertFrom-BlobListingXml
+            can be exercised together end-to-end against byte-level
+            fixtures, never going through any string decode.
+        #>
+        param(
+            [Parameter(Mandatory = $true)] [byte[]] $Bytes,
+            [int] $StatusCode = 200,
+            [string] $ContentType = 'application/xml'
+        )
+        $headers = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $headers['Content-Type'] = $ContentType
+        return [pscustomobject]@{
+            RawContentStream = [System.IO.MemoryStream]::new($Bytes)
+            StatusCode       = $StatusCode
+            Headers          = $headers
+        }
+    }
 }
 
 Describe 'ConvertFrom-BlobListingXml (pure)' {
@@ -61,7 +107,7 @@ Describe 'ConvertFrom-BlobListingXml (pure)' {
             @{ Name = 'SETUP.EXE'; Length = 1024 }
             @{ Name = 'x64/setup.exe'; Length = 2048 }
         )
-        $result = ConvertFrom-BlobListingXml -XmlText $xml
+        $result = ConvertFrom-BlobListingXml -ResponseBytes ([System.Text.Encoding]::UTF8.GetBytes($xml)) -HttpStatusCode 200 -ContentType 'application/xml'
         $result.Blobs.Count | Should -Be 2
         $result.Blobs[0].Name | Should -Be 'SETUP.EXE'
         $result.Blobs[0].Length | Should -Be 1024
@@ -71,27 +117,33 @@ Describe 'ConvertFrom-BlobListingXml (pure)' {
 
     It 'parses a page that carries a NextMarker (pagination)' {
         $xml = New-BlobListingXmlPage -Blobs @(@{ Name = 'a.txt'; Length = 1 }) -NextMarker 'marker-page-2'
-        $result = ConvertFrom-BlobListingXml -XmlText $xml
+        $result = ConvertFrom-BlobListingXml -ResponseBytes ([System.Text.Encoding]::UTF8.GetBytes($xml)) -HttpStatusCode 200 -ContentType 'application/xml'
         $result.NextMarker | Should -Be 'marker-page-2'
     }
 
     It 'parses a page with zero blobs without producing a phantom entry' {
         $xml = '<?xml version="1.0" encoding="utf-8"?><EnumerationResults><Blobs></Blobs><NextMarker></NextMarker></EnumerationResults>'
-        $result = ConvertFrom-BlobListingXml -XmlText $xml
+        $result = ConvertFrom-BlobListingXml -ResponseBytes ([System.Text.Encoding]::UTF8.GetBytes($xml)) -HttpStatusCode 200 -ContentType 'application/xml'
         @($result.Blobs).Count | Should -Be 0
     }
 
-    It 'strips a leading UTF-8 BOM (U+FEFF) before parsing a page that still carries an XML declaration, and pagination still works' {
-        # Reproduces the live-incident fixture shape exactly: a literal
-        # BOM character surviving ahead of the <?xml ... ?> declaration
-        # once the response body has already been decoded to a string.
-        $bomChar = [char]0xFEFF
-        $xml = $bomChar + (New-BlobListingXmlPage -Blobs @(
-                @{ Name = 'SETUP.EXE'; Length = 1024 }
-                @{ Name = 'x64/setup.exe'; Length = 2048 }
-            ) -NextMarker 'marker-after-bom-page')
+    It 'parses a page whose raw bytes carry a genuine UTF-8 BOM (EF BB BF), with an XML declaration, and pagination still works' {
+        # Reproduces the live-incident fixture at the BYTE level: the
+        # actual three-byte UTF-8 BOM sequence prefixed onto the UTF-8-
+        # encoded page, exactly as it arrives over HTTP -- not a decoded
+        # U+FEFF string character (round #2's fix stripped exactly that
+        # single character and still failed in production, because
+        # Windows PowerShell 5.1's own Content-Type-based string decoding
+        # mis-decodes this same 3-byte sequence into three unrelated
+        # characters, not U+FEFF, before a string-level trim ever runs).
+        $xmlBytes = [System.Text.Encoding]::UTF8.GetBytes((New-BlobListingXmlPage -Blobs @(
+                    @{ Name = 'SETUP.EXE'; Length = 1024 }
+                    @{ Name = 'x64/setup.exe'; Length = 2048 }
+                ) -NextMarker 'marker-after-bom-page'))
+        $bomBytes = [byte[]](0xEF, 0xBB, 0xBF)
+        $bytesWithBom = $bomBytes + $xmlBytes
 
-        $result = ConvertFrom-BlobListingXml -XmlText $xml
+        $result = ConvertFrom-BlobListingXml -ResponseBytes $bytesWithBom -HttpStatusCode 200 -ContentType 'application/xml'
 
         $result.Blobs.Count | Should -Be 2
         $result.Blobs[0].Name | Should -Be 'SETUP.EXE'
@@ -106,26 +158,53 @@ Describe 'ConvertFrom-BlobListingXml (pure)' {
         # failure, never silently treated as "a normal page with zero
         # blobs and no NextMarker".
         $xml = '<?xml version="1.0" encoding="utf-8"?><Error><Code>ContainerNotFound</Code><Message>The specified container does not exist.</Message></Error>'
-        { ConvertFrom-BlobListingXml -XmlText $xml } | Should -Throw -ExpectedMessage '*EnumerationResults*'
+        { ConvertFrom-BlobListingXml -ResponseBytes ([System.Text.Encoding]::UTF8.GetBytes($xml)) -HttpStatusCode 200 -ContentType 'application/xml' } |
+            Should -Throw -ExpectedMessage '*EnumerationResults*'
     }
 
-    It 'throws on malformed XML with a short diagnostic (exception type and line/position) that never echoes the raw response body' {
+    It 'throws on malformed XML with a short diagnostic (HTTP status, content type, byte count, byte classification, XML position) that never echoes the raw response body' {
         $sensitiveMarker = 'SENSITIVE-RAW-RESPONSE-MARKER-must-never-appear-in-any-error-message'
-        $malformedXml = "not xml at all <<< $sensitiveMarker"
+        $malformedBytes = [System.Text.Encoding]::UTF8.GetBytes("not xml at all <<< $sensitiveMarker")
 
         $caught = $null
         try {
-            ConvertFrom-BlobListingXml -XmlText $malformedXml
+            ConvertFrom-BlobListingXml -ResponseBytes $malformedBytes -HttpStatusCode 200 -ContentType 'text/plain'
         }
         catch {
             $caught = $_
         }
 
         $caught | Should -Not -BeNullOrEmpty
-        $caught.Exception.Message | Should -Match 'XmlException'
-        $caught.Exception.Message | Should -Match 'line \d+, position \d+'
+        $caught.Exception.Message | Should -Match 'HTTP status: 200'
+        $caught.Exception.Message | Should -Match "Content-Type: 'text/plain'"
+        $caught.Exception.Message | Should -Match "Byte count: $($malformedBytes.Length)"
+        $caught.Exception.Message | Should -Match 'Leading-byte classification'
+        $caught.Exception.Message | Should -Match 'XML error position: line \d+, position \d+'
         $caught.Exception.Message | Should -Not -Match ([regex]::Escape($sensitiveMarker))
-        $caught.Exception.Message | Should -Not -Match ([regex]::Escape($malformedXml))
+    }
+}
+
+Describe 'Get-XmlBytePrefixClassification (pure)' {
+    It 'classifies a UTF-8 BOM' {
+        Get-XmlBytePrefixClassification -Bytes ([byte[]](0xEF, 0xBB, 0xBF, 0x3C)) | Should -Be 'UTF-8 BOM'
+    }
+    It 'classifies a UTF-16 LE BOM' {
+        Get-XmlBytePrefixClassification -Bytes ([byte[]](0xFF, 0xFE, 0x3C, 0x00)) | Should -Be 'UTF-16 LE BOM'
+    }
+    It 'classifies a UTF-16 BE BOM' {
+        Get-XmlBytePrefixClassification -Bytes ([byte[]](0xFE, 0xFF, 0x00, 0x3C)) | Should -Be 'UTF-16 BE BOM'
+    }
+    It "classifies a no-BOM '<?xml' prefix" {
+        Get-XmlBytePrefixClassification -Bytes ([System.Text.Encoding]::ASCII.GetBytes('<?xml version="1.0"?><a/>')) | Should -Be "no BOM, '<?xml' prefix"
+    }
+    It "classifies a no-BOM bare '<' prefix" {
+        Get-XmlBytePrefixClassification -Bytes ([System.Text.Encoding]::ASCII.GetBytes('<EnumerationResults/>')) | Should -Be "no BOM, '<' prefix"
+    }
+    It 'classifies a non-XML-looking prefix' {
+        Get-XmlBytePrefixClassification -Bytes ([System.Text.Encoding]::UTF8.GetBytes('{"error":"nope"}')) | Should -Be 'no BOM, non-XML-looking prefix'
+    }
+    It 'classifies an empty response body' {
+        Get-XmlBytePrefixClassification -Bytes @() | Should -Be 'empty response body'
     }
 }
 
@@ -300,13 +379,13 @@ Describe 'Get-LimsSqlMediaStagingFullListing (orchestration, mocked adapter) -- 
     It 'accumulates blobs across multiple pages following NextMarker' {
         Mock Invoke-BlobContainerListPageAdapter {
             if ([string]::IsNullOrWhiteSpace($Marker)) {
-                return New-BlobListingXmlPage -Blobs @(@{ Name = 'page1-a.txt'; Length = 1 }, @{ Name = 'page1-b.txt'; Length = 2 }) -NextMarker 'go-to-page-2'
+                return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'page1-a.txt'; Length = 1 }, @{ Name = 'page1-b.txt'; Length = 2 }) -NextMarker 'go-to-page-2')
             }
             elseif ($Marker -eq 'go-to-page-2') {
-                return New-BlobListingXmlPage -Blobs @(@{ Name = 'page2-a.txt'; Length = 3 }) -NextMarker 'go-to-page-3'
+                return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'page2-a.txt'; Length = 3 }) -NextMarker 'go-to-page-3')
             }
             else {
-                return New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 4 })
+                return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 4 }))
             }
         }
         $blobs = Get-LimsSqlMediaStagingFullListing -AccessToken 'fake-token' -Config $script:TestConfig
@@ -333,7 +412,7 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
 
     It 'returns an unblocked plan for a normal single-page listing' {
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = 'x64/setup.exe'; Length = 200 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = 'x64/setup.exe'; Length = 200 }))
         }
         $plan = Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig
         $plan.Blocked | Should -BeFalse
@@ -343,7 +422,7 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
 
     It 'blocks the plan on a path-rejection fixture' {
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = '../escape.txt'; Length = 1 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = '../escape.txt'; Length = 1 }))
         }
         $plan = Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig
         $plan.Blocked | Should -BeTrue
@@ -356,11 +435,20 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
         Mock Invoke-BlobDownloadToFileAdapter { }
         $sensitiveMarker = 'SENSITIVE-RAW-RESPONSE-MARKER-must-never-appear-in-a-blocked-plan-error'
         Mock Invoke-BlobContainerListPageAdapter {
-            return "not xml at all <<< $sensitiveMarker"
+            return New-BlobListingPageResponse -XmlText "not xml at all <<< $sensitiveMarker"
         }
 
-        { Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig } |
-            Should -Throw -ExpectedMessage '*XmlException*'
+        $caught = $null
+        try {
+            Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig
+        }
+        catch {
+            $caught = $_
+        }
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Match 'HTTP status: 200'
+        $caught.Exception.Message | Should -Match 'XML error position'
+        $caught.Exception.Message | Should -Not -Match ([regex]::Escape($sensitiveMarker))
 
         Should -Invoke Get-FreeBytesOnDriveAdapter -Times 0
         Should -Invoke New-StagingDirectoryAdapter -Times 0
@@ -369,7 +457,7 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
 
     It 'blocks the plan when a destination directory is an existing junction/symlink' {
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'x64/setup.exe'; Length = 100 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'x64/setup.exe'; Length = 100 }))
         }
         Mock Test-AncestorIsReparsePointAdapter {
             param($Path)
@@ -382,7 +470,7 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
 
     It 'blocks the plan on an insufficient-free-space fixture' {
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'bigfile.iso'; Length = 9999999999999 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'bigfile.iso'; Length = 9999999999999 }))
         }
         Mock Get-FreeBytesOnDriveAdapter { return [int64]100 }
         $plan = Get-LimsSqlMediaStagingPlan -AccessToken 'fake-token' -Config $script:TestConfig
@@ -392,7 +480,7 @@ Describe 'Get-LimsSqlMediaStagingPlan (orchestration, mocked adapters)' {
 
     It 'decides Skip for a file whose existing length already matches (rerun-safe)' {
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = 'x64/setup.exe'; Length = 200 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 100 }, @{ Name = 'x64/setup.exe'; Length = 200 }))
         }
         Mock Get-FileLengthIfExistsAdapter {
             param($Path)
@@ -410,7 +498,7 @@ Describe 'Assert-StagingTargetIdentity (orchestration, mocked adapters) -- fail 
     It 'throws on a hostname mismatch and never queries the blob listing' {
         Mock Get-ActualComputerNameAdapter { return 'some-other-host' }
         Mock Get-ImdsComputeMetadataAdapter { return [pscustomobject]@{ subscriptionId = $script:TestConfig.ExpectedSubscriptionId; resourceGroupName = $script:TestConfig.ExpectedResourceGroupName; name = $script:TestConfig.ExpectedVmName } }
-        Mock Invoke-BlobContainerListPageAdapter { return New-BlobListingXmlPage -Blobs @() }
+        Mock Invoke-BlobContainerListPageAdapter { return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @()) }
         { Assert-StagingTargetIdentity -Config $script:TestConfig } | Should -Throw
         Should -Invoke Invoke-BlobContainerListPageAdapter -Times 0
     }
@@ -441,10 +529,10 @@ Describe 'Invoke-LimsSqlMediaStaging end-to-end (orchestration, mocked adapters)
         Mock Move-StagingFileIntoPlaceAdapter { }
         Mock Remove-StagingTempFileAdapter { }
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(
-                @{ Name = 'SETUP.EXE'; Length = 100 }
-                @{ Name = 'x64/setup.exe'; Length = 200 }
-            )
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(
+                    @{ Name = 'SETUP.EXE'; Length = 100 }
+                    @{ Name = 'x64/setup.exe'; Length = 200 }
+                ))
         }
         # Simulated on-disk state, mutated by the mocked adapters below to
         # model real interrupted-then-rerun behavior without any real I/O.
@@ -519,7 +607,7 @@ Describe 'Invoke-LimsSqlMediaStaging -- fails closed when SETUP.EXE is absent fr
         Mock New-StagingDirectoryAdapter { }
         Mock Remove-StagingTempFileAdapter { }
         Mock Invoke-BlobContainerListPageAdapter {
-            return New-BlobListingXmlPage -Blobs @(@{ Name = 'readme.txt'; Length = 10 })
+            return New-BlobListingPageResponse -XmlText (New-BlobListingXmlPage -Blobs @(@{ Name = 'readme.txt'; Length = 10 }))
         }
         $disk = @{}
         Mock Get-FileLengthIfExistsAdapter { param($Path) if ($disk.ContainsKey($Path)) { return $disk[$Path] }; return $null }
@@ -527,5 +615,109 @@ Describe 'Invoke-LimsSqlMediaStaging -- fails closed when SETUP.EXE is absent fr
         Mock Move-StagingFileIntoPlaceAdapter { param($TempPath, $DestinationPath) $disk[$DestinationPath] = $disk[$TempPath]; $disk.Remove($TempPath) }
 
         { Invoke-LimsSqlMediaStaging } | Should -Throw -ExpectedMessage '*SETUP.EXE*'
+    }
+}
+
+Describe 'Invoke-BlobContainerListPageAdapter + ConvertFrom-BlobListingXml together (orchestration, mocked Invoke-WebRequest only) -- byte-level HTTP fixtures' {
+    <#
+        These exercise the REAL (unmocked) Invoke-BlobContainerListPageAdapter
+        together with the REAL (unmocked) ConvertFrom-BlobListingXml, with
+        only the underlying Invoke-WebRequest cmdlet itself replaced by a
+        fake response object shaped like a genuine Windows PowerShell 5.1
+        Invoke-WebRequest response (RawContentStream/StatusCode/Headers --
+        confirmed against a real one, not assumed). This is the only way
+        to prove the byte-level BOM/encoding fix end-to-end: mocking
+        Invoke-BlobContainerListPageAdapter itself (as every other Describe
+        block in this file does) would bypass the exact code path that
+        broke in production.
+    #>
+
+    It 'parses a UTF-8 XML response WITH a genuine 3-byte UTF-8 BOM, end-to-end through the real adapter' {
+        $xmlBytes = [System.Text.Encoding]::UTF8.GetBytes((New-BlobListingXmlPage -Blobs @(@{ Name = 'SETUP.EXE'; Length = 1024 }) -NextMarker 'page-2'))
+        $bomBytes = [byte[]](0xEF, 0xBB, 0xBF)
+        Mock Invoke-WebRequest { New-FakeInvokeWebRequestResponse -Bytes ($bomBytes + $xmlBytes) -ContentType 'application/xml' }
+
+        $pageResponse = Invoke-BlobContainerListPageAdapter -AccessToken 'fake-token-never-logged' -Config $script:TestConfig
+        $page = ConvertFrom-BlobListingXml -ResponseBytes $pageResponse.Bytes -HttpStatusCode $pageResponse.StatusCode -ContentType $pageResponse.ContentType
+
+        $page.Blobs.Count | Should -Be 1
+        $page.Blobs[0].Name | Should -Be 'SETUP.EXE'
+        $page.NextMarker | Should -Be 'page-2'
+    }
+
+    It 'parses a UTF-8 XML response WITHOUT a BOM, end-to-end through the real adapter' {
+        $xmlBytes = [System.Text.Encoding]::UTF8.GetBytes((New-BlobListingXmlPage -Blobs @(@{ Name = 'README.txt'; Length = 10 })))
+        Mock Invoke-WebRequest { New-FakeInvokeWebRequestResponse -Bytes $xmlBytes -ContentType 'application/xml' }
+
+        $pageResponse = Invoke-BlobContainerListPageAdapter -AccessToken 'fake-token-never-logged' -Config $script:TestConfig
+        $page = ConvertFrom-BlobListingXml -ResponseBytes $pageResponse.Bytes -HttpStatusCode $pageResponse.StatusCode -ContentType $pageResponse.ContentType
+
+        $page.Blobs.Count | Should -Be 1
+        $page.Blobs[0].Name | Should -Be 'README.txt'
+        $page.NextMarker | Should -BeNullOrEmpty
+    }
+
+    It 'fails closed end-to-end on a non-XML response body, before any staging write, without ever echoing the raw body or the bearer token' {
+        $sensitiveMarker = 'SENSITIVE-RAW-RESPONSE-MARKER-must-never-appear-in-any-adapter-or-parser-error'
+        $nonXmlBytes = [System.Text.Encoding]::UTF8.GetBytes("{`"error`":`"$sensitiveMarker`"}")
+        Mock Invoke-WebRequest { New-FakeInvokeWebRequestResponse -Bytes $nonXmlBytes -StatusCode 200 -ContentType 'application/json' }
+        Mock New-StagingDirectoryAdapter { }
+        Mock Invoke-BlobDownloadToFileAdapter { }
+
+        $pageResponse = Invoke-BlobContainerListPageAdapter -AccessToken 'fake-token-never-logged' -Config $script:TestConfig
+
+        $caught = $null
+        try {
+            ConvertFrom-BlobListingXml -ResponseBytes $pageResponse.Bytes -HttpStatusCode $pageResponse.StatusCode -ContentType $pageResponse.ContentType
+        }
+        catch {
+            $caught = $_
+        }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Match 'HTTP status: 200'
+        $caught.Exception.Message | Should -Match "Content-Type: 'application/json'"
+        $caught.Exception.Message | Should -Match "Byte count: $($nonXmlBytes.Length)"
+        $caught.Exception.Message | Should -Match 'Leading-byte classification'
+        $caught.Exception.Message | Should -Match 'XML error position'
+        $caught.Exception.Message | Should -Not -Match ([regex]::Escape($sensitiveMarker))
+        $caught.Exception.Message | Should -Not -Match 'fake-token-never-logged'
+        $caught.Exception.Message | Should -Not -Match 'Bearer'
+
+        Should -Invoke New-StagingDirectoryAdapter -Times 0
+        Should -Invoke Invoke-BlobDownloadToFileAdapter -Times 0
+    }
+
+    It 'resets RawContentStream.Position to 0 before reading, even if something already advanced it' {
+        $xmlBytes = [System.Text.Encoding]::UTF8.GetBytes((New-BlobListingXmlPage -Blobs @(@{ Name = 'a.txt'; Length = 1 })))
+        Mock Invoke-WebRequest {
+            $fakeResponse = New-FakeInvokeWebRequestResponse -Bytes $xmlBytes -ContentType 'application/xml'
+            # Simulate the stream having already been partially consumed
+            # by other code before this adapter gets to it.
+            $null = $fakeResponse.RawContentStream.ReadByte()
+            return $fakeResponse
+        }
+
+        $pageResponse = Invoke-BlobContainerListPageAdapter -AccessToken 'fake-token-never-logged' -Config $script:TestConfig
+
+        $pageResponse.Bytes.Length | Should -Be $xmlBytes.Length
+        $page = ConvertFrom-BlobListingXml -ResponseBytes $pageResponse.Bytes -HttpStatusCode $pageResponse.StatusCode -ContentType $pageResponse.ContentType
+        $page.Blobs.Count | Should -Be 1
+    }
+
+    It 'never includes the Authorization header value in a web-request-failure error message' {
+        Mock Invoke-WebRequest { throw [System.Net.WebException]::new('Connection refused.') }
+
+        $caught = $null
+        try {
+            Invoke-BlobContainerListPageAdapter -AccessToken 'fake-token-never-logged' -Config $script:TestConfig
+        }
+        catch {
+            $caught = $_
+        }
+
+        $caught | Should -Not -BeNullOrEmpty
+        $caught.Exception.Message | Should -Not -Match 'fake-token-never-logged'
+        $caught.Exception.Message | Should -Not -Match 'Bearer'
     }
 }
