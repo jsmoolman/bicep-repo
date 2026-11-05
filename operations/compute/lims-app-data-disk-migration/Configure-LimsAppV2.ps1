@@ -484,7 +484,10 @@ function Assert-MappedDestinationVolume {
     )
     $guestDisks = @(Get-GuestDiskInventoryAdapter)
     $partitions = @(Get-GuestPartitionInventoryAdapter)
-    $dest = Resolve-GuestDiskIdentity -ImdsCompute $ImdsCompute -GuestDisks $guestDisks -ExpectedManagedDiskId $ExpectedDestinationDiskResourceId -ExpectedLun ([int]$Environment.DestinationDataDiskLun) -ExpectedUniqueId $ExpectedDestinationDiskUniqueId -Role 'Destination A:'
+    if (-not (Test-NormalizedUniqueIdEquals -Left $ExpectedDestinationDiskUniqueId -Right $Environment.DestinationAttestedGuestUniqueId)) {
+        Assert-LimsAppV2ConfigFailure "ExpectedDestinationDiskUniqueId is a Windows guest UniqueId and must be the attested mapping value. Azure managed-disk uniqueId is not accepted."
+    }
+    $dest = Resolve-GuestDiskIdentity -ImdsCompute $ImdsCompute -GuestDisks $guestDisks -ExpectedManagedDiskId $ExpectedDestinationDiskResourceId -ExpectedLun ([int]$Environment.DestinationDataDiskLun) -ExpectedUniqueId $Environment.DestinationAttestedGuestUniqueId -Role 'Destination A:'
     if (-not $dest.Resolved) { Assert-LimsAppV2ConfigFailure $dest.Reason }
     $volume = Get-VolumeAdapter -DriveLetter $Environment.DestinationDriveLetter
     $label = $null

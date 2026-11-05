@@ -16,11 +16,12 @@
 #       snapshot, attaches it only to APP v2 at the validated unused LUN,
 #       then submits the guest copy script with CollectInventoryOnly.
 #       Guest inspection is read-only: it prints Azure ID / LUN / ARM
-#       UniqueId beside the Windows inventory, requires an unambiguous
-#       UniqueId match including A: = 60022480D1B07E6ACD98417F86591F4B,
-#       and leaves the disk attached. No Set-Disk, drive-letter change,
-#       init/format, Robocopy, or Azure Files access. Does not require
-#       the stage/cleanup reparse gates.
+#       uniqueId beside the Windows inventory, requires A: =
+#       60022480D1B07E6ACD98417F86591F4B, and leaves the disk attached.
+#       ARM uniqueId is Azure identity, not Windows UniqueId. Snapshot
+#       guest binding stays unproven until reviewed. No Set-Disk,
+#       drive-letter change, init/format, Robocopy, or Azure Files
+#       access. Does not require the stage/cleanup reparse gates.
 #     - `stage`: re-runs every plan check, requires the operator to record
 #       whether this is an online capture or application writes were
 #       quiesced, creates an incremental snapshot of the source disk,
@@ -311,8 +312,10 @@ jobs:
                 ExpectedTemporaryDiskName=$(limsAppMigTemporaryDiskName)
                 ExpectedTemporaryDiskResourceId=$(limsAppMigTemporaryDiskId)
                 ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
-                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryDiskUniqueId)
-                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryGuestUniqueId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationGuestUniqueId)
+                ExpectedTemporaryDiskArmUniqueId=$(limsAppMigTemporaryDiskArmUniqueId)
+                ExpectedDestinationDiskArmUniqueId=$(limsAppMigDestinationDiskArmUniqueId)
                 CaptureMode=$(limsAppMigCaptureMode)
                 CollectInventoryOnly=true
 
@@ -360,8 +363,10 @@ jobs:
                 ExpectedTemporaryDiskName=$(limsAppMigTemporaryDiskName)
                 ExpectedTemporaryDiskResourceId=$(limsAppMigTemporaryDiskId)
                 ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
-                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryDiskUniqueId)
-                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryGuestUniqueId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationGuestUniqueId)
+                ExpectedTemporaryDiskArmUniqueId=$(limsAppMigTemporaryDiskArmUniqueId)
+                ExpectedDestinationDiskArmUniqueId=$(limsAppMigDestinationDiskArmUniqueId)
                 CaptureMode=$(limsAppMigCaptureMode)
 
           - task: AzureCLI@2
@@ -432,7 +437,7 @@ jobs:
                 MigrationRunId=$(effectiveMigrationRunId)
                 ConfigurePhase=$(limsAppMigConfigurePhase)
                 ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
-                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationGuestUniqueId)
                 AzureFilesUnc=$(effectiveAzureFilesUnc)
               ${{ if eq(parameters.action, 'configure-app') }}:
                 RUN_COMMAND_PROTECTED_PARAMETERS: |

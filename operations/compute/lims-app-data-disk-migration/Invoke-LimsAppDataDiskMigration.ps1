@@ -12,7 +12,8 @@
     plan (default, read-only): resolves and reports the source disk, source
     and destination VM IDs, destination data disk, region, Disk Encryption
     Set, and candidate temporary LUN. Fails closed if any identity,
-    attachment, or encryption check differs from the mapping.
+    attachment, or encryption check differs from the mapping. Azure
+    managed-disk uniqueId is Azure identity, not Windows UniqueId.
 
     attach-and-inspect: re-runs every plan check, requires the operator
     to record whether the capture is online or application writes were
@@ -1122,11 +1123,8 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
     $guestCommandName = Get-LimsAppDataDiskMigrationRunCommandName -Environment $Environment -MigrationRunId $MigrationRunId
     $checks = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $Environment -ThisRunTemporaryDiskName $names.TemporaryDiskName
 
-    if ([string]::IsNullOrWhiteSpace($checks.DestinationDiskUniqueId)) {
-        Assert-LimsAppMigControlFailure "Destination disk '$($checks.DestinationDiskId)' has no ARM uniqueId. Guest identity cannot be proven. Evidence needed: Microsoft.Compute/disks uniqueId."
-    }
-    if (-not (Test-NormalizedUniqueIdEquals -Left $checks.DestinationDiskUniqueId -Right $Environment.DestinationAttestedGuestUniqueId)) {
-        Assert-LimsAppMigControlFailure "Destination ARM uniqueId '$($checks.DestinationDiskUniqueId)' does not match the attested guest UniqueId '$($Environment.DestinationAttestedGuestUniqueId)'."
+    if ([string]::IsNullOrWhiteSpace($Environment.DestinationAttestedGuestUniqueId)) {
+        Assert-LimsAppMigControlFailure "Destination guest UniqueId is missing from the reviewed mapping. Azure managed-disk uniqueId is not Windows UniqueId and is not a substitute."
     }
 
     Invoke-LimsAppDataDiskMigrationAcquireEnvironmentLock -Checks $checks -MigrationRunId $MigrationRunId -LockPurpose $LockPurpose -TagKeys $tagKeys -CopyStatus $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
@@ -1195,9 +1193,6 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
     }
 
     $tempUniqueId = Get-DiskUniqueIdFromResource -Disk $tempDisk
-    if ([string]::IsNullOrWhiteSpace($tempUniqueId)) {
-        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' has no ARM uniqueId. Refusing to attach or change guest disk state. Collect a read-only guest disk inventory only after ARM uniqueId is present; binding is ARM uniqueId matching Get-Disk UniqueId. Evidence needed: Microsoft.Compute/disks uniqueId."
-    }
 
     $attachedAlready = $false
     foreach ($attached in @($checks.DestinationDataDisks)) {
@@ -1251,9 +1246,12 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
     Write-PipelineVariable -Name 'limsAppMigTemporaryLun' -Value ([string]$checks.CandidateTemporaryLun)
     Write-PipelineVariable -Name 'limsAppMigTemporaryDiskName' -Value $names.TemporaryDiskName
     Write-PipelineVariable -Name 'limsAppMigTemporaryDiskId' -Value ([string]$tempDisk.id)
-    Write-PipelineVariable -Name 'limsAppMigTemporaryDiskUniqueId' -Value $tempUniqueId
+    Write-PipelineVariable -Name 'limsAppMigTemporaryDiskArmUniqueId' -Value $tempUniqueId
+    Write-PipelineVariable -Name 'limsAppMigTemporaryGuestUniqueId' -Value $Environment.TemporaryAttestedGuestUniqueId
     Write-PipelineVariable -Name 'limsAppMigDestinationDiskId' -Value $checks.DestinationDiskId
-    Write-PipelineVariable -Name 'limsAppMigDestinationDiskUniqueId' -Value $checks.DestinationDiskUniqueId
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskArmUniqueId' -Value $checks.DestinationDiskUniqueId
+    Write-PipelineVariable -Name 'limsAppMigDestinationGuestUniqueId' -Value $Environment.DestinationAttestedGuestUniqueId
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskUniqueId' -Value $Environment.DestinationAttestedGuestUniqueId
     Write-PipelineVariable -Name 'limsAppMigSnapshotId' -Value ([string]$snapshot.id)
     Write-PipelineVariable -Name 'limsAppMigMigrationRunId' -Value $MigrationRunId
     Write-PipelineVariable -Name 'limsAppMigGuestCommandName' -Value $guestCommandName
@@ -1565,9 +1563,9 @@ function Invoke-LimsAppDataDiskMigrationConfigure {
     Assert-VmIdentityMatchesMapping -Vm $destinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
     $destinationDisk = Get-AzDiskAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $Environment.DestinationDataDiskName
     Assert-DiskIdentityMatchesMapping -Disk $destinationDisk -Environment $Environment -ExpectedDiskName $Environment.DestinationDataDiskName -Role 'Destination'
-    $destUnique = Get-DiskUniqueIdFromResource -Disk $destinationDisk
-    if (-not (Test-NormalizedUniqueIdEquals -Left $destUnique -Right $Environment.DestinationAttestedGuestUniqueId)) {
-        Assert-LimsAppMigControlFailure "Destination ARM uniqueId '$destUnique' does not match the attested guest UniqueId '$($Environment.DestinationAttestedGuestUniqueId)'."
+    $destArmUniqueId = Get-DiskUniqueIdFromResource -Disk $destinationDisk
+    if ([string]::IsNullOrWhiteSpace($Environment.DestinationAttestedGuestUniqueId)) {
+        Assert-LimsAppMigControlFailure "Destination guest UniqueId is missing from the reviewed mapping. Azure managed-disk uniqueId is not Windows UniqueId and is not a substitute."
     }
 
     $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
@@ -1583,7 +1581,9 @@ function Invoke-LimsAppDataDiskMigrationConfigure {
     Write-PipelineVariable -Name 'limsAppMigResourceGroupName' -Value $Environment.ResourceGroupName
     Write-PipelineVariable -Name 'limsAppMigDestinationVmName' -Value $Environment.DestinationVmName
     Write-PipelineVariable -Name 'limsAppMigDestinationDiskId' -Value ([string]$destinationDisk.id)
-    Write-PipelineVariable -Name 'limsAppMigDestinationDiskUniqueId' -Value $destUnique
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskArmUniqueId' -Value $destArmUniqueId
+    Write-PipelineVariable -Name 'limsAppMigDestinationGuestUniqueId' -Value $Environment.DestinationAttestedGuestUniqueId
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskUniqueId' -Value $Environment.DestinationAttestedGuestUniqueId
     Write-PipelineVariable -Name 'limsAppMigGuestCommandName' -Value $guestCommandName
     Write-PipelineVariable -Name 'limsAppMigEnvironmentName' -Value $Environment.EnvironmentName
     Write-PipelineVariable -Name 'limsAppMigConfigurePhase' -Value $Phase

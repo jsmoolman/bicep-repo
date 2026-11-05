@@ -116,6 +116,7 @@ function New-DisabledLimsAppDataDiskMigrationEnvironment {
         ReservedDriveLetters            = @('A', 'C', 'D')
         RobocopyLogDirectory            = 'C:\LimsAppMigration\logs'
         DestinationAttestedGuestUniqueId = ''
+        TemporaryAttestedGuestUniqueId  = ''
         GuestCommandNamePrefix          = ''
         WindowsReparseValidationStatus  = 'BlockedPendingValidation'
         WindowsSymlinkValidationStatus  = 'BlockedPendingValidation'
@@ -158,6 +159,10 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             ReservedDriveLetters            = @('A', 'C', 'D')
             RobocopyLogDirectory            = 'C:\LimsAppMigration\logs'
             DestinationAttestedGuestUniqueId = '60022480D1B07E6ACD98417F86591F4B'
+            # Snapshot-derived guest UniqueId stays empty until inspect
+            # evidence is reviewed. Azure managed-disk uniqueId is not
+            # this value and is not a substitute.
+            TemporaryAttestedGuestUniqueId  = ''
             GuestCommandNamePrefix          = 'migrate-lims-app-data'
             # Stage/cleanup stay blocked until both the junction and the
             # directory-symbolic-link Robocopy tests have been reviewed.

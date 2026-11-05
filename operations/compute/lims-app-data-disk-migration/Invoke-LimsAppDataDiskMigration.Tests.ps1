@@ -71,7 +71,7 @@ BeforeAll {
             [string] $DesId,
             [string] $SourceId = $null,
             [string] $ManagedBy = $null,
-            [string] $UniqueId = '60022480D1B07E6ACD98417F86591F4B',
+            [string] $UniqueId = 'ARM-DISK-UID-NOT-GUEST',
             $Tags = $null
         )
         return [pscustomobject]@{
@@ -140,6 +140,7 @@ Describe 'Get-LimsAppDataDiskMigrationEnvironmentMapping' {
         $script:Dev.PreferredTemporaryLun | Should -Be 1
         $script:Dev.ExcludeRelativePaths | Should -Contain 'lv89\sdmshome'
         $script:Dev.DestinationAttestedGuestUniqueId | Should -Be '60022480D1B07E6ACD98417F86591F4B'
+        $script:Dev.TemporaryAttestedGuestUniqueId | Should -Be ''
         $script:Dev.DiskEncryptionSetResourceId | Should -Be (New-FakeDesId)
         $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
         $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
@@ -713,6 +714,12 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         Should -Invoke Remove-AzSnapshotAdapter -Times 0
         $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
         $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationGuestUniqueId' -and $Value -eq '60022480D1B07E6ACD98417F86591F4B' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationDiskArmUniqueId' -and $Value -eq 'ARM-DISK-UID-NOT-GUEST' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigTemporaryDiskArmUniqueId' -and $Value -eq 'TEMPDISKUID' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigTemporaryGuestUniqueId' -and [string]$Value -eq '' }
+        'ARM-DISK-UID-NOT-GUEST' | Should -Not -Be '60022480D1B07E6ACD98417F86591F4B'
+        'TEMPDISKUID' | Should -Not -Be ''
     }
 
     It 'treats attach-before-submit NotFound as indeterminate unless reviewed pre-submit recovery is requested' {
@@ -1040,6 +1047,9 @@ Describe 'Invoke-LimsAppDataDiskMigrationConfigure (orchestration, mocked adapte
     It 'publishes destination identity for configure-app after a completed copy and does not write Azure disks' {
         $null = Invoke-LimsAppDataDiskMigrationConfigure -Environment $script:Dev -MigrationRunId '10' -Phase 'Register'
         Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationVmName' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationGuestUniqueId' -and $Value -eq '60022480D1B07E6ACD98417F86591F4B' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationDiskUniqueId' -and $Value -eq '60022480D1B07E6ACD98417F86591F4B' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationDiskArmUniqueId' -and $Value -eq 'ARM-DISK-UID-NOT-GUEST' }
         Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigConfigurePhase' -and $Value -eq 'Register' }
         Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
         Should -Invoke Add-AzVmDataDiskAdapter -Times 0

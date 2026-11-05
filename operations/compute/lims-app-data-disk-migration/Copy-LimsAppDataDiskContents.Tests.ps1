@@ -34,6 +34,7 @@ Describe 'mapping used by the guest script' {
         $guest.PreferredTemporaryLun | Should -Be $control.PreferredTemporaryLun
         $guest.ExcludeRelativePaths | Should -Be $control.ExcludeRelativePaths
         $guest.DestinationAttestedGuestUniqueId | Should -Be '60022480D1B07E6ACD98417F86591F4B'
+        $guest.TemporaryAttestedGuestUniqueId | Should -Be ''
     }
 }
 
@@ -90,7 +91,9 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         $script:tempDiskId = "/subscriptions/$($script:Dev.SubscriptionId)/resourceGroups/$($script:Dev.ResourceGroupName)/providers/Microsoft.Compute/disks/$script:tempDiskName"
         $script:destDiskId = "/subscriptions/$($script:Dev.SubscriptionId)/resourceGroups/$($script:Dev.ResourceGroupName)/providers/Microsoft.Compute/disks/$($script:Dev.DestinationDataDiskName)"
         $script:tempUid = 'TEMPDISKUID'
+        $script:tempArmUid = 'ARM-TEMP-UID-NOT-GUEST'
         $script:destUid = $script:Dev.DestinationAttestedGuestUniqueId
+        $script:destArmUid = 'ARM-DEST-UID-NOT-GUEST'
         $script:imds = [pscustomobject]@{
             subscriptionId    = $script:Dev.SubscriptionId
             resourceGroupName = $script:Dev.ResourceGroupName
@@ -149,6 +152,8 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
             ExpectedDestinationDiskResourceId = $script:destDiskId
             ExpectedTemporaryDiskUniqueId     = $script:tempUid
             ExpectedDestinationDiskUniqueId   = $script:destUid
+            ExpectedTemporaryDiskArmUniqueId  = $script:tempArmUid
+            ExpectedDestinationDiskArmUniqueId = $script:destArmUid
             CaptureMode                       = 'online'
         }
     }
@@ -189,12 +194,27 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
     }
 
-    It 'dumps inventory and stops before Set-Disk when the snapshot-disk UniqueId is missing' {
+    It 'dumps inventory and stops before Set-Disk when the snapshot-disk guest UniqueId is missing' {
         $script:CopyParams.ExpectedTemporaryDiskUniqueId = ''
-        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*no attested or captured UniqueId*'
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*no reviewed Windows UniqueId*'
         Should -Invoke Invoke-RobocopyAdapter -Times 0
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
         Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
+    }
+
+    It 'refuses to treat ARM uniqueId as the snapshot guest UniqueId' {
+        $script:CopyParams.ExpectedTemporaryDiskUniqueId = $script:tempArmUid
+        $script:CopyParams.ExpectedTemporaryDiskArmUniqueId = $script:tempArmUid
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*not be treated as Windows UniqueId*'
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+    }
+
+    It 'refuses Azure managed-disk uniqueId as destination guest identity' {
+        $script:CopyParams.ExpectedDestinationDiskUniqueId = $script:destArmUid
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams } | Should -Throw -ExpectedMessage '*Azure managed-disk uniqueId is not accepted*'
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
     }
 
     It 'collects read-only inventory, proves the UniqueId binding, and stops before mutation' {
@@ -205,20 +225,28 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         $result.DestinationDisk.UniqueId | Should -Be $script:destUid
         $result.TemporaryDisk.Number | Should -Be 2
         $result.TemporaryDisk.UniqueId | Should -Be $script:tempUid
+        $result.SnapshotBinding | Should -Be 'Proven'
         ($script:InspectLines -join '|') | Should -Match '60022480D1B07E6ACD98417F86591F4B'
         ($script:InspectLines -join '|') | Should -Match 'Identity match                 : PASSED'
         ($script:InspectLines -join '|') | Should -Match $script:tempDiskId
+        ($script:InspectLines -join '|') | Should -Match $script:tempArmUid
         Should -Invoke Invoke-RobocopyAdapter -Times 0
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
         Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
     }
 
-    It 'prints the inspect report and stops when the snapshot-disk UniqueId is missing' {
+    It 'prints the inspect report and stops when snapshot guest binding is unproven and ARM uniqueId differs' {
         $script:CopyParams.ExpectedTemporaryDiskUniqueId = ''
-        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly } | Should -Throw -ExpectedMessage '*no attested or captured UniqueId*'
-        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : FAILED'
+        $result = Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly
+        $result.Status | Should -Be 'InventoryOnly'
+        $result.DestinationDisk.UniqueId | Should -Be $script:destUid
+        $result.TemporaryDisk | Should -BeNullOrEmpty
+        $result.SnapshotBinding | Should -Be 'Unproven'
+        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : UNPROVEN'
         ($script:InspectLines -join '|') | Should -Match $script:tempDiskId
+        ($script:InspectLines -join '|') | Should -Match $script:tempArmUid
         ($script:InspectLines -join '|') | Should -Match 'Windows disk inventory'
+        ($script:InspectLines -join '|') | Should -Match '60022480D1B07E6ACD98417F86591F4B'
         Should -Invoke Invoke-RobocopyAdapter -Times 0
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
         Should -Invoke Set-PartitionDriveLetterAdapter -Times 0

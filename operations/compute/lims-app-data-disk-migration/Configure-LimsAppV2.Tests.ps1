@@ -139,6 +139,12 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         }
     }
 
+    It 'rejects Azure managed-disk uniqueId as destination guest identity' {
+        $script:Params.ExpectedDestinationDiskUniqueId = 'ARM-DEST-UID-NOT-GUEST'
+        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*Azure managed-disk uniqueId is not accepted*'
+        Should -Invoke New-LocalUserAdapter -Times 0
+    }
+
     It 'fails on a wrong VM before creating the local account' {
         Mock Get-ImdsComputeMetadataAdapter {
             return [pscustomobject]@{

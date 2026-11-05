@@ -356,12 +356,19 @@ Describe 'Resolve-GuestDiskIdentity and Test-DriveLetterOnResolvedDisk' {
         @($script:guestDisks | Where-Object { [int64]$_.SizeBytes -eq $imdsBytes }).Count | Should -Be 0
     }
 
-    It 'resolves destination A: by attested UniqueId and the snapshot disk by ARM uniqueId despite the DEV size discrepancy and LUN 1 collision' {
-        $dest = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId $script:attested -Role 'Destination A:'
+    It 'resolves destination A: by attested UniqueId even when ARM uniqueId differs, and does not treat ARM uniqueId as guest identity' {
+        $dest = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId $script:attested -Role 'Destination A:' -ArmUniqueId 'ARM-DEST-UID-NOT-GUEST'
         $dest.Resolved | Should -Be $true
         $dest.Disk.Number | Should -Be 1
         $dest.Disk.UniqueId | Should -Be $script:attested
-        $temp = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId 'TEMPDISK' -Role 'Temporary snapshot disk'
+        $sameAsArm = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId 'ARM-TEMP-UID' -Role 'Temporary snapshot disk' -ArmUniqueId 'ARM-TEMP-UID'
+        $sameAsArm.Resolved | Should -Be $false
+        $sameAsArm.Reason | Should -Match 'not be treated as Windows UniqueId'
+        $unproven = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId '' -Role 'Temporary snapshot disk' -ArmUniqueId 'ARM-TEMP-UID'
+        $unproven.Resolved | Should -Be $false
+        $unproven.Reason | Should -Match 'no reviewed Windows UniqueId'
+        $unproven.Reason | Should -Match 'Inventory:'
+        $temp = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:tempId -ExpectedLun 1 -ExpectedUniqueId 'TEMPDISK' -Role 'Temporary snapshot disk' -ArmUniqueId 'ARM-TEMP-UID'
         $temp.Resolved | Should -Be $true
         $temp.Disk.Number | Should -Be 2
         $temp.Disk.ScsiLogicalUnit | Should -Be 1
@@ -387,7 +394,7 @@ Describe 'Resolve-GuestDiskIdentity and Test-DriveLetterOnResolvedDisk' {
     It 'dumps inventory and stops when no UniqueId was supplied' {
         $result = Resolve-GuestDiskIdentity -ImdsCompute $script:imds -GuestDisks $script:guestDisks -ExpectedManagedDiskId $script:destId -ExpectedLun 0 -ExpectedUniqueId '' -Role 'Destination A:'
         $result.Resolved | Should -Be $false
-        $result.Reason | Should -Match 'no attested or captured UniqueId'
+        $result.Reason | Should -Match 'no reviewed Windows UniqueId'
         $result.Reason | Should -Match 'Inventory:'
         $result.Reason | Should -Match $script:attested
     }

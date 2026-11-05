@@ -487,8 +487,9 @@ function Select-NonOsGuestDisks {
         Excludes only the OS disk (IsBoot/IsSystem). IMDS resourceDisk.size
         is not used: on DEV that value does not match the Windows temporary
         disk size, and LUN 1 collides with Azure temporary storage.
-        Independently attested UniqueId (or a captured ARM uniqueId) is
-        required to pick a managed disk from this pool.
+        A reviewed Windows UniqueId is required to pick a managed disk
+        from this pool. Azure managed-disk uniqueId is a different
+        identity and is not used here.
     #>
     param(
         [Parameter(Mandatory = $true)] [AllowEmptyCollection()] [object[]] $GuestDisks
@@ -547,15 +548,65 @@ function Get-ImdsDataDiskByResourceId {
     return [pscustomobject]@{ Matches = $true; Disk = $diskMatches[0]; Reason = $null }
 }
 
+function Test-AzureDataDiskAttachmentIdentity {
+    <#
+        Azure managed-disk identity only: exact resource ID and LUN in
+        IMDS. This is not Windows guest-disk identity.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $ImdsCompute,
+        [Parameter(Mandatory = $true)] [string] $ExpectedManagedDiskId,
+        [Parameter(Mandatory = $true)] [int] $ExpectedLun,
+        [Parameter(Mandatory = $true)] [string] $Role
+    )
+
+    $imdsEntry = Get-ImdsDataDiskByResourceId -ImdsCompute $ImdsCompute -ExpectedManagedDiskId $ExpectedManagedDiskId
+    if (-not $imdsEntry.Matches) {
+        return [pscustomobject]@{ Matches = $false; Reason = "$Role Azure identity failed: $($imdsEntry.Reason)" }
+    }
+    $imdsLun = [int]$imdsEntry.Disk.lun
+    if ($imdsLun -ne $ExpectedLun) {
+        return [pscustomobject]@{ Matches = $false; Reason = "$Role IMDS LUN $imdsLun for '$ExpectedManagedDiskId' does not match mapped LUN $ExpectedLun." }
+    }
+    return [pscustomobject]@{ Matches = $true; Reason = $null }
+}
+
+function Get-ReviewedGuestUniqueIdDecision {
+    <#
+        Windows UniqueId is independently attested or later reviewed.
+        Azure managed-disk uniqueId is a different identifier and never
+        proves guest identity.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $Role,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ReviewedGuestUniqueId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ArmUniqueId
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($ReviewedGuestUniqueId) -and -not [string]::IsNullOrWhiteSpace($ArmUniqueId) -and (Test-NormalizedUniqueIdEquals -Left $ReviewedGuestUniqueId -Right $ArmUniqueId)) {
+        return [pscustomobject]@{
+            Proven = $false
+            Reason = "${Role}: Azure managed-disk uniqueId must not be treated as Windows UniqueId. Supply a reviewed guest UniqueId that is independent of ARM uniqueId."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($ReviewedGuestUniqueId)) {
+        return [pscustomobject]@{
+            Proven = $false
+            Reason = "${Role}: no reviewed Windows UniqueId was supplied. Azure managed-disk uniqueId is not Windows UniqueId and is not used as guest identity. Inventory is required. Stop before disk-state changes or copying."
+        }
+    }
+    return [pscustomobject]@{ Proven = $true; Reason = $null }
+}
+
 function Resolve-GuestDiskIdentity {
     <#
-        Correlates an exact Azure managed-disk resource ID to one Windows
-        disk by independently attested UniqueId (destination A:) or the
-        captured ARM uniqueId (snapshot-derived temporary disk), then the
-        caller proves the partition. IMDS resourceDisk.size is not used:
-        on DEV that value does not match the Windows temporary disk, and
-        SCSI LUN 1 collides with Azure temporary storage. Duplicate SCSI
-        LUNs are allowed when UniqueId uniquely identifies the disk.
+        Correlates an exact Azure managed-disk resource ID and LUN to one
+        Windows disk by a reviewed guest UniqueId, then the caller proves
+        the partition. Azure uniqueId is not Windows UniqueId. IMDS
+        resourceDisk.size is not used: on DEV that value does not match
+        the Windows temporary disk, and SCSI LUN 1 collides with Azure
+        temporary storage. Duplicate SCSI LUNs are allowed when the
+        reviewed UniqueId uniquely identifies the disk.
     #>
     param(
         [Parameter(Mandatory = $true)] $ImdsCompute,
@@ -563,16 +614,13 @@ function Resolve-GuestDiskIdentity {
         [Parameter(Mandatory = $true)] [string] $ExpectedManagedDiskId,
         [Parameter(Mandatory = $true)] [int] $ExpectedLun,
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExpectedUniqueId,
-        [Parameter(Mandatory = $true)] [string] $Role
+        [Parameter(Mandatory = $true)] [string] $Role,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ArmUniqueId = ''
     )
 
-    $imdsEntry = Get-ImdsDataDiskByResourceId -ImdsCompute $ImdsCompute -ExpectedManagedDiskId $ExpectedManagedDiskId
-    if (-not $imdsEntry.Matches) {
-        return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role identity failed: $($imdsEntry.Reason)" }
-    }
-    $imdsLun = [int]$imdsEntry.Disk.lun
-    if ($imdsLun -ne $ExpectedLun) {
-        return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role IMDS LUN $imdsLun for '$ExpectedManagedDiskId' does not match mapped LUN $ExpectedLun." }
+    $azure = Test-AzureDataDiskAttachmentIdentity -ImdsCompute $ImdsCompute -ExpectedManagedDiskId $ExpectedManagedDiskId -ExpectedLun $ExpectedLun -Role $Role
+    if (-not $azure.Matches) {
+        return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = $azure.Reason }
     }
 
     $pool = Select-NonOsGuestDisks -GuestDisks $GuestDisks
@@ -580,11 +628,12 @@ function Resolve-GuestDiskIdentity {
         return [pscustomobject]@{ Resolved = $false; Disk = $null; Reason = "$Role identity failed: $($pool.Reason) Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)" }
     }
 
-    if ([string]::IsNullOrWhiteSpace($ExpectedUniqueId)) {
+    $reviewed = Get-ReviewedGuestUniqueIdDecision -Role $Role -ReviewedGuestUniqueId $ExpectedUniqueId -ArmUniqueId $ArmUniqueId
+    if (-not $reviewed.Proven) {
         return [pscustomobject]@{
             Resolved = $false
             Disk     = $null
-            Reason   = "${Role}: no attested or captured UniqueId was supplied. IMDS resourceDisk.size is not used to pick a Windows disk (DEV size discrepancy / LUN 1 collision). Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks). Needed: ARM uniqueId of '$ExpectedManagedDiskId' matching Get-Disk UniqueId."
+            Reason   = "$($reviewed.Reason) Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)."
         }
     }
 
@@ -593,7 +642,7 @@ function Resolve-GuestDiskIdentity {
         return [pscustomobject]@{
             Resolved = $false
             Disk     = $null
-            Reason   = "${Role}: expected UniqueId '$ExpectedUniqueId' resolved to $($uniqueMatches.Count) guest disk(s) among non-OS disks. Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)."
+            Reason   = "${Role}: reviewed Windows UniqueId '$ExpectedUniqueId' resolved to $($uniqueMatches.Count) guest disk(s) among non-OS disks. Inventory: $(Format-GuestDiskInventoryEvidence -GuestDisks $GuestDisks)."
         }
     }
     return [pscustomobject]@{ Resolved = $true; Disk = $uniqueMatches[0]; Reason = $null }
