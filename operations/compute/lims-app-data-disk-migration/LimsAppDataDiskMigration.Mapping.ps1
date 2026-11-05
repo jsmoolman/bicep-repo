@@ -151,7 +151,7 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             # Customer DEV pin verified by plan #20261105.2 under
             # RG-CORE-LIMS-DEV-WESTEU. Do not replace with a different
             # Disk Encryption Set.
-            DiskEncryptionSetResourceId     = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
+            DiskEncryptionSetResourceId     = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/RG-CORE-LIMS-DEV-WESTEU/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
             SnapshotNamePrefix              = 'lims-app-mig-dev'
             TemporaryDiskNamePrefix         = 'lims-app-mig-dev'
             ExcludeRelativePaths            = @('lv89\sdmshome')
@@ -195,6 +195,7 @@ function Get-LimsAppDataDiskMigrationLockTagKeys {
         CopyStatus      = 'limsAppMigCopyStatus'
         TemporaryLun    = 'limsAppMigTemporaryLun'
         GuestCommand    = 'limsAppMigGuestCommand'
+        GuestSubmitted  = 'limsAppMigGuestSubmitted'
         Phase           = 'limsAppMigPhase'
         CopyCompleted   = 'limsAppMigCopyCompleted'
     }

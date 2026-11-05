@@ -98,6 +98,34 @@ Describe 'Get-AzureCliErrorClassification' {
         (Get-AzureCliErrorClassification -ExitCode 1 -Text 'Something unexpected exploded') | Should -Be 'Other'
         (Get-AzureCliErrorClassification -ExitCode 0 -Text '{}') | Should -Be 'Found'
         (Get-AzureCliErrorClassification -ExitCode 1 -Text 'ConflictError (409) A disk with this name already exists') | Should -Be 'AlreadyExists'
+        (Get-AzureCliErrorClassification -ExitCode 1 -Text 'PreconditionFailed (412) The If-Match value is stale') | Should -Be 'PreconditionFailed'
+    }
+}
+
+Describe 'Get-AtomicLockApplyDecision' {
+    It 'allows a successful If-Match apply and refuses a simultaneous 412 race' {
+        (Get-AtomicLockApplyDecision -Classification 'Found').Allowed | Should -Be $true
+        $lost = Get-AtomicLockApplyDecision -Classification 'PreconditionFailed'
+        $lost.Allowed | Should -Be $false
+        $lost.Reason | Should -Match 'If-Match precondition failed'
+        (Get-AtomicLockApplyDecision -Classification 'AlreadyExists').Allowed | Should -Be $false
+    }
+}
+
+Describe 'Get-PreSubmitRecoveryDecision' {
+    It 'allows reviewed attach-and-inspect recovery only when the command never existed and was never marked submitted' {
+        $ok = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $ok.Allowed | Should -Be $true
+        $notRequested = Get-PreSubmitRecoveryDecision -Requested $false -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $notRequested.Allowed | Should -Be $false
+        $notRequested.Reason | Should -Match 'not requested'
+        $submitted = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'true' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $submitted.Allowed | Should -Be $false
+        $submitted.Reason | Should -Match 'Guest submission was recorded'
+        $stage = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'Pending'
+        $stage.Allowed | Should -Be $false
+        $otherOwner = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '9' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $otherOwner.Allowed | Should -Be $false
     }
 }
 

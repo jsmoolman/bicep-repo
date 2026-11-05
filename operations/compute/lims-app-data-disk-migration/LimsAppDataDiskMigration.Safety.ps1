@@ -160,13 +160,14 @@ function Get-AzureCliErrorClassification {
 
 function Get-MigrationLockAcquireDecision {
     <#
-        Per-environment lock held across stage, attach-and-inspect, guest
-        submission/execution, and cleanup. Stage and attach-and-inspect
-        may acquire only when the lock is empty. Overlapping migration
-        attempts are refused even with the same run ID. Cleanup of the
-        holding run is allowed so that run can recover after the guest
-        command is Found and terminal. The run ID remains the ownership
-        key.
+        Per-environment lock is the destination VM tag set, acquired with
+        If-Match before any snapshot, disk create, or attach. Disk create
+        is create-or-update and is not exclusive. Stage and
+        attach-and-inspect may acquire only when the lock is empty.
+        Overlapping attempts are refused even with the same run ID.
+        Cleanup of the holding run is allowed after the guest command is
+        Found and terminal, or after reviewed pre-submit recovery.
+        The run ID remains the ownership key.
     #>
     param(
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExistingLockRunId,
@@ -239,6 +240,80 @@ function Get-GuestCommandCleanupDecision {
         State   = $state
         Reason  = "Guest command executionState is '$state' (not terminal). Cleanup retains resources until Succeeded, Failed, or Canceled. NotFound is not treated as never submitted."
     }
+}
+
+function Get-AtomicLockApplyDecision {
+    <#
+        Destination VM tag update with If-Match. Found means this attempt
+        holds the lock. PreconditionFailed (412) means a simultaneous
+        attempt won the race. Disk create-or-update is not used as a lock.
+    #>
+    param([Parameter(Mandatory = $true)] [string] $Classification)
+
+    if ($Classification -eq 'Found') {
+        return [pscustomobject]@{ Allowed = $true; Reason = $null }
+    }
+    if ($Classification -eq 'PreconditionFailed') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Lost the atomic destination-VM lock race (If-Match precondition failed). Another attempt updated the VM. No snapshot, disk create, or attach was performed.'
+        }
+    }
+    return [pscustomobject]@{
+        Allowed = $false
+        Reason  = "Atomic lock apply classified as '$Classification'. Refusing to snapshot or attach without exclusive ownership."
+    }
+}
+
+function Get-PreSubmitRecoveryDecision {
+    <#
+        Reviewed recovery when attach-and-inspect ended before guest
+        submission. NotFound alone is still indeterminate. Recovery is
+        allowed only when the operator explicitly requests it, the
+        attempt is inspect-only, guest submission was never recorded,
+        the inspect command is NotFound, and this run holds the lock.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [bool] $Requested = $false,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $GuestSubmittedTag,
+        [Parameter(Mandatory = $true)] [string] $LookupClassification,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $LockOwnerRunId,
+        [Parameter(Mandatory = $true)] [string] $ThisRunId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $CopyStatusTag
+    )
+
+    if (-not $Requested) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Pre-submit recovery was not requested. Run Command NotFound remains indeterminate.'
+        }
+    }
+    if ($CopyStatusTag -ne 'InspectOnly') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Pre-submit recovery is reviewed only for attach-and-inspect (CopyStatus=InspectOnly).'
+        }
+    }
+    $submitted = [string]$GuestSubmittedTag
+    if ($submitted -eq 'true' -or $submitted -eq 'True' -or $submitted -eq '1') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Guest submission was recorded. Run Command NotFound is indeterminate; do not treat the command as never submitted.'
+        }
+    }
+    if ($LookupClassification -ne 'NotFound') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-submit recovery requires the inspect command to be NotFound (never created). Lookup is '$LookupClassification'."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($LockOwnerRunId) -or $LockOwnerRunId -ne $ThisRunId) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-submit recovery requires the destination VM lock to be held by this run '$ThisRunId'."
+        }
+    }
+    return [pscustomobject]@{ Allowed = $true; Reason = $null }
 }
 
 function Get-TemporaryDiskLineageDecision {

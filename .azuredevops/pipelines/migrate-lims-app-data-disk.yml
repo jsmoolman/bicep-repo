@@ -56,8 +56,10 @@
 #   mapping. Stage and cleanup stay blocked until both
 #   WindowsReparseValidationStatus and WindowsSymlinkValidationStatus
 #   are Passed in the mapping. attach-and-inspect does not require those
-#   gates. The per-environment lock is held across attach-and-inspect,
-#   stage, guest command submission/execution, and cleanup; overlapping
+#   gates. The per-environment lock is an If-Match update of the
+#   destination VM lock tags, acquired before any snapshot or attach.
+#   Disk create-or-update is not the lock. The inspect Run Command is
+#   preserved until temporary-disk cleanup succeeds. Overlapping
 #   attempts are refused even with the same migration run ID.
 #
 #   migrationRunId is passed only through task environment values and is
@@ -149,6 +151,11 @@ parameters:
     type: boolean
     default: false
 
+  - name: preSubmitRecovery
+    displayName: 'cleanup only — reviewed recovery when attach-and-inspect ended before guest submission and the inspect Run Command never existed. Requires CopyStatus=InspectOnly, limsAppMigGuestSubmitted=false, command NotFound, and this run holding the destination-VM lock. Default false. NotFound alone remains indeterminate.'
+    type: boolean
+    default: false
+
 variables:
   - name: controlPlaneScriptPath
     value: 'operations/compute/lims-app-data-disk-migration/Invoke-LimsAppDataDiskMigration.ps1'
@@ -221,6 +228,7 @@ jobs:
           LIMS_APP_MIG_RUN_ID: $(effectiveMigrationRunId)
           LIMS_APP_MIG_CAPTURE_MODE: ${{ parameters.captureMode }}
           LIMS_APP_MIG_DELETE_SNAPSHOT: '${{ parameters.deleteSnapshot }}'
+          LIMS_APP_MIG_PRE_SUBMIT_RECOVERY: '${{ parameters.preSubmitRecovery }}'
           LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
 
       - ${{ if eq(parameters.action, 'attach-and-inspect') }}:
@@ -241,6 +249,21 @@ jobs:
               MAPPING_SCRIPT_PATH: $(mappingScriptPath)
               SAFETY_SCRIPT_PATH: $(safetyScriptPath)
               GUEST_COPY_SCRIPT_PATH: $(guestCopyScriptPath)
+
+          - task: AzureCLI@2
+            displayName: 'attach-and-inspect: record guest submission before creating the Run Command'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: pscore
+              scriptLocation: scriptPath
+              scriptPath: $(controlPlaneScriptPath)
+            env:
+              LIMS_APP_MIG_ACTION: attach-and-inspect
+              LIMS_APP_MIG_ENVIRONMENT: ${{ parameters.environment }}
+              LIMS_APP_MIG_RUN_ID: $(effectiveMigrationRunId)
+              LIMS_APP_MIG_CAPTURE_MODE: ${{ parameters.captureMode }}
+              LIMS_APP_MIG_MARK_GUEST_SUBMITTED: 'true'
+              LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
 
           - task: AzureCLI@2
             displayName: 'attach-and-inspect: submit read-only guest inspect script via Managed Run Command and wait for a terminal execution state'
@@ -395,7 +418,7 @@ jobs:
                   JbossRunnerPassword=$(jbossRunnerPassword)
                   AzureFilesAccessKey=$(azureFilesAccessKey)
 
-      - ${{ if or(eq(parameters.action, 'attach-and-inspect'), eq(parameters.action, 'stage'), eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
+      - ${{ if or(eq(parameters.action, 'stage'), eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
           - task: AzureCLI@2
             displayName: 'Delete the ad hoc Managed Run Command resource unless its result is indeterminate (best effort, always runs)'
             condition: always()

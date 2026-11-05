@@ -62,7 +62,10 @@ param(
 
     [Parameter(Mandatory = $false)]
     [ValidateSet('', 'Pending', 'Succeeded', 'Failed', 'InspectOnly')]
-    [string] $CopyStatus = ''
+    [string] $CopyStatus = '',
+
+    [Parameter(Mandatory = $false)]
+    [bool] $PreSubmitRecovery = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -639,6 +642,113 @@ function Remove-AzResourceTagsAdapter {
     return Invoke-AzCliAdapter -Arguments $arguments
 }
 
+function Set-AzVmTagsIfMatchAdapter {
+    <#
+        Atomic destination-VM tag write. If-Match is required; disk
+        create-or-update is not exclusive and is not used as a lock.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $ResourceId,
+        [Parameter(Mandatory = $true)] [string] $IfMatch,
+        [Parameter(Mandatory = $true)] [hashtable] $Tags
+    )
+    $body = (@{ tags = $Tags } | ConvertTo-Json -Compress -Depth 5)
+    return Invoke-AzCliLookupAdapter -Arguments @(
+        'rest',
+        '--method', 'patch',
+        '--uri', ($ResourceId + '?api-version=2024-07-01'),
+        '--headers', "If-Match=$IfMatch",
+        '--body', $body,
+        '--output', 'json'
+    )
+}
+
+function Remove-AzRunCommandAdapter {
+    param(
+        [Parameter(Mandatory = $true)] [string] $SubscriptionId,
+        [Parameter(Mandatory = $true)] [string] $ResourceGroupName,
+        [Parameter(Mandatory = $true)] [string] $VmName,
+        [Parameter(Mandatory = $true)] [string] $RunCommandName
+    )
+    return Invoke-AzCliAdapter -Arguments @(
+        'vm', 'run-command', 'delete',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--vm-name', $VmName,
+        '--name', $RunCommandName,
+        '--yes'
+    )
+}
+
+function ConvertTo-TagHashtable {
+    param([Parameter(Mandatory = $false)] [AllowNull()] $Tags)
+
+    $hash = @{}
+    if ($null -eq $Tags) { return $hash }
+    if ($Tags -is [hashtable]) {
+        foreach ($key in $Tags.Keys) {
+            $hash[[string]$key] = [string]$Tags[$key]
+        }
+        return $hash
+    }
+    foreach ($property in @($Tags.PSObject.Properties)) {
+        $hash[[string]$property.Name] = [string]$property.Value
+    }
+    return $hash
+}
+
+function Get-ResourceEtag {
+    param([Parameter(Mandatory = $false)] [AllowNull()] $Resource)
+
+    if ($null -eq $Resource) { return '' }
+    foreach ($name in @('etag', 'Etag', 'eTag')) {
+        $property = $Resource.PSObject.Properties[$name]
+        if ($property -and -not [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+            return [string]$property.Value
+        }
+    }
+    return ''
+}
+
+function Test-LimsAppMigEnvFlag {
+    param([Parameter(Mandatory = $true)] [string] $Name)
+    $value = [Environment]::GetEnvironmentVariable($Name)
+    if ([string]::IsNullOrWhiteSpace($value)) { return $false }
+    return ($value -eq 'true' -or $value -eq 'True' -or $value -eq '1')
+}
+
+function Invoke-LimsAppDataDiskMigrationAcquireEnvironmentLock {
+    param(
+        [Parameter(Mandatory = $true)] $Checks,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [ValidateSet('Stage', 'AttachAndInspect')] [string] $LockPurpose,
+        [Parameter(Mandatory = $true)] $TagKeys,
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $CopyStatus = ''
+    )
+
+    $etag = Get-ResourceEtag -Resource $Checks.DestinationVm
+    if ([string]::IsNullOrWhiteSpace($etag)) {
+        Assert-LimsAppMigControlFailure "Destination VM '$($Checks.DestinationVmId)' has no etag. Refusing to acquire the environment lock without If-Match."
+    }
+    $owner = Get-VmTagValue -Vm $Checks.DestinationVm -Key $TagKeys.RunId
+    $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose $LockPurpose
+    if (-not $lockDecision.Allowed) {
+        Assert-LimsAppMigControlFailure $lockDecision.Reason
+    }
+
+    $merged = ConvertTo-TagHashtable -Tags $Checks.DestinationVm.tags
+    $merged[$TagKeys.RunId] = $MigrationRunId
+    $merged[$TagKeys.GuestSubmitted] = 'false'
+    $merged[$TagKeys.Phase] = 'LockHeld'
+    if ($CopyStatus) { $merged[$TagKeys.CopyStatus] = $CopyStatus }
+    Write-OperatorLog "Acquiring the destination-VM environment lock for run '$MigrationRunId' with If-Match (disk create is not exclusive)."
+    $apply = Set-AzVmTagsIfMatchAdapter -ResourceId $Checks.DestinationVmId -IfMatch $etag -Tags $merged
+    $applyDecision = Get-AtomicLockApplyDecision -Classification $apply.Classification
+    if (-not $applyDecision.Allowed) {
+        Assert-LimsAppMigControlFailure $applyDecision.Reason
+    }
+}
+
 # =============================================================================
 # ORCHESTRATION
 # =============================================================================
@@ -1019,6 +1129,8 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
         Assert-LimsAppMigControlFailure "Destination ARM uniqueId '$($checks.DestinationDiskUniqueId)' does not match the attested guest UniqueId '$($Environment.DestinationAttestedGuestUniqueId)'."
     }
 
+    Invoke-LimsAppDataDiskMigrationAcquireEnvironmentLock -Checks $checks -MigrationRunId $MigrationRunId -LockPurpose $LockPurpose -TagKeys $tagKeys -CopyStatus $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
+
     $tempLookup = Get-AzDiskLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName
     Assert-LookupFoundOrGone -Lookup $tempLookup -Role 'Temporary disk'
 
@@ -1052,7 +1164,7 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
             $snapshot = New-AzIncrementalSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName -SourceDiskId $checks.SourceDiskId -Location $checks.Location -DiskEncryptionSetId $checks.DiskEncryptionSetId
         }
 
-        Write-OperatorLog "Creating temporary disk '$($names.TemporaryDiskName)' from snapshot '$($snapshot.id)' (this create is the per-environment lock)."
+        Write-OperatorLog "Creating temporary disk '$($names.TemporaryDiskName)' from snapshot '$($snapshot.id)' after the destination-VM lock is held."
         $createResult = New-AzDiskFromSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName -SnapshotId ([string]$snapshot.id) -Location $checks.Location -Zone $checks.Zone -Tags @{
             limsAppMigLockRunId  = $MigrationRunId
             limsAppMigSnapshotId = [string]$snapshot.id
@@ -1181,6 +1293,30 @@ function Invoke-LimsAppDataDiskMigrationStage {
     return Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach -Environment $Environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -LockPurpose 'Stage' -Phase 'GuestPending' -CopyStatus $effectiveCopyStatus -OperatorTitle 'STAGE (Azure)'
 }
 
+function Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted {
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId
+    )
+
+    $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
+    if (-not $runIdCheck.Accepted) {
+        Assert-LimsAppMigControlFailure $runIdCheck.Reason
+    }
+
+    $destinationVm = Get-AzVmAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName
+    Assert-VmIdentityMatchesMapping -Vm $destinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
+    $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
+    $owner = Get-VmTagValue -Vm $destinationVm -Key $tagKeys.RunId
+    if ($owner -ne $MigrationRunId) {
+        Assert-LimsAppMigControlFailure "Refusing to record guest submission because destination lock run '$owner' is not this run '$MigrationRunId'."
+    }
+    Set-AzResourceTagsMergeAdapter -ResourceId ([string]$destinationVm.id) -Tags @{
+        $tagKeys.GuestSubmitted = 'true'
+    }
+    Write-OperatorLog "Recorded guest submission for run '$MigrationRunId' on '$($destinationVm.id)' before creating the Run Command."
+}
+
 function Invoke-LimsAppDataDiskMigrationRecordCopyStatus {
     param(
         [Parameter(Mandatory = $true)] $Environment,
@@ -1204,16 +1340,13 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
     param(
         [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] [string] $MigrationRunId,
-        [Parameter(Mandatory = $true)] [bool] $DeleteSnapshot
+        [Parameter(Mandatory = $true)] [bool] $DeleteSnapshot,
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
     )
 
     $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
     if (-not $runIdCheck.Accepted) {
         Assert-LimsAppMigControlFailure $runIdCheck.Reason
-    }
-    $gate = Test-LimsAppMigStageCleanupAllowed -Environment $Environment
-    if (-not $gate.Allowed) {
-        Assert-LimsAppMigControlFailure $gate.Reason
     }
 
     $names = Get-MigrationRunResourceNames -Environment $Environment -MigrationRunId $MigrationRunId
@@ -1224,11 +1357,24 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
     $recordedRunId = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.RunId
     $recordedTempDiskId = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.TempDiskId
     $recordedSnapshotId = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.SnapshotId
+    $recordedCopyStatus = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.CopyStatus
+    $recordedGuestSubmitted = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.GuestSubmitted
 
     $commandLookup = Get-AzRunCommandLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -RunCommandName $guestCommandName
     $commandDecision = Get-GuestCommandCleanupDecision -LookupClassification $commandLookup.Classification -ExecutionState (Get-RunCommandExecutionState -Resource $commandLookup.Resource)
-    if (-not $commandDecision.Allowed) {
+    $preSubmitDecision = Get-PreSubmitRecoveryDecision -Requested $PreSubmitRecovery -GuestSubmittedTag $recordedGuestSubmitted -LookupClassification $commandLookup.Classification -LockOwnerRunId $recordedRunId -ThisRunId $MigrationRunId -CopyStatusTag $recordedCopyStatus
+    if (-not $commandDecision.Allowed -and -not $preSubmitDecision.Allowed) {
+        if ($PreSubmitRecovery) {
+            Assert-LimsAppMigControlFailure $preSubmitDecision.Reason
+        }
         Assert-LimsAppMigControlFailure $commandDecision.Reason
+    }
+
+    if (-not $preSubmitDecision.Allowed) {
+        $gate = Test-LimsAppMigStageCleanupAllowed -Environment $Environment
+        if (-not $gate.Allowed) {
+            Assert-LimsAppMigControlFailure $gate.Reason
+        }
     }
 
     $tempLookup = Get-AzDiskLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName
@@ -1250,7 +1396,10 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
             Assert-LimsAppMigControlFailure $lockDecision.Reason
         }
         if ([string]::IsNullOrWhiteSpace($recordedTempDiskId)) {
-            Assert-LimsAppMigControlFailure "No recorded temporary disk resource ID for run '$MigrationRunId'. Cleanup will not delete by name alone. Evidence needed: destination VM tag limsAppMigTempDiskId matching this disk's ID."
+            if (-not ($preSubmitDecision.Allowed -and $owner -eq $MigrationRunId)) {
+                Assert-LimsAppMigControlFailure "No recorded temporary disk resource ID for run '$MigrationRunId'. Cleanup will not delete by name alone. Evidence needed: destination VM tag limsAppMigTempDiskId matching this disk's ID."
+            }
+            $recordedTempDiskId = [string]$tempDisk.id
         }
         if ($snapshotLookup.Classification -ne 'Found') {
             Assert-LimsAppMigControlFailure "Cannot prove temporary-disk -> snapshot -> source lineage because snapshot lookup is '$($snapshotLookup.Classification)'. Cleanup retains the temporary disk."
@@ -1284,7 +1433,7 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         Remove-AzDiskAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName
     }
     else {
-        Write-Output "Temporary disk '$($names.TemporaryDiskName)' confirmed NotFound; lock is already released."
+        Write-Output "Temporary disk '$($names.TemporaryDiskName)' confirmed NotFound; destination-VM lock will be released after the same ownership checks."
     }
 
     $snapshotDeleted = $false
@@ -1315,11 +1464,16 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         }
     }
 
+    if ($commandLookup.Classification -eq 'Found') {
+        Write-Output "Deleting inspect/guest Run Command '$guestCommandName' after temporary-disk cleanup succeeded."
+        Remove-AzRunCommandAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -RunCommandName $guestCommandName
+    }
+
     if ([string]::IsNullOrWhiteSpace($recordedRunId) -or $recordedRunId -eq $MigrationRunId) {
         Remove-AzResourceTagsAdapter -ResourceId $checks.DestinationVmId -TagKeys @(
             $tagKeys.RunId, $tagKeys.SnapshotId, $tagKeys.TempDiskId, $tagKeys.TempDiskUniqueId,
             $tagKeys.DestDiskUniqueId, $tagKeys.CaptureMode, $tagKeys.CopyStatus,
-            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.Phase
+            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.GuestSubmitted, $tagKeys.Phase
         )
         # limsAppMigCopyCompleted is retained so configure-app can prove
         # the mapped A: copy after the temporary-disk lock is released.
@@ -1405,7 +1559,8 @@ function Invoke-LimsAppDataDiskMigration {
         [Parameter(Mandatory = $false)] [string] $MigrationRunId = '',
         [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
         [Parameter(Mandatory = $false)] [bool] $DeleteSnapshot = $false,
-        [Parameter(Mandatory = $false)] [string] $CopyStatus = ''
+        [Parameter(Mandatory = $false)] [string] $CopyStatus = '',
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
     )
 
     if ($env:LIMS_APP_MIG_ACTION) { $Action = $env:LIMS_APP_MIG_ACTION }
@@ -1426,6 +1581,9 @@ function Invoke-LimsAppDataDiskMigration {
             $DeleteSnapshot = $false
         }
     }
+    if (Test-LimsAppMigEnvFlag -Name 'LIMS_APP_MIG_PRE_SUBMIT_RECOVERY') {
+        $PreSubmitRecovery = $true
+    }
 
     $environment = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName $EnvironmentName
     Assert-EnvironmentEnabledAndComplete -Environment $environment
@@ -1444,6 +1602,9 @@ function Invoke-LimsAppDataDiskMigration {
             return Invoke-LimsAppDataDiskMigrationPlan -Environment $environment
         }
         'attach-and-inspect' {
+            if (Test-LimsAppMigEnvFlag -Name 'LIMS_APP_MIG_MARK_GUEST_SUBMITTED') {
+                return Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted -Environment $environment -MigrationRunId $MigrationRunId
+            }
             return Invoke-LimsAppDataDiskMigrationAttachAndInspect -Environment $environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode
         }
         'stage' {
@@ -1453,7 +1614,7 @@ function Invoke-LimsAppDataDiskMigration {
             return Invoke-LimsAppDataDiskMigrationStage -Environment $environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -CopyStatus $CopyStatus
         }
         'cleanup' {
-            return Invoke-LimsAppDataDiskMigrationCleanup -Environment $environment -MigrationRunId $MigrationRunId -DeleteSnapshot $DeleteSnapshot
+            return Invoke-LimsAppDataDiskMigrationCleanup -Environment $environment -MigrationRunId $MigrationRunId -DeleteSnapshot $DeleteSnapshot -PreSubmitRecovery $PreSubmitRecovery
         }
         'configure-app' {
             return Invoke-LimsAppDataDiskMigrationConfigure -Environment $environment -MigrationRunId $MigrationRunId -Phase 'Register'
@@ -1480,15 +1641,16 @@ function Invoke-LimsAppDataDiskMigrationEntry {
         [Parameter(Mandatory = $false)] [string] $MigrationRunId = '',
         [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
         [Parameter(Mandatory = $false)] [bool] $DeleteSnapshot = $false,
-        [Parameter(Mandatory = $false)] [string] $CopyStatus = ''
+        [Parameter(Mandatory = $false)] [string] $CopyStatus = '',
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
     )
 
-    Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus | Out-Null
+    Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery | Out-Null
 }
 
 if ($env:LIMS_APP_MIG_CONTROL_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppDataDiskMigrationEntry -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus
+        Invoke-LimsAppDataDiskMigrationEntry -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery
         exit 0
     }
     catch {
