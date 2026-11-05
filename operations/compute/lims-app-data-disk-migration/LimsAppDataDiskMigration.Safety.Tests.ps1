@@ -69,6 +69,12 @@ Describe 'Resolve-LimsAppMigPipelineRunId' {
         $result.RunId | Should -Be '77'
     }
 
+    It 'uses the current Build.BuildId for attach-and-inspect when none is supplied' {
+        $result = Resolve-LimsAppMigPipelineRunId -Action 'attach-and-inspect' -SuppliedRunId '' -BuildId '81'
+        $result.Accepted | Should -Be $true
+        $result.RunId | Should -Be '81'
+    }
+
     It 'uses the current Build.BuildId for configure-app and activate-app when none is supplied' {
         $configure = Resolve-LimsAppMigPipelineRunId -Action 'configure-app' -SuppliedRunId '' -BuildId '88'
         $configure.Accepted | Should -Be $true
@@ -109,6 +115,23 @@ Describe 'Get-MigrationLockAcquireDecision' {
         $concurrent.Reason | Should -Match 'concurrent'
         $concurrentCleanup = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '11' -Purpose 'Cleanup'
         $concurrentCleanup.Allowed | Should -Be $false
+        $sameIdInspect = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '10' -Purpose 'AttachAndInspect'
+        $sameIdInspect.Allowed | Should -Be $false
+        $sameIdInspect.Reason | Should -Match 'same run ID'
+        $inspectVsStage = Get-MigrationLockAcquireDecision -ExistingLockRunId '10' -ThisRunId '12' -Purpose 'AttachAndInspect'
+        $inspectVsStage.Allowed | Should -Be $false
+        $inspectVsStage.Reason | Should -Match 'concurrent'
+    }
+}
+
+Describe 'Test-CollectInventoryOnlyFlag' {
+    It 'accepts Run Command true/1 and rejects empty or false' {
+        (Test-CollectInventoryOnlyFlag -Value 'true') | Should -Be $true
+        (Test-CollectInventoryOnlyFlag -Value '1') | Should -Be $true
+        (Test-CollectInventoryOnlyFlag -Value $true) | Should -Be $true
+        (Test-CollectInventoryOnlyFlag -Value 'false') | Should -Be $false
+        (Test-CollectInventoryOnlyFlag -Value '') | Should -Be $false
+        (Test-CollectInventoryOnlyFlag -Value $null) | Should -Be $false
     }
 }
 

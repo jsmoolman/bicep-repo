@@ -138,6 +138,8 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         Mock Get-PathTargetAdapter { return '' }
         Mock Get-ChildEntriesAdapter { return @() }
         Mock Invoke-RobocopyAdapter { return 1 }
+        $script:InspectLines = @()
+        Mock Write-GuestInspectLine { param($Message) $script:InspectLines += $Message }
         $script:CopyParams = @{
             EnvironmentName                   = 'dev'
             MigrationRunId                    = '10'
@@ -203,6 +205,49 @@ Describe 'Invoke-LimsAppDataDiskContentsCopy (orchestration, mocked adapters)' {
         $result.DestinationDisk.UniqueId | Should -Be $script:destUid
         $result.TemporaryDisk.Number | Should -Be 2
         $result.TemporaryDisk.UniqueId | Should -Be $script:tempUid
+        ($script:InspectLines -join '|') | Should -Match '60022480D1B07E6ACD98417F86591F4B'
+        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : PASSED'
+        ($script:InspectLines -join '|') | Should -Match $script:tempDiskId
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+        Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
+    }
+
+    It 'prints the inspect report and stops when the snapshot-disk UniqueId is missing' {
+        $script:CopyParams.ExpectedTemporaryDiskUniqueId = ''
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly } | Should -Throw -ExpectedMessage '*no attested or captured UniqueId*'
+        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : FAILED'
+        ($script:InspectLines -join '|') | Should -Match $script:tempDiskId
+        ($script:InspectLines -join '|') | Should -Match 'Windows disk inventory'
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+        Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
+    }
+
+    It 'prints the inspect report and stops when the guest UniqueId does not match' {
+        $script:CopyParams.ExpectedTemporaryDiskUniqueId = 'SOMEOTHERUID'
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly } | Should -Throw -ExpectedMessage '*UniqueId*'
+        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : FAILED'
+        ($script:InspectLines -join '|') | Should -Match 'SOMEOTHERUID'
+        ($script:InspectLines -join '|') | Should -Match 'Number=2;UniqueId=''TEMPDISKUID'''
+        Should -Invoke Invoke-RobocopyAdapter -Times 0
+        Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
+        Should -Invoke Set-PartitionDriveLetterAdapter -Times 0
+    }
+
+    It 'prints expected Azure IDs on a wrong guest target and never mutates disks or copies' {
+        Mock Get-ImdsComputeMetadataAdapter {
+            return [pscustomobject]@{
+                subscriptionId    = $script:Dev.SubscriptionId
+                resourceGroupName = $script:Dev.ResourceGroupName
+                name              = 'vm-lims-dev-westeu-001'
+                storageProfile    = $script:imds.storageProfile
+            }
+        }
+        { Invoke-LimsAppDataDiskContentsCopy @script:CopyParams -CollectInventoryOnly } | Should -Throw -ExpectedMessage '*IMDS VM name*'
+        ($script:InspectLines -join '|') | Should -Match 'Identity match                 : FAILED'
+        ($script:InspectLines -join '|') | Should -Match $script:tempDiskId
+        ($script:InspectLines -join '|') | Should -Match 'LUN      : 1'
         Should -Invoke Invoke-RobocopyAdapter -Times 0
         Should -Invoke Set-DiskOnlineWritableAdapter -Times 0
         Should -Invoke Set-PartitionDriveLetterAdapter -Times 0

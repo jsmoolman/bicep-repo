@@ -72,7 +72,7 @@ function Resolve-LimsAppMigPipelineRunId {
 
     if ($Action -eq 'cleanup') {
         if ([string]::IsNullOrEmpty($supplied)) {
-            return [pscustomobject]@{ Accepted = $false; RunId = ''; Reason = 'Cleanup requires migrationRunId set to the numeric Build.BuildId of the stage run that created the temporary disk.' }
+            return [pscustomobject]@{ Accepted = $false; RunId = ''; Reason = 'Cleanup requires migrationRunId set to the numeric Build.BuildId of the stage or attach-and-inspect run that created the temporary disk.' }
         }
         $check = Test-LimsAppMigNumericBuildId -Value $supplied
         if (-not $check.Accepted) {
@@ -81,7 +81,7 @@ function Resolve-LimsAppMigPipelineRunId {
         return [pscustomobject]@{ Accepted = $true; RunId = $supplied; Reason = $null }
     }
 
-    if ($Action -eq 'stage' -or $Action -eq 'configure-app' -or $Action -eq 'activate-app') {
+    if ($Action -eq 'stage' -or $Action -eq 'attach-and-inspect' -or $Action -eq 'configure-app' -or $Action -eq 'activate-app') {
         $candidate = $supplied
         if ([string]::IsNullOrEmpty($candidate)) { $candidate = $build }
         $check = Test-LimsAppMigNumericBuildId -Value $candidate
@@ -160,27 +160,29 @@ function Get-AzureCliErrorClassification {
 
 function Get-MigrationLockAcquireDecision {
     <#
-        Per-environment lock held across stage, guest submission/execution,
-        and cleanup. Stage may acquire only when the lock is empty.
-        Overlapping stage attempts are refused even with the same run ID.
-        Cleanup of the holding run is allowed so that run can recover after
-        the guest command is terminal. The run ID remains the ownership key.
+        Per-environment lock held across stage, attach-and-inspect, guest
+        submission/execution, and cleanup. Stage and attach-and-inspect
+        may acquire only when the lock is empty. Overlapping migration
+        attempts are refused even with the same run ID. Cleanup of the
+        holding run is allowed so that run can recover after the guest
+        command is Found and terminal. The run ID remains the ownership
+        key.
     #>
     param(
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExistingLockRunId,
         [Parameter(Mandatory = $true)] [string] $ThisRunId,
-        [Parameter(Mandatory = $false)] [ValidateSet('Stage', 'Cleanup')] [string] $Purpose = 'Stage'
+        [Parameter(Mandatory = $false)] [ValidateSet('Stage', 'AttachAndInspect', 'Cleanup')] [string] $Purpose = 'Stage'
     )
 
     if ([string]::IsNullOrWhiteSpace($ExistingLockRunId)) {
         return [pscustomobject]@{ Allowed = $true; Resume = $false; Reason = $null }
     }
     if ($ExistingLockRunId -eq $ThisRunId) {
-        if ($Purpose -eq 'Stage') {
+        if ($Purpose -eq 'Stage' -or $Purpose -eq 'AttachAndInspect') {
             return [pscustomobject]@{
                 Allowed = $false
                 Resume  = $false
-                Reason  = "Environment lock is already held by migration run '$ThisRunId'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt to finish, then run cleanup after the guest command is terminal."
+                Reason  = "Environment lock is already held by migration run '$ThisRunId'. Overlapping migration attempts are refused even with the same run ID. Wait for the in-flight attempt to finish, then run cleanup after the guest command is Found and terminal."
             }
         }
         return [pscustomobject]@{ Allowed = $true; Resume = $true; Reason = $null }
@@ -188,7 +190,7 @@ function Get-MigrationLockAcquireDecision {
     return [pscustomobject]@{
         Allowed = $false
         Resume  = $false
-        Reason  = "Environment lock is held by migration run '$ExistingLockRunId'. Refusing concurrent run '$ThisRunId'. Run cleanup for the holding run first, after its guest command is terminal."
+        Reason  = "Environment lock is held by migration run '$ExistingLockRunId'. Refusing concurrent run '$ThisRunId'. Run cleanup for the holding run first, after its guest command is Found and terminal."
     }
 }
 
@@ -841,6 +843,16 @@ function Get-ScheduledTaskSamAccountName {
     if ($trimmed -match '^[.]\\(.+)$') { return $Matches[1] }
     if ($trimmed -match '^[^\\]+\\(.+)$') { return $Matches[1] }
     return $trimmed
+}
+
+function Test-CollectInventoryOnlyFlag {
+    param([Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] $Value)
+
+    if ($Value -is [bool]) { return [bool]$Value }
+    if ($null -eq $Value) { return $false }
+    $text = [string]$Value
+    if ([string]::IsNullOrWhiteSpace($text)) { return $false }
+    return ($text.Trim() -eq 'true' -or $text.Trim() -eq 'True' -or $text.Trim() -eq '1' -or $text.Trim() -eq 'yes')
 }
 
 function Test-LimsAppMigStageCleanupAllowed {

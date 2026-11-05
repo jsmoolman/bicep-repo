@@ -14,14 +14,19 @@
     Set, and candidate temporary LUN. Fails closed if any identity,
     attachment, or encryption check differs from the mapping.
 
-    stage: re-runs every plan check, requires the operator to record
-    whether the capture is online or application writes were quiesced,
-    takes a destination-VM lock, creates an incremental snapshot of the
-    source disk, creates a temporary disk from that snapshot, and attaches
-    it only to the destination APP v2 VM at the validated unused LUN.
-    Records resource IDs on the destination VM as tags so a failed run can
-    be inspected or resumed. Guest Robocopy is a separate Managed Run
-    Command step in the pipeline, not this script.
+    attach-and-inspect: re-runs every plan check, requires the operator
+    to record whether the capture is online or application writes were
+    quiesced, takes the per-environment lock, snapshots only the mapped
+    source data disk, creates a temporary disk from that snapshot, and
+    attaches it only to APP v2 at the validated unused LUN. Does not
+    require the stage/cleanup reparse gates. Guest inspection is a
+    separate Managed Run Command step; this script leaves the disk
+    attached for review.
+
+    stage: same Azure snapshot/attach path as attach-and-inspect, then
+    the pipeline submits guest Robocopy. Stage remains blocked until both
+    Windows reparse validations are Passed. Guest Robocopy is a separate
+    Managed Run Command step in the pipeline, not this script.
 
     cleanup: detaches and deletes only the temporary disk created by the
     selected run, after verifying its resource ID and attachment. Snapshot
@@ -38,7 +43,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet('plan', 'stage', 'cleanup', 'configure-app', 'activate-app')]
+    [ValidateSet('plan', 'attach-and-inspect', 'stage', 'cleanup', 'configure-app', 'activate-app')]
     [string] $Action = 'plan',
 
     [Parameter(Mandatory = $false)]
@@ -56,7 +61,7 @@ param(
     [bool] $DeleteSnapshot = $false,
 
     [Parameter(Mandatory = $false)]
-    [ValidateSet('', 'Pending', 'Succeeded', 'Failed')]
+    [ValidateSet('', 'Pending', 'Succeeded', 'Failed', 'InspectOnly')]
     [string] $CopyStatus = ''
 )
 
@@ -360,7 +365,7 @@ function Get-CaptureModeDecision {
     }
     return [pscustomobject]@{
         Accepted = $false
-        Reason   = "CaptureMode must be recorded as 'online' or 'writes-quiesced' before stage. '$CaptureMode' is not an approved capture record."
+        Reason   = "CaptureMode must be recorded as 'online' or 'writes-quiesced' before stage or attach-and-inspect. '$CaptureMode' is not an approved capture record."
     }
 }
 
@@ -982,21 +987,20 @@ function Invoke-LimsAppDataDiskMigrationPlan {
     return $checks
 }
 
-function Invoke-LimsAppDataDiskMigrationStage {
+function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
     param(
         [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] [string] $MigrationRunId,
         [Parameter(Mandatory = $true)] [string] $CaptureMode,
-        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $CopyStatus
+        [Parameter(Mandatory = $true)] [ValidateSet('Stage', 'AttachAndInspect')] [string] $LockPurpose,
+        [Parameter(Mandatory = $true)] [string] $Phase,
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $CopyStatus,
+        [Parameter(Mandatory = $true)] [string] $OperatorTitle
     )
 
     $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
     if (-not $runIdCheck.Accepted) {
         Assert-LimsAppMigControlFailure $runIdCheck.Reason
-    }
-    $gate = Test-LimsAppMigStageCleanupAllowed -Environment $Environment
-    if (-not $gate.Allowed) {
-        Assert-LimsAppMigControlFailure $gate.Reason
     }
     $captureDecision = Get-CaptureModeDecision -CaptureMode $CaptureMode
     if (-not $captureDecision.Accepted) {
@@ -1027,11 +1031,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
         if ([string]::IsNullOrWhiteSpace($owner)) {
             Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' exists without limsAppMigLockRunId. Refusing to reuse or steal the environment lock. Evidence needed: lock-owner tag set at create."
         }
-        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose 'Stage'
+        $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose $LockPurpose
         if (-not $lockDecision.Allowed) {
             Assert-LimsAppMigControlFailure $lockDecision.Reason
         }
-        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' already holds the environment lock for run '$owner'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
+        Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' already holds the environment lock for run '$owner'. Overlapping migration attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
     }
     else {
         $snapshotLookup = Get-AzSnapshotLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName
@@ -1041,14 +1045,14 @@ function Invoke-LimsAppDataDiskMigrationStage {
             if (-not (Test-NormalizedResourceIdEquals -Left (Get-CreationSourceId -Resource $snapshot) -Right $checks.SourceDiskId)) {
                 Assert-LimsAppMigControlFailure "Existing snapshot '$($snapshot.id)' was created from '$(Get-CreationSourceId -Resource $snapshot)', not the original source disk '$($checks.SourceDiskId)'."
             }
-            Write-Output "Reusing incremental snapshot '$($snapshot.id)' from this run."
+            Write-OperatorLog "Reusing incremental snapshot '$($snapshot.id)' from this run."
         }
         else {
-            Write-Output "Creating incremental snapshot '$($names.SnapshotName)' of source disk '$($checks.SourceDiskId)' (capture mode: $CaptureMode). Legacy APP is not modified."
+            Write-OperatorLog "Creating incremental snapshot '$($names.SnapshotName)' of source disk '$($checks.SourceDiskId)' (capture mode: $CaptureMode). Legacy APP is not modified."
             $snapshot = New-AzIncrementalSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName -SourceDiskId $checks.SourceDiskId -Location $checks.Location -DiskEncryptionSetId $checks.DiskEncryptionSetId
         }
 
-        Write-Output "Creating temporary disk '$($names.TemporaryDiskName)' from snapshot '$($snapshot.id)' (this create is the per-environment lock)."
+        Write-OperatorLog "Creating temporary disk '$($names.TemporaryDiskName)' from snapshot '$($snapshot.id)' (this create is the per-environment lock)."
         $createResult = New-AzDiskFromSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName -SnapshotId ([string]$snapshot.id) -Location $checks.Location -Zone $checks.Zone -Tags @{
             limsAppMigLockRunId  = $MigrationRunId
             limsAppMigSnapshotId = [string]$snapshot.id
@@ -1064,11 +1068,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
             if ([string]::IsNullOrWhiteSpace($owner)) {
                 Assert-LimsAppMigControlFailure "Temporary disk '$($tempDisk.id)' exists without limsAppMigLockRunId after a create conflict. Refusing to steal the lock."
             }
-            $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose 'Stage'
+            $lockDecision = Get-MigrationLockAcquireDecision -ExistingLockRunId $owner -ThisRunId $MigrationRunId -Purpose $LockPurpose
             if (-not $lockDecision.Allowed) {
                 Assert-LimsAppMigControlFailure $lockDecision.Reason
             }
-            Assert-LimsAppMigControlFailure "Temporary disk create collided with '$($tempDisk.id)' owned by run '$owner'. Overlapping stage attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
+            Assert-LimsAppMigControlFailure "Temporary disk create collided with '$($tempDisk.id)' owned by run '$owner'. Overlapping migration attempts are refused even with the same run ID. Wait for the in-flight attempt, then run cleanup after the guest command is Found and terminal."
         }
         elseif ($createResult.Classification -eq 'Found') {
             $tempDisk = $createResult.Resource
@@ -1095,10 +1099,11 @@ function Invoke-LimsAppDataDiskMigrationStage {
         }
     }
     if (-not $attachedAlready) {
-        Write-Output "Attaching temporary disk '$($names.TemporaryDiskName)' to '$($Environment.DestinationVmName)' at LUN $($checks.CandidateTemporaryLun) only."
+        Write-OperatorLog "Attaching temporary disk '$($names.TemporaryDiskName)' to '$($Environment.DestinationVmName)' at LUN $($checks.CandidateTemporaryLun) only. Legacy APP and both SQL VMs are outside every VM write."
         Add-AzVmDataDiskAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -DiskName $names.TemporaryDiskName -Lun ([int]$checks.CandidateTemporaryLun)
     }
 
+    $effectiveCopyStatus = $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
     Set-AzResourceTagsMergeAdapter -ResourceId $checks.DestinationVmId -Tags @{
         $tagKeys.RunId            = $MigrationRunId
         $tagKeys.SnapshotId       = [string]$snapshot.id
@@ -1106,22 +1111,22 @@ function Invoke-LimsAppDataDiskMigrationStage {
         $tagKeys.TempDiskUniqueId = $tempUniqueId
         $tagKeys.DestDiskUniqueId = $checks.DestinationDiskUniqueId
         $tagKeys.CaptureMode      = $CaptureMode
-        $tagKeys.CopyStatus       = $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
+        $tagKeys.CopyStatus       = $effectiveCopyStatus
         $tagKeys.TemporaryLun     = [string]$checks.CandidateTemporaryLun
         $tagKeys.GuestCommand     = $guestCommandName
-        $tagKeys.Phase            = 'GuestPending'
+        $tagKeys.Phase            = $Phase
     }
 
-    Write-Output '===== LIMS APP data-disk migration: STAGE (Azure) ====='
-    Write-Output "Migration run ID            : $MigrationRunId"
-    Write-Output "Capture mode                : $CaptureMode"
-    Write-Output "Snapshot                    : $($snapshot.id)"
-    Write-Output "Temporary disk              : $($tempDisk.id)"
-    Write-Output "Attached to                 : $($checks.DestinationVmId) at LUN $($checks.CandidateTemporaryLun)"
-    Write-Output "Copy status                 : $(if ($CopyStatus) { $CopyStatus } else { 'Pending (guest copy is the next pipeline step)' })"
-    Write-Output 'Legacy APP VM/disk          : read-only (snapshot source only)'
-    Write-Output 'SQL VMs and Azure Files     : out of scope'
-    Write-Output '======================================================='
+    Write-OperatorLog "===== LIMS APP data-disk migration: $OperatorTitle ====="
+    Write-OperatorLog "Migration run ID            : $MigrationRunId"
+    Write-OperatorLog "Capture mode                : $CaptureMode"
+    Write-OperatorLog "Snapshot                    : $($snapshot.id)"
+    Write-OperatorLog "Temporary disk              : $($tempDisk.id)"
+    Write-OperatorLog "Attached to                 : $($checks.DestinationVmId) at LUN $($checks.CandidateTemporaryLun)"
+    Write-OperatorLog "Copy status                 : $effectiveCopyStatus"
+    Write-OperatorLog 'Legacy APP VM/disk          : read-only (snapshot source only)'
+    Write-OperatorLog 'SQL VMs and Azure Files     : out of scope'
+    Write-OperatorLog '======================================================='
 
     Write-PipelineVariable -Name 'limsAppMigSubscriptionId' -Value $Environment.SubscriptionId
     Write-PipelineVariable -Name 'limsAppMigResourceGroupName' -Value $Environment.ResourceGroupName
@@ -1144,8 +1149,36 @@ function Invoke-LimsAppDataDiskMigrationStage {
         TemporaryDiskId   = [string]$tempDisk.id
         TemporaryDiskName = $names.TemporaryDiskName
         TemporaryLun      = [int]$checks.CandidateTemporaryLun
+        Phase             = $Phase
         Resumed           = $false
     }
+}
+
+function Invoke-LimsAppDataDiskMigrationAttachAndInspect {
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [string] $CaptureMode
+    )
+
+    return Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach -Environment $Environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -LockPurpose 'AttachAndInspect' -Phase 'InspectAttached' -CopyStatus 'InspectOnly' -OperatorTitle 'ATTACH-AND-INSPECT (Azure)'
+}
+
+function Invoke-LimsAppDataDiskMigrationStage {
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [string] $CaptureMode,
+        [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $CopyStatus
+    )
+
+    $gate = Test-LimsAppMigStageCleanupAllowed -Environment $Environment
+    if (-not $gate.Allowed) {
+        Assert-LimsAppMigControlFailure $gate.Reason
+    }
+
+    $effectiveCopyStatus = $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
+    return Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach -Environment $Environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -LockPurpose 'Stage' -Phase 'GuestPending' -CopyStatus $effectiveCopyStatus -OperatorTitle 'STAGE (Azure)'
 }
 
 function Invoke-LimsAppDataDiskMigrationRecordCopyStatus {
@@ -1409,6 +1442,9 @@ function Invoke-LimsAppDataDiskMigration {
     switch ($Action) {
         'plan' {
             return Invoke-LimsAppDataDiskMigrationPlan -Environment $environment
+        }
+        'attach-and-inspect' {
+            return Invoke-LimsAppDataDiskMigrationAttachAndInspect -Environment $environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode
         }
         'stage' {
             if ($CopyStatus -eq 'Succeeded' -or $CopyStatus -eq 'Failed') {

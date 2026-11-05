@@ -10,6 +10,17 @@
 #       Disk Encryption Set, and candidate temporary LUN. Fails closed if
 #       any identity, attachment, or encryption check differs from the
 #       reviewed environment mapping.
+#     - `attach-and-inspect`: re-runs every plan check, requires
+#       captureMode `online` or `writes-quiesced`, snapshots only the
+#       mapped source data disk, creates a temporary disk from that
+#       snapshot, attaches it only to APP v2 at the validated unused LUN,
+#       then submits the guest copy script with CollectInventoryOnly.
+#       Guest inspection is read-only: it prints Azure ID / LUN / ARM
+#       UniqueId beside the Windows inventory, requires an unambiguous
+#       UniqueId match including A: = 60022480D1B07E6ACD98417F86591F4B,
+#       and leaves the disk attached. No Set-Disk, drive-letter change,
+#       init/format, Robocopy, or Azure Files access. Does not require
+#       the stage/cleanup reparse gates.
 #     - `stage`: re-runs every plan check, requires the operator to record
 #       whether this is an online capture or application writes were
 #       quiesced, creates an incremental snapshot of the source disk,
@@ -44,7 +55,8 @@
 #   independently re-verifies destination identity against that same
 #   mapping. Stage and cleanup stay blocked until both
 #   WindowsReparseValidationStatus and WindowsSymlinkValidationStatus
-#   are Passed in the mapping. The per-environment lock is held across
+#   are Passed in the mapping. attach-and-inspect does not require those
+#   gates. The per-environment lock is held across attach-and-inspect,
 #   stage, guest command submission/execution, and cleanup; overlapping
 #   attempts are refused even with the same migration run ID.
 #
@@ -102,11 +114,12 @@ parameters:
       - prd
 
   - name: action
-    displayName: Migration action. 'plan' (default) is read-only. 'stage' snapshots, attaches, and copies. 'cleanup' removes only that run's temporary disk. 'configure-app' registers APP v2 services after a completed copy. 'activate-app' is the separate startup-enablement check.
+    displayName: Migration action. 'plan' (default) is read-only. 'attach-and-inspect' snapshots, attaches to APP v2 LUN 1, and inspects read-only. 'stage' snapshots, attaches, and copies. 'cleanup' removes only that run's temporary disk. 'configure-app' registers APP v2 services after a completed copy. 'activate-app' is the separate startup-enablement check.
     type: string
     default: 'plan'
     values:
       - plan
+      - attach-and-inspect
       - stage
       - cleanup
       - configure-app
@@ -118,7 +131,7 @@ parameters:
     default: ''
 
   - name: captureMode
-    displayName: "stage only, REQUIRED — record whether this capture is 'online' (source still writable) or 'writes-quiesced' (application writes were stopped for the capture window). Ignored for plan and cleanup. 'unspecified' is rejected by stage."
+    displayName: "stage and attach-and-inspect, REQUIRED — record whether this capture is 'online' (source still writable) or 'writes-quiesced' (application writes were stopped for the capture window). Ignored for plan, cleanup, configure-app, and activate-app. 'unspecified' is rejected by stage and attach-and-inspect."
     type: string
     default: 'unspecified'
     values:
@@ -127,12 +140,12 @@ parameters:
       - writes-quiesced
 
   - name: migrationRunId
-    displayName: "stage — leave empty to use this Build.BuildId; pass the original Build.BuildId to resume an interrupted stage. cleanup — REQUIRED; the stage run that created the temporary disk. Ignored for plan."
+    displayName: "stage / attach-and-inspect — leave empty to use this Build.BuildId. Overlapping attempts with the same run ID are refused. cleanup — REQUIRED; the stage or attach-and-inspect Build.BuildId that created the temporary disk. Ignored for plan."
     type: string
     default: ''
 
   - name: deleteSnapshot
-    displayName: 'cleanup only — when true, also delete this run''s incremental snapshot after verifying its resource ID. Default false (retain). Ignored for plan and stage.'
+    displayName: 'cleanup only — when true, also delete this run''s incremental snapshot after verifying its resource ID. Default false (retain). Ignored for plan, attach-and-inspect, and stage.'
     type: boolean
     default: false
 
@@ -209,6 +222,55 @@ jobs:
           LIMS_APP_MIG_CAPTURE_MODE: ${{ parameters.captureMode }}
           LIMS_APP_MIG_DELETE_SNAPSHOT: '${{ parameters.deleteSnapshot }}'
           LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
+
+      - ${{ if eq(parameters.action, 'attach-and-inspect') }}:
+          - bash: |
+              set -euo pipefail
+              output="${AGENT_TEMPDIRECTORY}/lims-app-mig-inspect-${EFFECTIVE_MIGRATION_RUN_ID}.ps1"
+              bash .azuredevops/pipelines/scripts/prepare-lims-app-migration-guest-script.sh \
+                "${MAPPING_SCRIPT_PATH}" \
+                "${SAFETY_SCRIPT_PATH}" \
+                "${GUEST_COPY_SCRIPT_PATH}" \
+                "${output}"
+              echo "##vso[task.setvariable variable=guestScriptToSubmit]${output}"
+              echo "Prepared attach-and-inspect guest script at ${output}"
+            displayName: 'attach-and-inspect: concatenate reviewed mapping and safety functions into the guest inspect script'
+            env:
+              EFFECTIVE_MIGRATION_RUN_ID: $(effectiveMigrationRunId)
+              AGENT_TEMPDIRECTORY: $(Agent.TempDirectory)
+              MAPPING_SCRIPT_PATH: $(mappingScriptPath)
+              SAFETY_SCRIPT_PATH: $(safetyScriptPath)
+              GUEST_COPY_SCRIPT_PATH: $(guestCopyScriptPath)
+
+          - task: AzureCLI@2
+            displayName: 'attach-and-inspect: submit read-only guest inspect script via Managed Run Command and wait for a terminal execution state'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: scriptPath
+              scriptPath: '.azuredevops/pipelines/scripts/submit-and-wait-run-command.sh'
+            env:
+              DEV_SUBSCRIPTION_ID: $(limsAppMigSubscriptionId)
+              RESOURCE_GROUP: $(limsAppMigResourceGroupName)
+              VM_NAME: $(limsAppMigDestinationVmName)
+              SCRIPT_TO_SUBMIT: $(guestScriptToSubmit)
+              RUN_COMMAND_NAME: $(limsAppMigGuestCommandName)
+              GUEST_TIMEOUT_SECONDS: $(guestTimeoutSeconds)
+              POLL_DEADLINE_SECONDS: $(pollDeadlineSeconds)
+              STARTUP_MAX_RETRIES: $(startupMaxRetries)
+              STARTUP_RETRY_INTERVAL_SECONDS: $(startupRetryIntervalSeconds)
+              NORMAL_POLL_INTERVAL_SECONDS: $(normalPollIntervalSeconds)
+              RUN_COMMAND_PARAMETERS: |
+                EnvironmentName=$(limsAppMigEnvironmentName)
+                MigrationRunId=$(effectiveMigrationRunId)
+                ExpectedTemporaryLun=$(limsAppMigTemporaryLun)
+                ExpectedTemporaryDiskName=$(limsAppMigTemporaryDiskName)
+                ExpectedTemporaryDiskResourceId=$(limsAppMigTemporaryDiskId)
+                ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
+                ExpectedTemporaryDiskUniqueId=$(limsAppMigTemporaryDiskUniqueId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                CaptureMode=$(limsAppMigCaptureMode)
+                CollectInventoryOnly=true
 
       - ${{ if eq(parameters.action, 'stage') }}:
           - bash: |
@@ -333,7 +395,7 @@ jobs:
                   JbossRunnerPassword=$(jbossRunnerPassword)
                   AzureFilesAccessKey=$(azureFilesAccessKey)
 
-      - ${{ if or(eq(parameters.action, 'stage'), eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
+      - ${{ if or(eq(parameters.action, 'attach-and-inspect'), eq(parameters.action, 'stage'), eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
           - task: AzureCLI@2
             displayName: 'Delete the ad hoc Managed Run Command resource unless its result is indeterminate (best effort, always runs)'
             condition: always()
