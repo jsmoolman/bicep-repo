@@ -31,7 +31,11 @@
 #     - `cleanup`: detaches and deletes only the temporary disk created by
 #       the selected run, after verifying its resource ID and attachment.
 #       Snapshot deletion is opt-in (default retain). Never touches the
-#       original source disk or destination A:.
+#       original source disk or destination A:. Reviewed
+#       preCreateLockRecovery for run 139523 releases only that run's
+#       destination-VM lock after lock acquire and snapshot-command
+#       rejection, when snapshot, temporary disk, and Run Command are
+#       confirmed NotFound. Authorization/network lookups block.
 #     - `configure-app`: after a completed copy, registers .\jboss-runner,
 #       JBoss-8.0, Apache-2.4.57, shibd_Default, and the Azure Files
 #       startup task on APP v2 only. Services stay stopped; automatic
@@ -159,7 +163,12 @@ parameters:
     default: false
 
   - name: preSubmitRecovery
-    displayName: 'cleanup only — reviewed recovery when attach-and-inspect ended before guest submission and the inspect Run Command never existed. Requires CopyStatus=InspectOnly, limsAppMigAttemptState=Prepared, the exact token limsAppMigGuestSubmitted=false, command NotFound, and this run holding the destination-VM lock. Missing or unknown GuestSubmitted values block. Default false. NotFound alone remains indeterminate.'
+    displayName: 'cleanup only — reviewed recovery when attach-and-inspect ended before guest submission and the inspect Run Command never existed. Requires CopyStatus=InspectOnly, limsAppMigAttemptState=Prepared, the exact token limsAppMigGuestSubmitted=false, command NotFound, and this run holding the destination-VM lock. Missing or unknown GuestSubmitted values block. Default false. NotFound alone remains indeterminate. Do not use for the lock-acquired / snapshot-rejected case.'
+    type: boolean
+    default: false
+
+  - name: preCreateLockRecovery
+    displayName: "cleanup only — reviewed recovery for attach-and-inspect run 139523, which acquired the destination-VM lock and then failed before snapshot creation. Requires migrationRunId=139523, exact destination identity, Phase=LockHeld, no Prepared attempt, no recorded snapshot/temp-disk IDs, and confirmed NotFound for this run's snapshot, temporary disk, and Run Command. Authorization/network lookups block. Releases only this run's lock tags with If-Match. Default false. Mutually exclusive with preSubmitRecovery."
     type: boolean
     default: false
 
@@ -251,6 +260,7 @@ jobs:
           LIMS_APP_MIG_CAPTURE_MODE: ${{ parameters.captureMode }}
           LIMS_APP_MIG_DELETE_SNAPSHOT: '${{ parameters.deleteSnapshot }}'
           LIMS_APP_MIG_PRE_SUBMIT_RECOVERY: '${{ parameters.preSubmitRecovery }}'
+          LIMS_APP_MIG_PRE_CREATE_LOCK_RECOVERY: '${{ parameters.preCreateLockRecovery }}'
           LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
 
       - ${{ if eq(parameters.action, 'attach-and-inspect') }}:

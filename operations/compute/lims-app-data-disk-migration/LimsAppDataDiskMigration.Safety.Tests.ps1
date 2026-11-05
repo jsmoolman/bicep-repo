@@ -241,6 +241,83 @@ Describe 'Get-PreSubmitRecoveryDecision' {
     }
 }
 
+Describe 'Get-CustomerManagedEncryptionDecision and Azure CLI argument construction' {
+    BeforeAll {
+        $script:Des = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/RG-CORE-LIMS-DEV-WESTEU/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
+        $script:Cmk = 'EncryptionAtRestWithCustomerKey'
+    }
+
+    It 'accepts the verified customer-managed type and DES and rejects unsupported types' {
+        $ok = Get-CustomerManagedEncryptionDecision -SourceEncryptionType $script:Cmk -SourceDiskEncryptionSetId $script:Des -DestinationEncryptionType $script:Cmk -DestinationDiskEncryptionSetId $script:Des -ExpectedDiskEncryptionSetId $script:Des
+        $ok.Accepted | Should -Be $true
+        $ok.EncryptionType | Should -Be $script:Cmk
+        $ok.DiskEncryptionSetId | Should -Be $script:Des
+        $platform = Get-CustomerManagedEncryptionDecision -SourceEncryptionType 'EncryptionAtRestWithPlatformKey' -SourceDiskEncryptionSetId $script:Des -DestinationEncryptionType $script:Cmk -DestinationDiskEncryptionSetId $script:Des -ExpectedDiskEncryptionSetId $script:Des
+        $platform.Accepted | Should -Be $false
+        $platform.Reason | Should -Match 'unsupported or inconsistent'
+        $dual = Get-CustomerManagedEncryptionDecision -SourceEncryptionType 'EncryptionAtRestWithPlatformAndCustomerKeys' -SourceDiskEncryptionSetId $script:Des -DestinationEncryptionType 'EncryptionAtRestWithPlatformAndCustomerKeys' -DestinationDiskEncryptionSetId $script:Des -ExpectedDiskEncryptionSetId $script:Des
+        $dual.Accepted | Should -Be $false
+        $missing = Get-CustomerManagedEncryptionDecision -SourceEncryptionType '' -SourceDiskEncryptionSetId $script:Des -DestinationEncryptionType $script:Cmk -DestinationDiskEncryptionSetId $script:Des -ExpectedDiskEncryptionSetId $script:Des
+        $missing.Accepted | Should -Be $false
+        $mismatch = Get-CustomerManagedEncryptionDecision -SourceEncryptionType $script:Cmk -SourceDiskEncryptionSetId $script:Des -DestinationEncryptionType $script:Cmk -DestinationDiskEncryptionSetId $script:Des -ExpectedDiskEncryptionSetId '/subscriptions/s/resourceGroups/rg/providers/Microsoft.Compute/diskEncryptionSets/other'
+        $mismatch.Accepted | Should -Be $false
+    }
+
+    It 'builds snapshot create arguments with both --encryption-type and --disk-encryption-set' {
+        $built = New-IncrementalSnapshotCreateArgumentList -SubscriptionId 'sub' -ResourceGroupName 'rg' -SnapshotName 'lims-app-mig-dev-139523-snap' -SourceDiskId '/subscriptions/sub/resourceGroups/rg/providers/Microsoft.Compute/disks/source' -Location 'westeurope' -EncryptionType $script:Cmk -DiskEncryptionSetId $script:Des
+        $built.Accepted | Should -Be $true
+        $built.Arguments | Should -Contain '--encryption-type'
+        $built.Arguments[$built.Arguments.IndexOf('--encryption-type') + 1] | Should -Be $script:Cmk
+        $built.Arguments | Should -Contain '--disk-encryption-set'
+        $built.Arguments[$built.Arguments.IndexOf('--disk-encryption-set') + 1] | Should -Be $script:Des
+        $built.Arguments | Should -Contain '--incremental'
+        $built.Arguments | Should -Contain 'snapshot'
+        $omitted = New-IncrementalSnapshotCreateArgumentList -SubscriptionId 'sub' -ResourceGroupName 'rg' -SnapshotName 'snap' -SourceDiskId '/id' -Location 'westeurope' -EncryptionType 'EncryptionAtRestWithPlatformKey' -DiskEncryptionSetId $script:Des
+        $omitted.Accepted | Should -Be $false
+        $omitted.Arguments.Count | Should -Be 0
+    }
+
+    It 'builds snapshot-derived disk create arguments with the same verified CMK pair' {
+        $built = New-DiskFromSnapshotCreateArgumentList -SubscriptionId 'sub' -ResourceGroupName 'rg' -DiskName 'lims-app-mig-dev-tmp' -SnapshotId '/subscriptions/sub/snapshots/snap' -Location 'westeurope' -EncryptionType $script:Cmk -DiskEncryptionSetId $script:Des -Zone '1' -Tags @{ limsAppMigLockRunId = '139523' }
+        $built.Accepted | Should -Be $true
+        $built.Arguments | Should -Contain 'disk'
+        $built.Arguments[$built.Arguments.IndexOf('--encryption-type') + 1] | Should -Be $script:Cmk
+        $built.Arguments[$built.Arguments.IndexOf('--disk-encryption-set') + 1] | Should -Be $script:Des
+        $built.Arguments | Should -Contain '--zone'
+        $missingType = New-DiskFromSnapshotCreateArgumentList -SubscriptionId 'sub' -ResourceGroupName 'rg' -DiskName 'tmp' -SnapshotId '/snap' -Location 'westeurope' -EncryptionType '' -DiskEncryptionSetId $script:Des
+        $missingType.Accepted | Should -Be $false
+    }
+}
+
+Describe 'Get-PreCreateLockRecoveryDecision' {
+    It 'allows only reviewed run 139523 after lock acquire and before snapshot creation' {
+        $ok = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $ok.Allowed | Should -Be $true
+        $otherRun = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '10' -LockOwnerRunId '10' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $otherRun.Allowed | Should -Be $false
+        $otherRun.Reason | Should -Match '139523'
+        $notRequested = Get-PreCreateLockRecoveryDecision -Requested $false -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $notRequested.Allowed | Should -Be $false
+    }
+
+    It 'requires the pre-creation lock state and confirmed NotFound; authorization and network block' {
+        $prepared = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag 'Prepared' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $prepared.Allowed | Should -Be $false
+        $prepared.Reason | Should -Match 'Prepared'
+        $auth = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'Authorization' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $auth.Allowed | Should -Be $false
+        $auth.Reason | Should -Match 'Authorization'
+        $network = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'Network' -RunCommandLookupClassification 'NotFound'
+        $network.Allowed | Should -Be $false
+        $network.Reason | Should -Match 'Network'
+        $found = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '' -RecordedTempDiskId '' -SnapshotLookupClassification 'Found' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $found.Allowed | Should -Be $false
+        $recorded = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId '139523' -LockOwnerRunId '139523' -PhaseTag 'LockHeld' -AttemptStateTag '' -CopyStatusTag 'InspectOnly' -GuestSubmittedTag 'false' -RecordedSnapshotId '/subscriptions/s/snapshots/x' -RecordedTempDiskId '' -SnapshotLookupClassification 'NotFound' -TemporaryDiskLookupClassification 'NotFound' -RunCommandLookupClassification 'NotFound'
+        $recorded.Allowed | Should -Be $false
+        $recorded.Reason | Should -Match 'recorded snapshot'
+    }
+}
+
 Describe 'Get-MigrationLockAcquireDecision' {
     It 'allows a first stage acquire, refuses overlapping stage even with the same run ID, and lets cleanup of the holding run proceed' {
         (Get-MigrationLockAcquireDecision -ExistingLockRunId '' -ThisRunId '10' -Purpose 'Stage').Allowed | Should -Be $true

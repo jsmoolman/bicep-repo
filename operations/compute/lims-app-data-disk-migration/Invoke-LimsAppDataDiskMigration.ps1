@@ -66,7 +66,10 @@ param(
     [string] $CopyStatus = '',
 
     [Parameter(Mandatory = $false)]
-    [bool] $PreSubmitRecovery = $false
+    [bool] $PreSubmitRecovery = $false,
+
+    [Parameter(Mandatory = $false)]
+    [bool] $PreCreateLockRecovery = $false
 )
 
 $ErrorActionPreference = 'Stop'
@@ -500,19 +503,14 @@ function New-AzIncrementalSnapshotAdapter {
         [Parameter(Mandatory = $true)] [string] $SnapshotName,
         [Parameter(Mandatory = $true)] [string] $SourceDiskId,
         [Parameter(Mandatory = $true)] [string] $Location,
+        [Parameter(Mandatory = $true)] [string] $EncryptionType,
         [Parameter(Mandatory = $true)] [string] $DiskEncryptionSetId
     )
-    return Invoke-AzCliAdapter -ExpectJson -Arguments @(
-        'snapshot', 'create',
-        '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName,
-        '--name', $SnapshotName,
-        '--source', $SourceDiskId,
-        '--location', $Location,
-        '--incremental', 'true',
-        '--disk-encryption-set', $DiskEncryptionSetId,
-        '--output', 'json'
-    )
+    $built = New-IncrementalSnapshotCreateArgumentList -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -SnapshotName $SnapshotName -SourceDiskId $SourceDiskId -Location $Location -EncryptionType $EncryptionType -DiskEncryptionSetId $DiskEncryptionSetId
+    if (-not $built.Accepted) {
+        Assert-LimsAppMigControlFailure $built.Reason
+    }
+    return Invoke-AzCliAdapter -ExpectJson -Arguments $built.Arguments
 }
 
 function New-AzDiskFromSnapshotAdapter {
@@ -522,28 +520,16 @@ function New-AzDiskFromSnapshotAdapter {
         [Parameter(Mandatory = $true)] [string] $DiskName,
         [Parameter(Mandatory = $true)] [string] $SnapshotId,
         [Parameter(Mandatory = $true)] [string] $Location,
+        [Parameter(Mandatory = $true)] [string] $EncryptionType,
+        [Parameter(Mandatory = $true)] [string] $DiskEncryptionSetId,
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Zone,
         [Parameter(Mandatory = $false)] [hashtable] $Tags
     )
-    $arguments = @(
-        'disk', 'create',
-        '--subscription', $SubscriptionId,
-        '--resource-group', $ResourceGroupName,
-        '--name', $DiskName,
-        '--source', $SnapshotId,
-        '--location', $Location,
-        '--output', 'json'
-    )
-    if (-not [string]::IsNullOrWhiteSpace($Zone)) {
-        $arguments += @('--zone', $Zone)
+    $built = New-DiskFromSnapshotCreateArgumentList -SubscriptionId $SubscriptionId -ResourceGroupName $ResourceGroupName -DiskName $DiskName -SnapshotId $SnapshotId -Location $Location -EncryptionType $EncryptionType -DiskEncryptionSetId $DiskEncryptionSetId -Zone $Zone -Tags $Tags
+    if (-not $built.Accepted) {
+        Assert-LimsAppMigControlFailure $built.Reason
     }
-    if ($Tags -and $Tags.Count -gt 0) {
-        $arguments += '--tags'
-        foreach ($key in $Tags.Keys) {
-            $arguments += "$key=$($Tags[$key])"
-        }
-    }
-    return Invoke-AzCliLookupAdapter -Arguments $arguments
+    return Invoke-AzCliLookupAdapter -Arguments $built.Arguments
 }
 
 function Add-AzVmDataDiskAdapter {
@@ -883,6 +869,14 @@ function Get-DiskEncryptionSetIdFromDisk {
     return ''
 }
 
+function Get-DiskEncryptionTypeFromDisk {
+    param([Parameter(Mandatory = $true)] $Disk)
+    if ($Disk.encryption -and $Disk.encryption.PSObject.Properties['type'] -and $Disk.encryption.type) {
+        return [string]$Disk.encryption.type
+    }
+    return ''
+}
+
 function Get-VmTagValue {
     param(
         [Parameter(Mandatory = $true)] $Vm,
@@ -939,9 +933,18 @@ function Invoke-LimsAppDataDiskMigrationPlanChecks {
 
     $sourceDes = Get-DiskEncryptionSetIdFromDisk -Disk $sourceDisk
     $destinationDes = Get-DiskEncryptionSetIdFromDisk -Disk $destinationDisk
+    $sourceEncryptionType = Get-DiskEncryptionTypeFromDisk -Disk $sourceDisk
+    $destinationEncryptionType = Get-DiskEncryptionTypeFromDisk -Disk $destinationDisk
     $encryptionCheck = Test-EncryptionMatchesMapping -SourceDiskEncryptionSetId $sourceDes -DestinationDiskEncryptionSetId $destinationDes -Environment $Environment -RequirePin $RequireEncryptionPin
     if (-not $encryptionCheck.Matches) {
         Assert-LimsAppMigControlFailure "Encryption check failed: $($encryptionCheck.Reason)"
+    }
+    $cmk = $null
+    if ($RequireEncryptionPin -or -not [string]::IsNullOrWhiteSpace([string]$Environment.DiskEncryptionSetResourceId)) {
+        $cmk = Get-CustomerManagedEncryptionDecision -SourceEncryptionType $sourceEncryptionType -SourceDiskEncryptionSetId $sourceDes -DestinationEncryptionType $destinationEncryptionType -DestinationDiskEncryptionSetId $destinationDes -ExpectedDiskEncryptionSetId $Environment.DiskEncryptionSetResourceId
+        if (-not $cmk.Accepted) {
+            Assert-LimsAppMigControlFailure "Encryption check failed: $($cmk.Reason)"
+        }
     }
 
     $occupiedLuns = Get-OccupiedDataDiskLuns -DataDisks $destinationDisks
@@ -980,6 +983,7 @@ function Invoke-LimsAppDataDiskMigrationPlanChecks {
         Location                  = $Environment.Location
         Zone                      = $zoneDecision.Zone
         DiskEncryptionSetId       = $sourceDes
+        EncryptionType            = $(if ($cmk) { $cmk.EncryptionType } else { $sourceEncryptionType })
         CandidateTemporaryLun          = [int]$lunSelection.Lun
         OccupiedLuns                   = $occupiedLuns
         DestinationDataDisks           = $destinationDisks
@@ -1159,11 +1163,11 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
         }
         else {
             Write-OperatorLog "Creating incremental snapshot '$($names.SnapshotName)' of source disk '$($checks.SourceDiskId)' (capture mode: $CaptureMode). Legacy APP is not modified."
-            $snapshot = New-AzIncrementalSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName -SourceDiskId $checks.SourceDiskId -Location $checks.Location -DiskEncryptionSetId $checks.DiskEncryptionSetId
+            $snapshot = New-AzIncrementalSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName -SourceDiskId $checks.SourceDiskId -Location $checks.Location -EncryptionType $checks.EncryptionType -DiskEncryptionSetId $checks.DiskEncryptionSetId
         }
 
         Write-OperatorLog "Creating temporary disk '$($names.TemporaryDiskName)' from snapshot '$($snapshot.id)' after the destination-VM lock is held."
-        $createResult = New-AzDiskFromSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName -SnapshotId ([string]$snapshot.id) -Location $checks.Location -Zone $checks.Zone -Tags @{
+        $createResult = New-AzDiskFromSnapshotAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName -SnapshotId ([string]$snapshot.id) -Location $checks.Location -EncryptionType $checks.EncryptionType -DiskEncryptionSetId $checks.DiskEncryptionSetId -Zone $checks.Zone -Tags @{
             limsAppMigLockRunId  = $MigrationRunId
             limsAppMigSnapshotId = [string]$snapshot.id
         }
@@ -1382,12 +1386,48 @@ function Invoke-LimsAppDataDiskMigrationRecordCopyStatus {
     Write-Output "Recorded copy status '$CopyStatus' on '$($destinationVm.id)' for run '$MigrationRunId'."
 }
 
+function Invoke-LimsAppDataDiskMigrationReleaseLockTagsIfMatch {
+    param(
+        [Parameter(Mandatory = $true)] $DestinationVm,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId
+    )
+
+    $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
+    $etag = Get-ResourceEtag -Resource $DestinationVm
+    if ([string]::IsNullOrWhiteSpace($etag)) {
+        Assert-LimsAppMigControlFailure "Destination VM '$($DestinationVm.id)' has no etag. Refusing to release the migration lock without If-Match."
+    }
+    $owner = Get-VmTagValue -Vm $DestinationVm -Key $tagKeys.RunId
+    if ([string]::IsNullOrWhiteSpace($owner) -or $owner -ne $MigrationRunId) {
+        Assert-LimsAppMigControlFailure "Lock-tag release requires the destination VM lock to be held by this run '$MigrationRunId'."
+    }
+
+    $remaining = ConvertTo-TagHashtable -Tags $DestinationVm.tags
+    foreach ($name in @(
+            $tagKeys.RunId, $tagKeys.SnapshotId, $tagKeys.TempDiskId, $tagKeys.TempDiskUniqueId,
+            $tagKeys.DestDiskUniqueId, $tagKeys.CaptureMode, $tagKeys.CopyStatus,
+            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.GuestSubmitted, $tagKeys.AttemptState, $tagKeys.Phase
+        )) {
+        if ($remaining.ContainsKey($name)) {
+            $remaining.Remove($name)
+        }
+    }
+
+    Write-OperatorLog "Releasing migration lock tags for run '$MigrationRunId' with If-Match. Unrelated VM tags are preserved."
+    $apply = Set-AzVmTagsIfMatchAdapter -ResourceId ([string]$DestinationVm.id) -IfMatch $etag -Tags $remaining
+    $applyDecision = Get-AtomicLockApplyDecision -Classification $apply.Classification
+    if (-not $applyDecision.Allowed) {
+        Assert-LimsAppMigControlFailure $applyDecision.Reason
+    }
+}
+
 function Invoke-LimsAppDataDiskMigrationCleanup {
     param(
         [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] [string] $MigrationRunId,
         [Parameter(Mandatory = $true)] [bool] $DeleteSnapshot,
-        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false,
+        [Parameter(Mandatory = $false)] [bool] $PreCreateLockRecovery = $false
     )
 
     $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
@@ -1406,8 +1446,45 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
     $recordedCopyStatus = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.CopyStatus
     $recordedGuestSubmitted = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.GuestSubmitted
     $recordedAttemptState = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.AttemptState
+    $recordedPhase = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.Phase
+
+    if ($PreCreateLockRecovery -and $PreSubmitRecovery) {
+        Assert-LimsAppMigControlFailure 'Pre-create lock recovery and Prepared pre-submit recovery are mutually exclusive. Do not request both.'
+    }
 
     $commandLookup = Get-AzRunCommandLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -RunCommandName $guestCommandName
+    $tempLookup = Get-AzDiskLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $names.TemporaryDiskName
+    $snapshotLookup = Get-AzSnapshotLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -SnapshotName $names.SnapshotName
+
+    if ($PreCreateLockRecovery) {
+        $preCreateDecision = Get-PreCreateLockRecoveryDecision -Requested $true -ThisRunId $MigrationRunId -LockOwnerRunId $recordedRunId -PhaseTag $recordedPhase -AttemptStateTag $recordedAttemptState -CopyStatusTag $recordedCopyStatus -GuestSubmittedTag $recordedGuestSubmitted -RecordedSnapshotId $recordedSnapshotId -RecordedTempDiskId $recordedTempDiskId -SnapshotLookupClassification $snapshotLookup.Classification -TemporaryDiskLookupClassification $tempLookup.Classification -RunCommandLookupClassification $commandLookup.Classification
+        if (-not $preCreateDecision.Allowed) {
+            Assert-LimsAppMigControlFailure $preCreateDecision.Reason
+        }
+
+        $freshDestinationVm = Get-AzVmAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName
+        Assert-VmIdentityMatchesMapping -Vm $freshDestinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
+        Invoke-LimsAppDataDiskMigrationReleaseLockTagsIfMatch -DestinationVm $freshDestinationVm -MigrationRunId $MigrationRunId
+
+        Write-OperatorLog '===== LIMS APP data-disk migration: PRE-CREATE LOCK RECOVERY ====='
+        Write-OperatorLog "Migration run ID            : $MigrationRunId"
+        Write-OperatorLog 'Phase                       : LockHeld (snapshot never created)'
+        Write-OperatorLog 'Snapshot                    : confirmed NotFound'
+        Write-OperatorLog 'Temporary disk              : confirmed NotFound'
+        Write-OperatorLog 'Run Command                 : confirmed NotFound'
+        Write-OperatorLog 'Migration lock              : released with If-Match'
+        Write-OperatorLog 'Unrelated VM tags           : preserved'
+        Write-OperatorLog 'Original source disk        : preserved'
+        Write-OperatorLog "Destination $($Environment.DestinationDriveLetter): volume     : preserved"
+        Write-OperatorLog '==============================================================='
+        return [pscustomobject]@{
+            Status            = 'PreCreateLockReleased'
+            MigrationRunId    = $MigrationRunId
+            SnapshotDeleted   = $false
+            TemporaryDiskGone = $true
+        }
+    }
+
     $commandDecision = Get-GuestCommandCleanupDecision -LookupClassification $commandLookup.Classification -ExecutionState (Get-RunCommandExecutionState -Resource $commandLookup.Resource)
     $preSubmitDecision = Get-PreSubmitRecoveryDecision -Requested $PreSubmitRecovery -GuestSubmittedTag $recordedGuestSubmitted -AttemptStateTag $recordedAttemptState -LookupClassification $commandLookup.Classification -LockOwnerRunId $recordedRunId -ThisRunId $MigrationRunId -CopyStatusTag $recordedCopyStatus
     if (-not $commandDecision.Allowed -and -not $preSubmitDecision.Allowed) {
@@ -1614,7 +1691,8 @@ function Invoke-LimsAppDataDiskMigration {
         [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
         [Parameter(Mandatory = $false)] [bool] $DeleteSnapshot = $false,
         [Parameter(Mandatory = $false)] [string] $CopyStatus = '',
-        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false,
+        [Parameter(Mandatory = $false)] [bool] $PreCreateLockRecovery = $false
     )
 
     if ($env:LIMS_APP_MIG_ACTION) { $Action = $env:LIMS_APP_MIG_ACTION }
@@ -1637,6 +1715,9 @@ function Invoke-LimsAppDataDiskMigration {
     }
     if (Test-LimsAppMigEnvFlag -Name 'LIMS_APP_MIG_PRE_SUBMIT_RECOVERY') {
         $PreSubmitRecovery = $true
+    }
+    if (Test-LimsAppMigEnvFlag -Name 'LIMS_APP_MIG_PRE_CREATE_LOCK_RECOVERY') {
+        $PreCreateLockRecovery = $true
     }
 
     $environment = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName $EnvironmentName
@@ -1668,7 +1749,7 @@ function Invoke-LimsAppDataDiskMigration {
             return Invoke-LimsAppDataDiskMigrationStage -Environment $environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -CopyStatus $CopyStatus
         }
         'cleanup' {
-            return Invoke-LimsAppDataDiskMigrationCleanup -Environment $environment -MigrationRunId $MigrationRunId -DeleteSnapshot $DeleteSnapshot -PreSubmitRecovery $PreSubmitRecovery
+            return Invoke-LimsAppDataDiskMigrationCleanup -Environment $environment -MigrationRunId $MigrationRunId -DeleteSnapshot $DeleteSnapshot -PreSubmitRecovery $PreSubmitRecovery -PreCreateLockRecovery $PreCreateLockRecovery
         }
         'configure-app' {
             return Invoke-LimsAppDataDiskMigrationConfigure -Environment $environment -MigrationRunId $MigrationRunId -Phase 'Register'
@@ -1696,15 +1777,16 @@ function Invoke-LimsAppDataDiskMigrationEntry {
         [Parameter(Mandatory = $false)] [string] $CaptureMode = 'unspecified',
         [Parameter(Mandatory = $false)] [bool] $DeleteSnapshot = $false,
         [Parameter(Mandatory = $false)] [string] $CopyStatus = '',
-        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false
+        [Parameter(Mandatory = $false)] [bool] $PreSubmitRecovery = $false,
+        [Parameter(Mandatory = $false)] [bool] $PreCreateLockRecovery = $false
     )
 
-    Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery | Out-Null
+    Invoke-LimsAppDataDiskMigration -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery -PreCreateLockRecovery $PreCreateLockRecovery | Out-Null
 }
 
 if ($env:LIMS_APP_MIG_CONTROL_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppDataDiskMigrationEntry -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery
+        Invoke-LimsAppDataDiskMigrationEntry -Action $Action -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -DeleteSnapshot $DeleteSnapshot -CopyStatus $CopyStatus -PreSubmitRecovery $PreSubmitRecovery -PreCreateLockRecovery $PreCreateLockRecovery
         exit 0
     }
     catch {

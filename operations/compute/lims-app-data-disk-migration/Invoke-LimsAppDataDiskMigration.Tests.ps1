@@ -81,7 +81,7 @@ BeforeAll {
             managedBy    = $ManagedBy
             uniqueId     = $UniqueId
             tags         = $Tags
-            encryption   = [pscustomobject]@{ diskEncryptionSetId = $DesId }
+            encryption   = [pscustomobject]@{ type = 'EncryptionAtRestWithCustomerKey'; diskEncryptionSetId = $DesId }
             creationData = [pscustomobject]@{ sourceResourceId = $SourceId }
         }
     }
@@ -336,6 +336,18 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         { Invoke-LimsAppDataDiskMigrationPlanChecks -Environment (New-MatchingEnvironment) } | Should -Throw -ExpectedMessage '*already occupied*'
     }
 
+    It 'rejects an unsupported source encryption type before snapshot or attach' {
+        Mock Get-AzDiskAdapter {
+            param($DiskName)
+            $disk = New-FakeDisk -Name $DiskName -DesId $script:des
+            $disk.encryption.type = 'EncryptionAtRestWithPlatformKey'
+            return $disk
+        }
+        { Invoke-LimsAppDataDiskMigrationPlanChecks -Environment (New-MatchingEnvironment) } |
+            Should -Throw -ExpectedMessage '*unsupported or inconsistent*'
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+    }
+
     It 'returns the mapped IDs, DES, and candidate LUN when every check matches' {
         $env = New-MatchingEnvironment
         $result = Invoke-LimsAppDataDiskMigrationPlanChecks -Environment $env
@@ -344,6 +356,7 @@ Describe 'Invoke-LimsAppDataDiskMigrationPlanChecks (orchestration, mocked adapt
         $result.SourceDiskId | Should -Be (New-FakeManagedDiskId -Name $script:Dev.SourceDataDiskName)
         $result.DestinationDiskId | Should -Be (New-FakeManagedDiskId -Name $script:Dev.DestinationDataDiskName)
         $result.DiskEncryptionSetId | Should -Be $script:des
+        $result.EncryptionType | Should -Be 'EncryptionAtRestWithCustomerKey'
         $result.CandidateTemporaryLun | Should -Be 1
         $result.Zone | Should -Be ''
     }
@@ -573,7 +586,7 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         Mock Get-AzDiskLookupAdapter { return (New-Lookup -Classification 'NotFound') }
         Mock Get-AzSnapshotLookupAdapter { return (New-Lookup -Classification 'NotFound') }
         Mock New-AzIncrementalSnapshotAdapter {
-            param($SourceDiskId)
+            param($SourceDiskId, $EncryptionType, $DiskEncryptionSetId)
             if ($SourceDiskId -ne $script:sourceId) {
                 throw "Snapshot source must be the mapped legacy APP disk, got '$SourceDiskId'."
             }
@@ -705,7 +718,9 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         $script:recordedTags.limsAppMigPhase | Should -Be 'InspectAttached'
         $script:recordedTags.limsAppMigGuestSubmitted | Should -Be 'false'
         $script:recordedTags.limsAppMigAttemptState | Should -Be 'Prepared'
-        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 1 -ParameterFilter { $SourceDiskId -eq $script:sourceId }
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 1 -ParameterFilter {
+            $SourceDiskId -eq $script:sourceId -and $EncryptionType -eq 'EncryptionAtRestWithCustomerKey' -and $DiskEncryptionSetId -eq $script:des
+        }
         Should -Invoke Add-AzVmDataDiskAdapter -Times 1 -ParameterFilter {
             $VmName -eq $script:Dev.DestinationVmName -and $Lun -eq 1 -and $DiskName -eq 'lims-app-mig-dev-tmp'
         }
@@ -1060,5 +1075,97 @@ Describe 'Invoke-LimsAppDataDiskMigrationConfigure (orchestration, mocked adapte
     It 'does not require the stage/cleanup reparse gates for activate-app' {
         $null = Invoke-LimsAppDataDiskMigrationConfigure -Environment $script:Dev -MigrationRunId '11' -Phase 'Activate'
         Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigConfigurePhase' -and $Value -eq 'Activate' }
+    }
+}
+
+Describe 'Invoke-LimsAppDataDiskMigrationCleanup pre-create lock recovery (run 139523)' {
+    BeforeEach {
+        $script:des = New-FakeDesId
+        $script:runId = '139523'
+        $script:names = Get-MigrationRunResourceNames -Environment $script:Dev -MigrationRunId $script:runId
+        $script:sourceDisks = @(New-FakeDataDisk -Lun 1 -Name $script:Dev.SourceDataDiskName)
+        $script:destDisks = @(New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName)
+        $script:releasedTags = $null
+        $script:destTags = [pscustomobject]@{
+            limsAppMigLockRunId     = $script:runId
+            limsAppMigGuestSubmitted = 'false'
+            limsAppMigPhase         = 'LockHeld'
+            limsAppMigCopyStatus    = 'InspectOnly'
+            env                     = 'dev'
+        }
+        Mock Get-AzVmAdapter {
+            param($VmName)
+            if ($VmName -eq $script:Dev.SourceVmName) {
+                return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+            }
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Tags $script:destTags
+        }
+        Mock Get-AzDiskAdapter { param($DiskName) return New-FakeDisk -Name $DiskName -DesId $script:des }
+        Mock Get-AzDiskLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Get-AzSnapshotLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Get-AzRunCommandLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Set-AzVmTagsIfMatchAdapter {
+            param($Tags)
+            $script:releasedTags = $Tags
+            return (New-Lookup -Classification 'Found')
+        }
+        Mock New-AzIncrementalSnapshotAdapter { throw 'pre-create recovery must not snapshot.' }
+        Mock New-AzDiskFromSnapshotAdapter { throw 'pre-create recovery must not create a disk.' }
+        Mock Add-AzVmDataDiskAdapter { throw 'pre-create recovery must not attach.' }
+        Mock Remove-AzVmDataDiskAdapter { throw 'pre-create recovery must not detach.' }
+        Mock Remove-AzDiskAdapter { throw 'pre-create recovery must not delete a disk.' }
+        Mock Remove-AzSnapshotAdapter { throw 'pre-create recovery must not delete a snapshot.' }
+        Mock Remove-AzResourceTagsAdapter { throw 'pre-create recovery must not manually clear tags.' }
+    }
+
+    It 'releases only run 139523 lock tags with If-Match after lock acquire and snapshot-command rejection' {
+        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        $result = Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -DeleteSnapshot $false -PreCreateLockRecovery $true
+        $result.Status | Should -Be 'PreCreateLockReleased'
+        $script:releasedTags.ContainsKey('limsAppMigLockRunId') | Should -Be $false
+        $script:releasedTags.ContainsKey('limsAppMigPhase') | Should -Be $false
+        $script:releasedTags.ContainsKey('limsAppMigGuestSubmitted') | Should -Be $false
+        $script:releasedTags.ContainsKey('limsAppMigCopyStatus') | Should -Be $false
+        $script:releasedTags['env'] | Should -Be 'dev'
+        Should -Invoke Set-AzVmTagsIfMatchAdapter -Times 1
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+        Should -Invoke Remove-AzSnapshotAdapter -Times 0
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
+    }
+
+    It 'does not weaken Prepared pre-submit recovery and refuses combining the two recoveries' {
+        $script:destTags = [pscustomobject]@{
+            limsAppMigLockRunId      = '139523'
+            limsAppMigGuestSubmitted = 'false'
+            limsAppMigPhase          = 'LockHeld'
+            limsAppMigCopyStatus     = 'InspectOnly'
+            limsAppMigAttemptState   = 'Prepared'
+        }
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -DeleteSnapshot $false -PreCreateLockRecovery $true } |
+            Should -Throw -ExpectedMessage '*Prepared*'
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -DeleteSnapshot $false -PreCreateLockRecovery $true -PreSubmitRecovery $true } |
+            Should -Throw -ExpectedMessage '*mutually exclusive*'
+        Should -Invoke Set-AzVmTagsIfMatchAdapter -Times 0
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+    }
+
+    It 'blocks pre-create recovery when snapshot lookup is Authorization' {
+        Mock Get-AzSnapshotLookupAdapter { return (New-Lookup -Classification 'Authorization' -Text 'AuthorizationFailed (403)') }
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -DeleteSnapshot $false -PreCreateLockRecovery $true } |
+            Should -Throw -ExpectedMessage '*Authorization*'
+        Should -Invoke Set-AzVmTagsIfMatchAdapter -Times 0
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+    }
+
+    It 'still blocks stage and normal cleanup while reparse validation is pending' {
+        { Invoke-LimsAppDataDiskMigrationStage -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -CaptureMode 'online' } |
+            Should -Throw -ExpectedMessage '*blocked pending Windows reparse-point validation*'
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '139523' -DeleteSnapshot $false } |
+            Should -Throw
+        Should -Invoke Set-AzVmTagsIfMatchAdapter -Times 0
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
     }
 }

@@ -409,6 +409,250 @@ function Get-PreSubmitRecoveryDecision {
     return [pscustomobject]@{ Allowed = $true; Reason = $null }
 }
 
+function Get-RequiredCustomerManagedEncryptionType {
+    return 'EncryptionAtRestWithCustomerKey'
+}
+
+function Get-ReviewedPreCreateLockRecoveryRunId {
+    return '139523'
+}
+
+function Get-CustomerManagedEncryptionDecision {
+    <#
+        Snapshot and snapshot-derived disk create must preserve the
+        verified source encryption type and DES. Microsoft's CMK CLI
+        requires both --encryption-type and --disk-encryption-set.
+        Platform-key, dual-key, empty, and mismatched settings are
+        rejected.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SourceEncryptionType,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SourceDiskEncryptionSetId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $DestinationEncryptionType,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $DestinationDiskEncryptionSetId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExpectedDiskEncryptionSetId
+    )
+
+    $required = Get-RequiredCustomerManagedEncryptionType
+    if ([string]::IsNullOrWhiteSpace($SourceEncryptionType)) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = 'Source data disk encryption type is missing. Refusing to snapshot without the verified customer-managed encryption type.' }
+    }
+    if ($SourceEncryptionType -ne $required) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = "Source encryption type '$SourceEncryptionType' is not the verified '$required'. Unsupported or inconsistent encryption settings are rejected." }
+    }
+    if ([string]::IsNullOrWhiteSpace($DestinationEncryptionType)) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = 'Destination data disk encryption type is missing. Refusing to proceed without the verified customer-managed encryption type.' }
+    }
+    if ($DestinationEncryptionType -ne $required) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = "Destination encryption type '$DestinationEncryptionType' is not the verified '$required'. Unsupported or inconsistent encryption settings are rejected." }
+    }
+    if ($SourceEncryptionType -ne $DestinationEncryptionType) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = "Source encryption type '$SourceEncryptionType' does not equal destination encryption type '$DestinationEncryptionType'." }
+    }
+    if ([string]::IsNullOrWhiteSpace($SourceDiskEncryptionSetId) -or [string]::IsNullOrWhiteSpace($DestinationDiskEncryptionSetId) -or [string]::IsNullOrWhiteSpace($ExpectedDiskEncryptionSetId)) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = 'Customer-managed encryption requires the verified Disk Encryption Set on the source disk, destination disk, and mapping pin.' }
+    }
+    if (-not (Test-NormalizedResourceIdEquals -Left $SourceDiskEncryptionSetId -Right $DestinationDiskEncryptionSetId) -or -not (Test-NormalizedResourceIdEquals -Left $SourceDiskEncryptionSetId -Right $ExpectedDiskEncryptionSetId)) {
+        return [pscustomobject]@{ Accepted = $false; EncryptionType = $null; DiskEncryptionSetId = $null; Reason = "Verified Disk Encryption Set mismatch. Source='$SourceDiskEncryptionSetId', destination='$DestinationDiskEncryptionSetId', mapping='$ExpectedDiskEncryptionSetId'." }
+    }
+    return [pscustomobject]@{
+        Accepted            = $true
+        EncryptionType      = $required
+        DiskEncryptionSetId = $SourceDiskEncryptionSetId
+        Reason              = $null
+    }
+}
+
+function New-IncrementalSnapshotCreateArgumentList {
+    <#
+        Pure Azure CLI argument construction for an incremental CMK
+        snapshot. Microsoft's customer-managed-key example supplies both
+        --encryption-type and --disk-encryption-set.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $SubscriptionId,
+        [Parameter(Mandatory = $true)] [string] $ResourceGroupName,
+        [Parameter(Mandatory = $true)] [string] $SnapshotName,
+        [Parameter(Mandatory = $true)] [string] $SourceDiskId,
+        [Parameter(Mandatory = $true)] [string] $Location,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $EncryptionType,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DiskEncryptionSetId
+    )
+
+    $decision = Get-CustomerManagedEncryptionDecision -SourceEncryptionType $EncryptionType -SourceDiskEncryptionSetId $DiskEncryptionSetId -DestinationEncryptionType $EncryptionType -DestinationDiskEncryptionSetId $DiskEncryptionSetId -ExpectedDiskEncryptionSetId $DiskEncryptionSetId
+    if (-not $decision.Accepted) {
+        return [pscustomobject]@{ Accepted = $false; Arguments = @(); Reason = $decision.Reason }
+    }
+
+    return [pscustomobject]@{
+        Accepted  = $true
+        Reason    = $null
+        Arguments = @(
+            'snapshot', 'create',
+            '--subscription', $SubscriptionId,
+            '--resource-group', $ResourceGroupName,
+            '--name', $SnapshotName,
+            '--source', $SourceDiskId,
+            '--location', $Location,
+            '--incremental', 'true',
+            '--encryption-type', $decision.EncryptionType,
+            '--disk-encryption-set', $decision.DiskEncryptionSetId,
+            '--output', 'json'
+        )
+    }
+}
+
+function New-DiskFromSnapshotCreateArgumentList {
+    <#
+        Pure Azure CLI argument construction for a snapshot-derived disk.
+        The same verified CMK type and DES are required; omitting
+        --encryption-type is rejected.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $SubscriptionId,
+        [Parameter(Mandatory = $true)] [string] $ResourceGroupName,
+        [Parameter(Mandatory = $true)] [string] $DiskName,
+        [Parameter(Mandatory = $true)] [string] $SnapshotId,
+        [Parameter(Mandatory = $true)] [string] $Location,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $EncryptionType,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $DiskEncryptionSetId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Zone,
+        [Parameter(Mandatory = $false)] [hashtable] $Tags
+    )
+
+    $decision = Get-CustomerManagedEncryptionDecision -SourceEncryptionType $EncryptionType -SourceDiskEncryptionSetId $DiskEncryptionSetId -DestinationEncryptionType $EncryptionType -DestinationDiskEncryptionSetId $DiskEncryptionSetId -ExpectedDiskEncryptionSetId $DiskEncryptionSetId
+    if (-not $decision.Accepted) {
+        return [pscustomobject]@{ Accepted = $false; Arguments = @(); Reason = $decision.Reason }
+    }
+
+    $arguments = @(
+        'disk', 'create',
+        '--subscription', $SubscriptionId,
+        '--resource-group', $ResourceGroupName,
+        '--name', $DiskName,
+        '--source', $SnapshotId,
+        '--location', $Location,
+        '--encryption-type', $decision.EncryptionType,
+        '--disk-encryption-set', $decision.DiskEncryptionSetId,
+        '--output', 'json'
+    )
+    if (-not [string]::IsNullOrWhiteSpace($Zone)) {
+        $arguments += @('--zone', $Zone)
+    }
+    if ($Tags -and $Tags.Count -gt 0) {
+        $arguments += '--tags'
+        foreach ($key in $Tags.Keys) {
+            $arguments += "$key=$($Tags[$key])"
+        }
+    }
+    return [pscustomobject]@{ Accepted = $true; Reason = $null; Arguments = $arguments }
+}
+
+function Test-ConfirmedNotFoundLookup {
+    param(
+        [Parameter(Mandatory = $true)] [string] $Role,
+        [Parameter(Mandatory = $true)] [string] $Classification
+    )
+
+    if ($Classification -eq 'Authorization' -or $Classification -eq 'Network' -or $Classification -eq 'Other') {
+        return [pscustomobject]@{
+            Confirmed = $false
+            Reason    = "Pre-create lock recovery $Role lookup classified as '$Classification'. Authorization, network, and other errors block recovery."
+        }
+    }
+    if ($Classification -ne 'NotFound') {
+        return [pscustomobject]@{
+            Confirmed = $false
+            Reason    = "Pre-create lock recovery requires confirmed NotFound for $Role. Lookup is '$Classification'."
+        }
+    }
+    return [pscustomobject]@{ Confirmed = $true; Reason = $null }
+}
+
+function Get-PreCreateLockRecoveryDecision {
+    <#
+        Narrow recovery for attach-and-inspect run 139523, which acquired
+        the destination-VM lock and then failed before snapshot creation.
+        This is not Prepared pre-submit recovery and does not weaken those
+        checks. Authorization/network lookups block. Resources that exist
+        block.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [bool] $Requested = $false,
+        [Parameter(Mandatory = $true)] [string] $ThisRunId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $LockOwnerRunId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $PhaseTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $AttemptStateTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $CopyStatusTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $GuestSubmittedTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $RecordedSnapshotId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $RecordedTempDiskId,
+        [Parameter(Mandatory = $true)] [string] $SnapshotLookupClassification,
+        [Parameter(Mandatory = $true)] [string] $TemporaryDiskLookupClassification,
+        [Parameter(Mandatory = $true)] [string] $RunCommandLookupClassification
+    )
+
+    $allowedRunId = Get-ReviewedPreCreateLockRecoveryRunId
+    if (-not $Requested) {
+        return [pscustomobject]@{ Allowed = $false; Reason = 'Pre-create lock recovery was not requested.' }
+    }
+    if ($ThisRunId -ne $allowedRunId) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-create lock recovery is reviewed only for migration run '$allowedRunId'. Supplied run '$ThisRunId' is refused."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($LockOwnerRunId) -or $LockOwnerRunId -ne $allowedRunId) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-create lock recovery requires the destination VM lock to be held by run '$allowedRunId'."
+        }
+    }
+    if ($PhaseTag -cne 'LockHeld') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-create lock recovery requires Phase=LockHeld (lock acquired, snapshot never created). Phase is '$PhaseTag'."
+        }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AttemptStateTag)) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Pre-create lock recovery requires the pre-creation state with no inspect attempt state. AttemptState '$AttemptStateTag' is not that state. Prepared pre-submit recovery is a separate path and is unchanged."
+        }
+    }
+    if ($CopyStatusTag -ne 'InspectOnly') {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Pre-create lock recovery is reviewed only for attach-and-inspect (CopyStatus=InspectOnly).'
+        }
+    }
+    $submitted = Get-GuestSubmittedEvidenceDecision -Value $GuestSubmittedTag
+    if (-not $submitted.Accepted) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $submitted.Reason }
+    }
+    if (-not [string]::IsNullOrWhiteSpace($RecordedSnapshotId) -or -not [string]::IsNullOrWhiteSpace($RecordedTempDiskId)) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = 'Pre-create lock recovery requires no recorded snapshot or temporary-disk resource ID. Those IDs mean creation already started.'
+        }
+    }
+
+    $snapshotGone = Test-ConfirmedNotFoundLookup -Role 'snapshot' -Classification $SnapshotLookupClassification
+    if (-not $snapshotGone.Confirmed) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $snapshotGone.Reason }
+    }
+    $tempGone = Test-ConfirmedNotFoundLookup -Role 'temporary disk' -Classification $TemporaryDiskLookupClassification
+    if (-not $tempGone.Confirmed) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $tempGone.Reason }
+    }
+    $commandGone = Test-ConfirmedNotFoundLookup -Role 'Run Command' -Classification $RunCommandLookupClassification
+    if (-not $commandGone.Confirmed) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $commandGone.Reason }
+    }
+
+    return [pscustomobject]@{ Allowed = $true; Reason = $null }
+}
+
 function Get-InspectSubmitDecision {
     <#
         The submit path may continue only from Prepared with an explicit
