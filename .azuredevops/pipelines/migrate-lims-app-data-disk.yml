@@ -20,6 +20,15 @@
 #       the selected run, after verifying its resource ID and attachment.
 #       Snapshot deletion is opt-in (default retain). Never touches the
 #       original source disk or destination A:.
+#     - `configure-app`: after a completed copy, registers .\jboss-runner,
+#       JBoss-8.0, Apache-2.4.57, shibd_Default, and the Azure Files
+#       startup task on APP v2 only. Services stay stopped; automatic
+#       startup is not enabled. Secrets come from variable group
+#       lims-dev-app-v2-secrets, referenced only for this action.
+#     - `activate-app`: separate access check of the reviewed UNC/link in
+#       the scheduled-task and JBoss service contexts. Enables automatic
+#       startup only after that check and the v2 JDBC/Apache/Shibboleth
+#       reviews. Does not reference the secret variable group.
 #
 #   Environment differences live in
 #   operations/compute/lims-app-data-disk-migration/LimsAppDataDiskMigration.Mapping.ps1
@@ -53,8 +62,9 @@
 #   a silent az account set fallback.
 #
 # What this pipeline does NOT do:
-#   - Start APP v2 services, or apply v2 JDBC / UNC / Apache / Shibboleth
-#     permissions (those stay a later, separate review).
+#   - Start APP v2 services during configure-app, or enable automatic
+#     startup before activate-app plus the reviewed JDBC/Apache/Shibboleth
+#     and UNC flags.
 #   - Initialize or format any volume.
 #   - Modify or delete the original source disk or the destination A:
 #     volume.
@@ -92,13 +102,20 @@ parameters:
       - prd
 
   - name: action
-    displayName: Migration action. 'plan' (default) is read-only. 'stage' snapshots, attaches, and copies. 'cleanup' removes only that run's temporary disk.
+    displayName: Migration action. 'plan' (default) is read-only. 'stage' snapshots, attaches, and copies. 'cleanup' removes only that run's temporary disk. 'configure-app' registers APP v2 services after a completed copy. 'activate-app' is the separate startup-enablement check.
     type: string
     default: 'plan'
     values:
       - plan
       - stage
       - cleanup
+      - configure-app
+      - activate-app
+
+  - name: azureFilesUnc
+    displayName: "configure-app / activate-app — explicit v2 Azure Files UNC for A:\\lv89\\sdmshome. Leave empty to skip link creation. Must match the reviewed mapping UNC after AzureFilesUncReviewStatus is Passed."
+    type: string
+    default: ''
 
   - name: captureMode
     displayName: "stage only, REQUIRED — record whether this capture is 'online' (source still writable) or 'writes-quiesced' (application writes were stopped for the capture window). Ignored for plan and cleanup. 'unspecified' is rejected by stage."
@@ -128,6 +145,10 @@ variables:
     value: 'operations/compute/lims-app-data-disk-migration/LimsAppDataDiskMigration.Safety.ps1'
   - name: guestCopyScriptPath
     value: 'operations/compute/lims-app-data-disk-migration/Copy-LimsAppDataDiskContents.ps1'
+  - name: guestConfigureScriptPath
+    value: 'operations/compute/lims-app-data-disk-migration/Configure-LimsAppV2.ps1'
+  - ${{ if eq(parameters.action, 'configure-app') }}:
+      - group: lims-dev-app-v2-secrets
   - name: guestTimeoutSeconds
     value: '2400'
   - name: pollDeadlineSeconds
@@ -263,7 +284,56 @@ jobs:
               LIMS_APP_MIG_CONTROL_PLANE: $(controlPlaneScriptPath)
               AGENT_JOBSTATUS: $(Agent.JobStatus)
 
-      - ${{ if eq(parameters.action, 'stage') }}:
+      - ${{ if or(eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
+          - bash: |
+              set -euo pipefail
+              output="${AGENT_TEMPDIRECTORY}/lims-app-v2-configure-${EFFECTIVE_MIGRATION_RUN_ID}.ps1"
+              bash .azuredevops/pipelines/scripts/prepare-lims-app-migration-guest-script.sh \
+                "${MAPPING_SCRIPT_PATH}" \
+                "${SAFETY_SCRIPT_PATH}" \
+                "${GUEST_CONFIGURE_SCRIPT_PATH}" \
+                "${output}"
+              echo "##vso[task.setvariable variable=guestScriptToSubmit]${output}"
+              echo "Prepared configuration guest script at ${output}"
+            displayName: '${{ parameters.action }}: concatenate reviewed mapping and safety functions into the guest configuration script'
+            env:
+              EFFECTIVE_MIGRATION_RUN_ID: $(effectiveMigrationRunId)
+              AGENT_TEMPDIRECTORY: $(Agent.TempDirectory)
+              MAPPING_SCRIPT_PATH: $(mappingScriptPath)
+              SAFETY_SCRIPT_PATH: $(safetyScriptPath)
+              GUEST_CONFIGURE_SCRIPT_PATH: $(guestConfigureScriptPath)
+
+          - task: AzureCLI@2
+            displayName: '${{ parameters.action }}: submit guest configuration script via Managed Run Command and wait for a terminal execution state'
+            inputs:
+              azureSubscription: ${{ parameters.serviceConnection }}
+              scriptType: bash
+              scriptLocation: scriptPath
+              scriptPath: '.azuredevops/pipelines/scripts/submit-and-wait-run-command.sh'
+            env:
+              DEV_SUBSCRIPTION_ID: $(limsAppMigSubscriptionId)
+              RESOURCE_GROUP: $(limsAppMigResourceGroupName)
+              VM_NAME: $(limsAppMigDestinationVmName)
+              SCRIPT_TO_SUBMIT: $(guestScriptToSubmit)
+              RUN_COMMAND_NAME: $(limsAppMigGuestCommandName)
+              GUEST_TIMEOUT_SECONDS: $(guestTimeoutSeconds)
+              POLL_DEADLINE_SECONDS: $(pollDeadlineSeconds)
+              STARTUP_MAX_RETRIES: $(startupMaxRetries)
+              STARTUP_RETRY_INTERVAL_SECONDS: $(startupRetryIntervalSeconds)
+              NORMAL_POLL_INTERVAL_SECONDS: $(normalPollIntervalSeconds)
+              RUN_COMMAND_PARAMETERS: |
+                EnvironmentName=$(limsAppMigEnvironmentName)
+                MigrationRunId=$(effectiveMigrationRunId)
+                ConfigurePhase=$(limsAppMigConfigurePhase)
+                ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
+                ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
+                AzureFilesUnc=${{ parameters.azureFilesUnc }}
+              ${{ if eq(parameters.action, 'configure-app') }}:
+                RUN_COMMAND_PROTECTED_PARAMETERS: |
+                  JbossRunnerPassword=$(jbossRunnerPassword)
+                  AzureFilesAccessKey=$(azureFilesAccessKey)
+
+      - ${{ if or(eq(parameters.action, 'stage'), eq(parameters.action, 'configure-app'), eq(parameters.action, 'activate-app')) }}:
           - task: AzureCLI@2
             displayName: 'Delete the ad hoc Managed Run Command resource unless its result is indeterminate (best effort, always runs)'
             condition: always()

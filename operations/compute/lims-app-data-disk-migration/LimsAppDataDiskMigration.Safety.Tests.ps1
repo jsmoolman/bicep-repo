@@ -68,6 +68,15 @@ Describe 'Resolve-LimsAppMigPipelineRunId' {
         $result.Accepted | Should -Be $true
         $result.RunId | Should -Be '77'
     }
+
+    It 'uses the current Build.BuildId for configure-app and activate-app when none is supplied' {
+        $configure = Resolve-LimsAppMigPipelineRunId -Action 'configure-app' -SuppliedRunId '' -BuildId '88'
+        $configure.Accepted | Should -Be $true
+        $configure.RunId | Should -Be '88'
+        $activate = Resolve-LimsAppMigPipelineRunId -Action 'activate-app' -SuppliedRunId '91' -BuildId '88'
+        $activate.Accepted | Should -Be $true
+        $activate.RunId | Should -Be '91'
+    }
 }
 
 Describe 'Get-AzureCliErrorClassification' {
@@ -251,6 +260,88 @@ Describe 'Test-CopyRootIsLocalVolume and Test-ReparsePointPolicy' {
         $dst = Test-ReparsePointPolicy -SourceReparseRelativePaths @() -DestinationReparseRelativePaths @('app\redirect') -ExcludeRelativePaths @('lv89\sdmshome')
         $dst.Accepted | Should -Be $false
         $dst.Reason | Should -Match 'Destination reparse'
+    }
+}
+
+Describe 'APP v2 configuration safety decisions' {
+    It 'reports a missing secret without echoing the value' {
+        $missing = Test-LimsAppV2SecretPresent -Name 'JbossRunnerPassword' -Value ''
+        $missing.Present | Should -Be $false
+        $missing.Reason | Should -Match 'JbossRunnerPassword'
+        $missing.Reason | Should -Not -Match 'hunter2'
+        (Test-LimsAppV2SecretPresent -Name 'JbossRunnerPassword' -Value 'hunter2').Present | Should -Be $true
+        (Test-TextContainsSecret -Text 'log hunter2 leaked' -Secret 'hunter2') | Should -Be $true
+        (Test-TextContainsSecret -Text 'log redacted' -Secret 'hunter2') | Should -Be $false
+    }
+
+    It 'reports incomplete Apache or Shibboleth binary settings before a service change' {
+        $incomplete = Test-LimsAppV2ServiceBinarySettingsComplete -ServiceName 'Apache-2.4.57' -BinaryPath '' -Arguments ''
+        $incomplete.Complete | Should -Be $false
+        $incomplete.Missing | Should -Contain 'BinaryPath'
+        $incomplete.Missing | Should -Contain 'Arguments'
+        $incomplete.Reason | Should -Match 'before changing the service'
+        (Test-LimsAppV2ServiceBinarySettingsComplete -ServiceName 'Apache-2.4.57' -BinaryPath 'A:\Apache24\bin\httpd.exe' -Arguments '-k runservice').Complete | Should -Be $true
+    }
+
+    It 'reports incomplete Procrun settings before a service change' {
+        $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+        $incomplete = Test-LimsAppV2ProcrunSettingsComplete -AppV2 $dev.AppV2
+        $incomplete.Complete | Should -Be $false
+        $incomplete.Missing | Should -Contain 'JbossProcrunExePath'
+        $incomplete.Reason | Should -Match 'before changing service'
+        $complete = $dev.AppV2.PSObject.Copy()
+        $complete.JbossProcrunExePath = 'A:\jboss\bin\prunsrv.exe'
+        $complete.JbossProcrunJvm = 'A:\java\bin\server\jvm.dll'
+        $complete.JbossProcrunStartClass = 'org.jboss.modules.Main'
+        $complete.JbossProcrunWorkingPath = 'A:\jboss'
+        (Test-LimsAppV2ProcrunSettingsComplete -AppV2 $complete).Complete | Should -Be $true
+    }
+
+    It 'reuses an exact sdmshome link and fails on a file, directory, or different target' {
+        $unc = '\\limsfiles.file.core.windows.net\lv89'
+        (Test-SdmshomeLinkDecision -PathExists $false -IsReparsePoint $false -ExistingTarget '' -ExpectedTarget $unc).Action | Should -Be 'Create'
+        (Test-SdmshomeLinkDecision -PathExists $true -IsReparsePoint $true -ExistingTarget $unc -ExpectedTarget $unc).Action | Should -Be 'Reuse'
+        $wrong = Test-SdmshomeLinkDecision -PathExists $true -IsReparsePoint $true -ExistingTarget '\\other\share' -ExpectedTarget $unc
+        $wrong.Action | Should -Be 'Fail'
+        $file = Test-SdmshomeLinkDecision -PathExists $true -IsReparsePoint $false -ExistingTarget '' -ExpectedTarget $unc -IsFile $true
+        $file.Action | Should -Be 'Fail'
+        $dir = Test-SdmshomeLinkDecision -PathExists $true -IsReparsePoint $false -ExistingTarget '' -ExpectedTarget $unc -IsDirectory $true
+        $dir.Action | Should -Be 'Fail'
+    }
+
+    It 'requires a completed copy tag for configure-app' {
+        (Test-CopyCompletedForConfigure -CopyCompletedTag 'Succeeded' -CopyStatusTag 'Failed').Allowed | Should -Be $true
+        (Test-CopyCompletedForConfigure -CopyCompletedTag '' -CopyStatusTag 'Succeeded').Allowed | Should -Be $true
+        $blocked = Test-CopyCompletedForConfigure -CopyCompletedTag '' -CopyStatusTag 'Pending'
+        $blocked.Allowed | Should -Be $false
+    }
+
+    It 'keeps automatic startup blocked while JDBC, Apache, Shibboleth, or UNC reviews are pending' {
+        $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+        $pending = Test-LimsAppV2ActivationReviews -AppV2 $dev.AppV2
+        $pending.Passed | Should -Be $false
+        $ready = $dev.AppV2.PSObject.Copy()
+        $ready.JdbcSettingsReviewStatus = 'Passed'
+        $ready.ApacheSettingsReviewStatus = 'Passed'
+        $ready.ShibbolethSettingsReviewStatus = 'Passed'
+        $ready.AzureFilesUncReviewStatus = 'Passed'
+        (Test-LimsAppV2ActivationReviews -AppV2 $ready).Passed | Should -Be $true
+    }
+
+    It 'creates the sdmshome link only when the supplied UNC is reviewed and matches the mapping' {
+        $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+        $skip = Test-AzureFilesUncReadyForLink -SuppliedUnc '' -AppV2 $dev.AppV2
+        $skip.Skip | Should -Be $true
+        $unreviewed = Test-AzureFilesUncReadyForLink -SuppliedUnc '\\limsfiles.file.core.windows.net\lv89' -AppV2 $dev.AppV2
+        $unreviewed.Ready | Should -Be $false
+        $unreviewed.Skip | Should -Be $false
+        $reviewed = $dev.AppV2.PSObject.Copy()
+        $reviewed.AzureFilesUnc = '\\limsfiles.file.core.windows.net\lv89'
+        $reviewed.AzureFilesUncReviewStatus = 'Passed'
+        (Test-AzureFilesUncReadyForLink -SuppliedUnc '\\limsfiles.file.core.windows.net\lv89' -AppV2 $reviewed).Ready | Should -Be $true
+        $mismatch = Test-AzureFilesUncReadyForLink -SuppliedUnc '\\other.file.core.windows.net\lv89' -AppV2 $reviewed
+        $mismatch.Ready | Should -Be $false
+        $mismatch.Reason | Should -Not -Match 'other.file'
     }
 }
 

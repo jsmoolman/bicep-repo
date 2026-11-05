@@ -142,6 +142,9 @@ Describe 'Get-LimsAppDataDiskMigrationEnvironmentMapping' {
         $script:Dev.DiskEncryptionSetResourceId | Should -Be (New-FakeDesId)
         $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
         $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
+        $script:Dev.AppV2.JbossServiceName | Should -Be 'JBoss-8.0'
+        $script:Dev.AppV2.ApacheServiceName | Should -Be 'Apache-2.4.57'
+        $script:Dev.AppV2.ShibbolethServiceName | Should -Be 'shibd_Default'
         (Get-MigrationRunResourceNames -Environment $script:Dev -MigrationRunId '10').TemporaryDiskName | Should -Be 'lims-app-mig-dev-tmp'
     }
 
@@ -661,5 +664,44 @@ Describe 'Invoke-LimsAppDataDiskMigrationCleanup after an interrupted run (mocke
             Should -Throw -ExpectedMessage '*Authorization*'
         Should -Invoke Remove-AzDiskAdapter -Times 0
         Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+    }
+}
+
+Describe 'Invoke-LimsAppDataDiskMigrationConfigure (orchestration, mocked adapters)' {
+    BeforeEach {
+        $script:des = New-FakeDesId
+        $script:destDisks = @(New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName)
+        $script:destTags = [pscustomobject]@{ limsAppMigCopyCompleted = 'Succeeded' }
+        Mock Get-AzVmAdapter {
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Tags $script:destTags
+        }
+        Mock Get-AzDiskAdapter { param($DiskName) return New-FakeDisk -Name $DiskName -DesId $script:des }
+        Mock Write-PipelineVariable { }
+        Mock New-AzIncrementalSnapshotAdapter { throw 'configure-app must not snapshot.' }
+        Mock New-AzDiskFromSnapshotAdapter { throw 'configure-app must not create a temp disk.' }
+        Mock Add-AzVmDataDiskAdapter { throw 'configure-app must not attach disks.' }
+    }
+
+    It 'refuses configure-app when the completed copy has not been recorded' {
+        $script:destTags = [pscustomobject]@{}
+        { Invoke-LimsAppDataDiskMigrationConfigure -Environment $script:Dev -MigrationRunId '10' -Phase 'Register' } |
+            Should -Throw -ExpectedMessage '*completed copy*'
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+    }
+
+    It 'publishes destination identity for configure-app after a completed copy and does not write Azure disks' {
+        $null = Invoke-LimsAppDataDiskMigrationConfigure -Environment $script:Dev -MigrationRunId '10' -Phase 'Register'
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigDestinationVmName' }
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigConfigurePhase' -and $Value -eq 'Register' }
+        Should -Invoke New-AzIncrementalSnapshotAdapter -Times 0
+        Should -Invoke Add-AzVmDataDiskAdapter -Times 0
+        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
+        $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
+    }
+
+    It 'does not require the stage/cleanup reparse gates for activate-app' {
+        $null = Invoke-LimsAppDataDiskMigrationConfigure -Environment $script:Dev -MigrationRunId '11' -Phase 'Activate'
+        Should -Invoke Write-PipelineVariable -Times 1 -ParameterFilter { $Name -eq 'limsAppMigConfigurePhase' -and $Value -eq 'Activate' }
     }
 }

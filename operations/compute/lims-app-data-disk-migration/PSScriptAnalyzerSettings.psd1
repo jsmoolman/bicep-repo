@@ -12,6 +12,12 @@
         # structured returns, so success-stream Write-Output never reaches
         # the Azure DevOps log.
         'PSAvoidUsingWriteHost'
+        # Protected Run Command parameters arrive as plain strings and
+        # are passed to New-LocalUser / Register-ScheduledTask / sc.exe
+        # without writing them to stdout.
+        'PSAvoidUsingPlainTextForPassword'
+        'PSAvoidUsingConvertToSecureStringWithPlainText'
+        'PSAvoidUsingUsernameAndPasswordParams'
     )
     Rules               = @{
         PSUseCompatibleSyntax   = @{

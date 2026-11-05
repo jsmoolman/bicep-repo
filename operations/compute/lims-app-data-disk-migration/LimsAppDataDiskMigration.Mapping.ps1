@@ -19,6 +19,73 @@
 
 Set-StrictMode -Version Latest
 
+function New-LimsAppV2Configuration {
+    <#
+        Post-copy APP v2 configuration. Service names are reviewed.
+        Wrapper paths, UNC, and JDBC/Apache/Shibboleth reviews stay empty
+        or blocked until the customer records them. configure-app reports
+        missing wrapper settings and stops before changing that service.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [bool] $ForEnabledEnvironment = $false
+    )
+
+    $serviceNames = @{
+        JbossRunnerUserName         = ''
+        JbossServiceName            = ''
+        JbossServiceDisplayName     = ''
+        ApacheServiceName           = ''
+        ShibbolethServiceName       = ''
+        AzureFilesStartupTaskName   = ''
+        ConfigureGuestCommandPrefix = ''
+        ActivateGuestCommandPrefix  = ''
+    }
+    if ($ForEnabledEnvironment) {
+        $serviceNames.JbossRunnerUserName = 'jboss-runner'
+        $serviceNames.JbossServiceName = 'JBoss-8.0'
+        $serviceNames.JbossServiceDisplayName = 'JBoss 8.0'
+        $serviceNames.ApacheServiceName = 'Apache-2.4.57'
+        $serviceNames.ShibbolethServiceName = 'shibd_Default'
+        $serviceNames.AzureFilesStartupTaskName = 'LIMS-AzureFiles-Sdmshome'
+        $serviceNames.ConfigureGuestCommandPrefix = 'configure-lims-app-v2'
+        $serviceNames.ActivateGuestCommandPrefix = 'activate-lims-app-v2'
+    }
+
+    return [pscustomobject]@{
+        JbossRunnerUserName          = $serviceNames.JbossRunnerUserName
+        JbossServiceName             = $serviceNames.JbossServiceName
+        JbossServiceDisplayName      = $serviceNames.JbossServiceDisplayName
+        JbossProcrunExePath          = ''
+        JbossProcrunJvm              = ''
+        JbossProcrunStartClass       = ''
+        JbossProcrunStartParams      = ''
+        JbossProcrunStartMode        = 'jvm'
+        JbossProcrunStopClass        = ''
+        JbossProcrunStopParams       = ''
+        JbossProcrunClasspath        = ''
+        JbossProcrunWorkingPath      = ''
+        JbossProcrunLogPath          = ''
+        JbossProcrunStdOutput        = ''
+        JbossProcrunStdError         = ''
+        ApacheServiceName            = $serviceNames.ApacheServiceName
+        ApacheBinaryPath             = ''
+        ApacheArguments              = ''
+        ShibbolethServiceName        = $serviceNames.ShibbolethServiceName
+        ShibbolethBinaryPath         = ''
+        ShibbolethArguments          = ''
+        JbossRunnerDirectoryPaths    = @()
+        AzureFilesUnc                = ''
+        AzureFilesUncReviewStatus    = 'BlockedPendingValidation'
+        AzureFilesStartupTaskName    = $serviceNames.AzureFilesStartupTaskName
+        SdmshomeLinkRelativePath     = 'lv89\sdmshome'
+        JdbcSettingsReviewStatus     = 'BlockedPendingValidation'
+        ApacheSettingsReviewStatus   = 'BlockedPendingValidation'
+        ShibbolethSettingsReviewStatus = 'BlockedPendingValidation'
+        ConfigureGuestCommandPrefix  = $serviceNames.ConfigureGuestCommandPrefix
+        ActivateGuestCommandPrefix   = $serviceNames.ActivateGuestCommandPrefix
+    }
+}
+
 function New-DisabledLimsAppDataDiskMigrationEnvironment {
     param([Parameter(Mandatory = $true)] [string] $EnvironmentName)
 
@@ -50,6 +117,7 @@ function New-DisabledLimsAppDataDiskMigrationEnvironment {
         GuestCommandNamePrefix          = ''
         WindowsReparseValidationStatus  = 'BlockedPendingValidation'
         WindowsSymlinkValidationStatus  = 'BlockedPendingValidation'
+        AppV2                           = (New-LimsAppV2Configuration)
     }
 }
 
@@ -93,6 +161,7 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             # Plan remains enabled.
             WindowsReparseValidationStatus  = 'BlockedPendingValidation'
             WindowsSymlinkValidationStatus  = 'BlockedPendingValidation'
+            AppV2                           = (New-LimsAppV2Configuration -ForEnabledEnvironment $true)
         }
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'tst')
         (New-DisabledLimsAppDataDiskMigrationEnvironment -EnvironmentName 'acc')
@@ -124,7 +193,20 @@ function Get-LimsAppDataDiskMigrationLockTagKeys {
         TemporaryLun    = 'limsAppMigTemporaryLun'
         GuestCommand    = 'limsAppMigGuestCommand'
         Phase           = 'limsAppMigPhase'
+        CopyCompleted   = 'limsAppMigCopyCompleted'
     }
+}
+
+function Get-LimsAppV2GuestCommandName {
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [ValidateSet('Register', 'Activate')] [string] $Phase
+    )
+    if ($Phase -eq 'Activate') {
+        return "$($Environment.AppV2.ActivateGuestCommandPrefix)-$MigrationRunId"
+    }
+    return "$($Environment.AppV2.ConfigureGuestCommandPrefix)-$MigrationRunId"
 }
 
 function Get-LimsAppDataDiskMigrationRunCommandName {

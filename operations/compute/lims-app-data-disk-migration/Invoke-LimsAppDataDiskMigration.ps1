@@ -27,12 +27,18 @@
     selected run, after verifying its resource ID and attachment. Snapshot
     deletion is opt-in (default retain). Never touches the original source
     disk or the destination A: data disk. Does not start APP v2 services.
+    The limsAppMigCopyCompleted tag is retained so configure-app can prove
+    the mapped A: copy after cleanup.
+
+    configure-app / activate-app: destination-only Azure identity and
+    completed-copy checks for the post-copy guest configuration. Does not
+    snapshot, attach, or change the stage/cleanup reparse gates.
 #>
 
 [CmdletBinding()]
 param(
     [Parameter(Mandatory = $false)]
-    [ValidateSet('plan', 'stage', 'cleanup')]
+    [ValidateSet('plan', 'stage', 'cleanup', 'configure-app', 'activate-app')]
     [string] $Action = 'plan',
 
     [Parameter(Mandatory = $false)]
@@ -335,6 +341,14 @@ function Assert-EnvironmentEnabledAndComplete {
     }
     if ([int]$Environment.SourceDataDiskLun -lt 0 -or [int]$Environment.DestinationDataDiskLun -lt 0 -or [int]$Environment.PreferredTemporaryLun -lt 0) {
         Assert-LimsAppMigControlFailure "Enabled environment '$($Environment.EnvironmentName)' has an unmapped LUN (source, destination, or preferred temporary)."
+    }
+    if (-not $Environment.AppV2) {
+        Assert-LimsAppMigControlFailure "Enabled environment '$($Environment.EnvironmentName)' is missing the AppV2 configuration mapping."
+    }
+    foreach ($name in @('JbossRunnerUserName', 'JbossServiceName', 'ApacheServiceName', 'ShibbolethServiceName', 'AzureFilesStartupTaskName', 'ConfigureGuestCommandPrefix', 'ActivateGuestCommandPrefix')) {
+        if ([string]::IsNullOrWhiteSpace([string]$Environment.AppV2.$name)) {
+            Assert-LimsAppMigControlFailure "Enabled environment '$($Environment.EnvironmentName)' is missing required AppV2 mapping field '$name'."
+        }
     }
 }
 
@@ -1147,7 +1161,9 @@ function Invoke-LimsAppDataDiskMigrationRecordCopyStatus {
     if ($existingLock -ne $MigrationRunId) {
         Assert-LimsAppMigControlFailure "Refusing to record copy status '$CopyStatus' because destination lock run '$existingLock' is not this run '$MigrationRunId'."
     }
-    Set-AzResourceTagsMergeAdapter -ResourceId ([string]$destinationVm.id) -Tags @{ $tagKeys.CopyStatus = $CopyStatus }
+    $tags = @{ $tagKeys.CopyStatus = $CopyStatus }
+    if ($CopyStatus -eq 'Succeeded') { $tags[$tagKeys.CopyCompleted] = 'Succeeded' }
+    Set-AzResourceTagsMergeAdapter -ResourceId ([string]$destinationVm.id) -Tags $tags
     Write-Output "Recorded copy status '$CopyStatus' on '$($destinationVm.id)' for run '$MigrationRunId'."
 }
 
@@ -1272,6 +1288,8 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
             $tagKeys.DestDiskUniqueId, $tagKeys.CaptureMode, $tagKeys.CopyStatus,
             $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.Phase
         )
+        # limsAppMigCopyCompleted is retained so configure-app can prove
+        # the mapped A: copy after the temporary-disk lock is released.
     }
 
     Write-Output '===== LIMS APP data-disk migration: CLEANUP ====='
@@ -1283,6 +1301,68 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
     Write-Output "Destination $($Environment.DestinationDriveLetter): volume     : preserved"
     Write-Output 'APP v2 services             : left stopped pending JDBC/UNC/Apache/Shibboleth review'
     Write-Output '================================================='
+}
+
+function Invoke-LimsAppDataDiskMigrationConfigure {
+    <#
+        Read-only Azure checks for configure-app / activate-app. Does not
+        snapshot, attach, or touch the legacy APP or SQL VMs. Stage and
+        cleanup reparse gates are not required and are not changed.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [ValidateSet('Register', 'Activate')] [string] $Phase
+    )
+
+    $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
+    if (-not $runIdCheck.Accepted) {
+        Assert-LimsAppMigControlFailure $runIdCheck.Reason
+    }
+
+    $destinationVm = Get-AzVmAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName
+    Assert-VmIdentityMatchesMapping -Vm $destinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
+    $destinationDisk = Get-AzDiskAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -DiskName $Environment.DestinationDataDiskName
+    Assert-DiskIdentityMatchesMapping -Disk $destinationDisk -Environment $Environment -ExpectedDiskName $Environment.DestinationDataDiskName -Role 'Destination'
+    $destUnique = Get-DiskUniqueIdFromResource -Disk $destinationDisk
+    if (-not (Test-NormalizedUniqueIdEquals -Left $destUnique -Right $Environment.DestinationAttestedGuestUniqueId)) {
+        Assert-LimsAppMigControlFailure "Destination ARM uniqueId '$destUnique' does not match the attested guest UniqueId '$($Environment.DestinationAttestedGuestUniqueId)'."
+    }
+
+    $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
+    $copyCompleted = Get-VmTagValue -Vm $destinationVm -Key $tagKeys.CopyCompleted
+    $copyStatus = Get-VmTagValue -Vm $destinationVm -Key $tagKeys.CopyStatus
+    $copyCheck = Test-CopyCompletedForConfigure -CopyCompletedTag $copyCompleted -CopyStatusTag $copyStatus
+    if (-not $copyCheck.Allowed) {
+        Assert-LimsAppMigControlFailure $copyCheck.Reason
+    }
+
+    $guestCommandName = Get-LimsAppV2GuestCommandName -Environment $Environment -MigrationRunId $MigrationRunId -Phase $Phase
+    Write-PipelineVariable -Name 'limsAppMigSubscriptionId' -Value $Environment.SubscriptionId
+    Write-PipelineVariable -Name 'limsAppMigResourceGroupName' -Value $Environment.ResourceGroupName
+    Write-PipelineVariable -Name 'limsAppMigDestinationVmName' -Value $Environment.DestinationVmName
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskId' -Value ([string]$destinationDisk.id)
+    Write-PipelineVariable -Name 'limsAppMigDestinationDiskUniqueId' -Value $destUnique
+    Write-PipelineVariable -Name 'limsAppMigGuestCommandName' -Value $guestCommandName
+    Write-PipelineVariable -Name 'limsAppMigEnvironmentName' -Value $Environment.EnvironmentName
+    Write-PipelineVariable -Name 'limsAppMigConfigurePhase' -Value $Phase
+    Write-PipelineVariable -Name 'limsAppMigMigrationRunId' -Value $MigrationRunId
+
+    Write-Output "===== LIMS APP v2 configuration: $Phase (Azure) ====="
+    Write-Output "Destination VM              : $($destinationVm.id)"
+    Write-Output "Destination A: disk         : $($destinationDisk.id)"
+    Write-Output "Copy completed              : proven"
+    Write-Output "Guest command               : $guestCommandName"
+    Write-Output 'Legacy APP and SQL VMs      : not targeted'
+    Write-Output 'Stage/cleanup safety gates  : unchanged'
+    Write-Output '==================================================='
+
+    return [pscustomobject]@{
+        DestinationVmId = [string]$destinationVm.id
+        DestinationDiskId = [string]$destinationDisk.id
+        Phase           = $Phase
+        GuestCommandName = $guestCommandName
+    }
 }
 
 function Invoke-LimsAppDataDiskMigration {
@@ -1338,6 +1418,12 @@ function Invoke-LimsAppDataDiskMigration {
         }
         'cleanup' {
             return Invoke-LimsAppDataDiskMigrationCleanup -Environment $environment -MigrationRunId $MigrationRunId -DeleteSnapshot $DeleteSnapshot
+        }
+        'configure-app' {
+            return Invoke-LimsAppDataDiskMigrationConfigure -Environment $environment -MigrationRunId $MigrationRunId -Phase 'Register'
+        }
+        'activate-app' {
+            return Invoke-LimsAppDataDiskMigrationConfigure -Environment $environment -MigrationRunId $MigrationRunId -Phase 'Activate'
         }
         default {
             Assert-LimsAppMigControlFailure "Unsupported action '$Action'."

@@ -81,7 +81,7 @@ function Resolve-LimsAppMigPipelineRunId {
         return [pscustomobject]@{ Accepted = $true; RunId = $supplied; Reason = $null }
     }
 
-    if ($Action -eq 'stage') {
+    if ($Action -eq 'stage' -or $Action -eq 'configure-app' -or $Action -eq 'activate-app') {
         $candidate = $supplied
         if ([string]::IsNullOrEmpty($candidate)) { $candidate = $build }
         $check = Test-LimsAppMigNumericBuildId -Value $candidate
@@ -503,6 +503,190 @@ function ConvertTo-RelativeWindowsPath {
         return $fullNorm.Substring($rootNorm.Length).TrimStart('\')
     }
     return $FullPath
+}
+
+function Test-LimsAppV2SecretPresent {
+    <#
+        Reasons never include the secret value.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $Name,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Value
+    )
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return [pscustomobject]@{ Present = $false; Reason = "Protected parameter '$Name' is missing or empty. Refusing to continue. The secret value is not logged." }
+    }
+    return [pscustomobject]@{ Present = $true; Reason = $null }
+}
+
+function Test-TextContainsSecret {
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Text,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Secret
+    )
+    if ([string]::IsNullOrWhiteSpace($Secret)) { return $false }
+    if ([string]::IsNullOrEmpty($Text)) { return $false }
+    return $Text.Contains($Secret)
+}
+
+function Test-LimsAppV2ProcrunSettingsComplete {
+    param([Parameter(Mandatory = $true)] $AppV2)
+
+    $required = @(
+        'JbossProcrunExePath', 'JbossProcrunJvm', 'JbossProcrunStartClass',
+        'JbossProcrunStartMode', 'JbossProcrunWorkingPath'
+    )
+    $missing = @()
+    foreach ($name in $required) {
+        if ([string]::IsNullOrWhiteSpace([string]$AppV2.$name)) { $missing += $name }
+    }
+    if ($missing.Count -gt 0) {
+        return [pscustomobject]@{
+            Complete = $false
+            Missing  = $missing
+            Reason   = "JBoss Procrun settings are incomplete ($($missing -join ', ')). Report these before changing service '$($AppV2.JbossServiceName)'."
+        }
+    }
+    return [pscustomobject]@{ Complete = $true; Missing = @(); Reason = $null }
+}
+
+function Test-LimsAppV2ServiceBinarySettingsComplete {
+    param(
+        [Parameter(Mandatory = $true)] [string] $ServiceName,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $BinaryPath,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Arguments
+    )
+    $missing = @()
+    if ([string]::IsNullOrWhiteSpace($ServiceName)) { $missing += 'ServiceName' }
+    if ([string]::IsNullOrWhiteSpace($BinaryPath)) { $missing += 'BinaryPath' }
+    if ([string]::IsNullOrWhiteSpace($Arguments)) { $missing += 'Arguments' }
+    if ($missing.Count -gt 0) {
+        return [pscustomobject]@{
+            Complete = $false
+            Missing  = $missing
+            Reason   = "Service '$ServiceName' binary settings are incomplete ($($missing -join ', ')). Report these before changing the service."
+        }
+    }
+    return [pscustomobject]@{ Complete = $true; Missing = @(); Reason = $null }
+}
+
+function ConvertTo-NormalizedUnc {
+    param([Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Unc)
+    if ([string]::IsNullOrWhiteSpace($Unc)) { return '' }
+    return $Unc.Trim().TrimEnd('\').ToLowerInvariant()
+}
+
+function Test-NormalizedUncEquals {
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Left,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Right
+    )
+    return (ConvertTo-NormalizedUnc -Unc $Left) -eq (ConvertTo-NormalizedUnc -Unc $Right)
+}
+
+function Get-AzureFilesCredentialTargetFromUnc {
+    param([Parameter(Mandatory = $true)] [string] $Unc)
+    if ($Unc -notmatch '^\\\\([^\\]+)\\([^\\]+)') {
+        return [pscustomobject]@{ Accepted = $false; Target = ''; User = ''; Reason = "Azure Files UNC '$Unc' is not \\\\account.file.core.windows.net\\share." }
+    }
+    $hostName = $Matches[1]
+    $account = ($hostName -split '\.')[0]
+    if ([string]::IsNullOrWhiteSpace($account)) {
+        return [pscustomobject]@{ Accepted = $false; Target = ''; User = ''; Reason = "Unable to derive the Azure Files account name from UNC '$Unc'." }
+    }
+    return [pscustomobject]@{
+        Accepted = $true
+        Target   = $hostName
+        User     = "AZURE\$account"
+        Reason   = $null
+    }
+}
+
+function Test-SdmshomeLinkDecision {
+    param(
+        [Parameter(Mandatory = $true)] [bool] $PathExists,
+        [Parameter(Mandatory = $true)] [bool] $IsReparsePoint,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExistingTarget,
+        [Parameter(Mandatory = $true)] [string] $ExpectedTarget,
+        [Parameter(Mandatory = $false)] [bool] $IsDirectory = $false,
+        [Parameter(Mandatory = $false)] [bool] $IsFile = $false
+    )
+    if (-not $PathExists) {
+        return [pscustomobject]@{ Action = 'Create'; Reason = $null }
+    }
+    if ($IsReparsePoint) {
+        if (Test-NormalizedUncEquals -Left $ExistingTarget -Right $ExpectedTarget) {
+            return [pscustomobject]@{ Action = 'Reuse'; Reason = $null }
+        }
+        return [pscustomobject]@{
+            Action = 'Fail'
+            Reason = "Path is a reparse point targeting '$ExistingTarget', not the reviewed UNC. Refusing to replace it."
+        }
+    }
+    if ($IsFile) {
+        return [pscustomobject]@{ Action = 'Fail'; Reason = 'Path is an existing file. Refusing to replace it with a directory symbolic link.' }
+    }
+    if ($IsDirectory) {
+        return [pscustomobject]@{ Action = 'Fail'; Reason = 'Path is an existing directory. Refusing to replace it with a directory symbolic link.' }
+    }
+    return [pscustomobject]@{ Action = 'Fail'; Reason = 'Path is occupied by an unexpected item. Refusing to create the directory symbolic link.' }
+}
+
+function Test-CopyCompletedForConfigure {
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $CopyCompletedTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $CopyStatusTag
+    )
+    if ($CopyCompletedTag -eq 'Succeeded' -or $CopyStatusTag -eq 'Succeeded') {
+        return [pscustomobject]@{ Allowed = $true; Reason = $null }
+    }
+    return [pscustomobject]@{
+        Allowed = $false
+        Reason  = "configure-app requires a completed copy of the mapped A: volume (destination VM tag limsAppMigCopyCompleted or limsAppMigCopyStatus = Succeeded). Current completed='$CopyCompletedTag', status='$CopyStatusTag'."
+    }
+}
+
+function Test-LimsAppV2ActivationReviews {
+    param([Parameter(Mandatory = $true)] $AppV2)
+    $blocked = @()
+    foreach ($name in @('JdbcSettingsReviewStatus', 'ApacheSettingsReviewStatus', 'ShibbolethSettingsReviewStatus', 'AzureFilesUncReviewStatus')) {
+        if ([string]$AppV2.$name -ne 'Passed') { $blocked += "$name='$($AppV2.$name)'" }
+    }
+    if ($blocked.Count -gt 0) {
+        return [pscustomobject]@{
+            Passed = $false
+            Reason = "Automatic startup stays disabled until v2 JDBC, Apache, Shibboleth, and Azure Files UNC reviews are Passed ($($blocked -join ', '))."
+        }
+    }
+    return [pscustomobject]@{ Passed = $true; Reason = $null }
+}
+
+function Test-AzureFilesUncReadyForLink {
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SuppliedUnc,
+        [Parameter(Mandatory = $true)] $AppV2
+    )
+    if ([string]::IsNullOrWhiteSpace($SuppliedUnc)) {
+        return [pscustomobject]@{ Ready = $false; Skip = $true; Reason = 'Azure Files UNC was not supplied. The startup task is registered disabled and the sdmshome link is not created.' }
+    }
+    if ([string]$AppV2.AzureFilesUncReviewStatus -ne 'Passed') {
+        return [pscustomobject]@{
+            Ready  = $false
+            Skip   = $false
+            Reason = "Azure Files UNC was supplied but mapping AzureFilesUncReviewStatus='$($AppV2.AzureFilesUncReviewStatus)' is not Passed. Refusing to create A:\\lv89\\sdmshome."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace([string]$AppV2.AzureFilesUnc)) {
+        return [pscustomobject]@{ Ready = $false; Skip = $false; Reason = 'Azure Files UNC was supplied but the reviewed mapping UNC is empty. Record the v2 UNC in the mapping before creating the link.' }
+    }
+    if (-not (Test-NormalizedUncEquals -Left $SuppliedUnc -Right $AppV2.AzureFilesUnc)) {
+        return [pscustomobject]@{
+            Ready  = $false
+            Skip   = $false
+            Reason = 'Supplied Azure Files UNC does not match the reviewed mapping UNC. The supplied value is not logged.'
+        }
+    }
+    return [pscustomobject]@{ Ready = $true; Skip = $false; Reason = $null }
 }
 
 function Test-LimsAppMigStageCleanupAllowed {
