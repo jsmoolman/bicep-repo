@@ -32,6 +32,7 @@ Describe 'Test-LimsAppMigNumericBuildId' {
                 '##vso[task.setvariable variable=x]1',
                 '12##vso[task.logissue]x',
                 'abc',
+                'auto',
                 '-1',
                 '12.0',
                 ' 12'
@@ -55,33 +56,81 @@ Describe 'Resolve-LimsAppMigPipelineRunId' {
         $result.Reason | Should -Match 'logging-command|numeric|non-printable|newline'
     }
 
+    It 'lets plan ignore the literal auto token' {
+        $result = Resolve-LimsAppMigPipelineRunId -Action 'plan' -SuppliedRunId 'auto' -BuildId '99'
+        $result.Accepted | Should -Be $true
+        $result.RunId | Should -Be ''
+    }
+
     It 'requires cleanup to supply the original numeric Build.BuildId and never falls back to the current build' {
         $empty = Resolve-LimsAppMigPipelineRunId -Action 'cleanup' -SuppliedRunId '' -BuildId '99'
         $empty.Accepted | Should -Be $false
+        $auto = Resolve-LimsAppMigPipelineRunId -Action 'cleanup' -SuppliedRunId 'auto' -BuildId '99'
+        $auto.Accepted | Should -Be $false
+        $auto.Reason | Should -Match 'auto'
+        $auto.Reason | Should -Match 'original numeric'
         $ok = Resolve-LimsAppMigPipelineRunId -Action 'cleanup' -SuppliedRunId '42' -BuildId '99'
         $ok.Accepted | Should -Be $true
         $ok.RunId | Should -Be '42'
     }
 
-    It 'uses the current Build.BuildId for stage when none is supplied' {
-        $result = Resolve-LimsAppMigPipelineRunId -Action 'stage' -SuppliedRunId '' -BuildId '77'
-        $result.Accepted | Should -Be $true
-        $result.RunId | Should -Be '77'
+    It 'resolves auto to the current Build.BuildId for stage before numeric validation' {
+        $empty = Resolve-LimsAppMigPipelineRunId -Action 'stage' -SuppliedRunId '' -BuildId '77'
+        $empty.Accepted | Should -Be $true
+        $empty.RunId | Should -Be '77'
+        $auto = Resolve-LimsAppMigPipelineRunId -Action 'stage' -SuppliedRunId 'auto' -BuildId '77'
+        $auto.Accepted | Should -Be $true
+        $auto.RunId | Should -Be '77'
+        $explicit = Resolve-LimsAppMigPipelineRunId -Action 'stage' -SuppliedRunId '55' -BuildId '77'
+        $explicit.Accepted | Should -Be $true
+        $explicit.RunId | Should -Be '55'
+        $wrongCase = Resolve-LimsAppMigPipelineRunId -Action 'stage' -SuppliedRunId 'AUTO' -BuildId '77'
+        $wrongCase.Accepted | Should -Be $false
     }
 
-    It 'uses the current Build.BuildId for attach-and-inspect when none is supplied' {
-        $result = Resolve-LimsAppMigPipelineRunId -Action 'attach-and-inspect' -SuppliedRunId '' -BuildId '81'
-        $result.Accepted | Should -Be $true
-        $result.RunId | Should -Be '81'
+    It 'resolves auto to the current Build.BuildId for attach-and-inspect before numeric validation' {
+        $empty = Resolve-LimsAppMigPipelineRunId -Action 'attach-and-inspect' -SuppliedRunId '' -BuildId '81'
+        $empty.Accepted | Should -Be $true
+        $empty.RunId | Should -Be '81'
+        $auto = Resolve-LimsAppMigPipelineRunId -Action 'attach-and-inspect' -SuppliedRunId 'auto' -BuildId '81'
+        $auto.Accepted | Should -Be $true
+        $auto.RunId | Should -Be '81'
     }
 
-    It 'uses the current Build.BuildId for configure-app and activate-app when none is supplied' {
+    It 'uses the current Build.BuildId for configure-app and activate-app when none is supplied or auto is supplied' {
         $configure = Resolve-LimsAppMigPipelineRunId -Action 'configure-app' -SuppliedRunId '' -BuildId '88'
         $configure.Accepted | Should -Be $true
         $configure.RunId | Should -Be '88'
+        $configureAuto = Resolve-LimsAppMigPipelineRunId -Action 'configure-app' -SuppliedRunId 'auto' -BuildId '88'
+        $configureAuto.Accepted | Should -Be $true
+        $configureAuto.RunId | Should -Be '88'
         $activate = Resolve-LimsAppMigPipelineRunId -Action 'activate-app' -SuppliedRunId '91' -BuildId '88'
         $activate.Accepted | Should -Be $true
         $activate.RunId | Should -Be '91'
+    }
+}
+
+Describe 'Resolve-LimsAppMigPipelineAzureFilesUnc' {
+    It 'allows the not-used placeholder for actions that ignore UNC' {
+        foreach ($action in @('plan', 'attach-and-inspect', 'stage', 'cleanup')) {
+            $result = Resolve-LimsAppMigPipelineAzureFilesUnc -Action $action -SuppliedUnc 'not-used'
+            $result.Accepted | Should -Be $true
+            $result.Unc | Should -Be ''
+        }
+    }
+
+    It 'rejects the not-used placeholder for configure-app and activate-app' {
+        $configure = Resolve-LimsAppMigPipelineAzureFilesUnc -Action 'configure-app' -SuppliedUnc 'not-used'
+        $configure.Accepted | Should -Be $false
+        $configure.Reason | Should -Match 'not-used'
+        $activate = Resolve-LimsAppMigPipelineAzureFilesUnc -Action 'activate-app' -SuppliedUnc 'not-used'
+        $activate.Accepted | Should -Be $false
+        $ok = Resolve-LimsAppMigPipelineAzureFilesUnc -Action 'configure-app' -SuppliedUnc '\\limsfiles.file.core.windows.net\lv89'
+        $ok.Accepted | Should -Be $true
+        $ok.Unc | Should -Be '\\limsfiles.file.core.windows.net\lv89'
+        $empty = Resolve-LimsAppMigPipelineAzureFilesUnc -Action 'configure-app' -SuppliedUnc ''
+        $empty.Accepted | Should -Be $true
+        $empty.Unc | Should -Be ''
     }
 }
 
@@ -523,6 +572,10 @@ Describe 'APP v2 configuration safety decisions' {
         $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
         $skip = Test-AzureFilesUncReadyForLink -SuppliedUnc '' -AppV2 $dev.AppV2
         $skip.Skip | Should -Be $true
+        $placeholder = Test-AzureFilesUncReadyForLink -SuppliedUnc 'not-used' -AppV2 $dev.AppV2
+        $placeholder.Ready | Should -Be $false
+        $placeholder.Skip | Should -Be $false
+        $placeholder.Reason | Should -Match 'not-used'
         $unreviewed = Test-AzureFilesUncReadyForLink -SuppliedUnc '\\limsfiles.file.core.windows.net\lv89' -AppV2 $dev.AppV2
         $unreviewed.Ready | Should -Be $false
         $unreviewed.Skip | Should -Be $false

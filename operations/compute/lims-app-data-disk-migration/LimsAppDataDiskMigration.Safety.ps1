@@ -49,6 +49,15 @@ function Test-LimsAppMigPipelineSafeValue {
     return [pscustomobject]@{ Accepted = $true; Reason = $null }
 }
 
+function Test-LimsAppMigLiteralToken {
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Value,
+        [Parameter(Mandatory = $true)] [string] $Token
+    )
+    if ($null -eq $Value) { return $false }
+    return $Value.Trim() -ceq $Token
+}
+
 function Resolve-LimsAppMigPipelineRunId {
     param(
         [Parameter(Mandatory = $true)] [string] $Action,
@@ -58,9 +67,10 @@ function Resolve-LimsAppMigPipelineRunId {
 
     $supplied = if ($null -eq $SuppliedRunId) { '' } else { $SuppliedRunId.Trim() }
     $build = if ($null -eq $BuildId) { '' } else { $BuildId.Trim() }
+    $isAuto = Test-LimsAppMigLiteralToken -Value $supplied -Token 'auto'
 
     if ($Action -eq 'plan') {
-        if ([string]::IsNullOrEmpty($supplied)) {
+        if ([string]::IsNullOrEmpty($supplied) -or $isAuto) {
             return [pscustomobject]@{ Accepted = $true; RunId = ''; Reason = $null }
         }
         $check = Test-LimsAppMigNumericBuildId -Value $supplied
@@ -71,8 +81,12 @@ function Resolve-LimsAppMigPipelineRunId {
     }
 
     if ($Action -eq 'cleanup') {
-        if ([string]::IsNullOrEmpty($supplied)) {
-            return [pscustomobject]@{ Accepted = $false; RunId = ''; Reason = 'Cleanup requires migrationRunId set to the numeric Build.BuildId of the stage or attach-and-inspect run that created the temporary disk.' }
+        if ([string]::IsNullOrEmpty($supplied) -or $isAuto) {
+            return [pscustomobject]@{
+                Accepted = $false
+                RunId    = ''
+                Reason   = "Cleanup rejects migrationRunId 'auto' and empty values. Supply the original numeric Build.BuildId of the stage or attach-and-inspect run that created the temporary disk."
+            }
         }
         $check = Test-LimsAppMigNumericBuildId -Value $supplied
         if (-not $check.Accepted) {
@@ -83,7 +97,7 @@ function Resolve-LimsAppMigPipelineRunId {
 
     if ($Action -eq 'stage' -or $Action -eq 'attach-and-inspect' -or $Action -eq 'configure-app' -or $Action -eq 'activate-app') {
         $candidate = $supplied
-        if ([string]::IsNullOrEmpty($candidate)) { $candidate = $build }
+        if ([string]::IsNullOrEmpty($candidate) -or $isAuto) { $candidate = $build }
         $check = Test-LimsAppMigNumericBuildId -Value $candidate
         if (-not $check.Accepted) {
             return [pscustomobject]@{ Accepted = $false; RunId = ''; Reason = $check.Reason }
@@ -92,6 +106,38 @@ function Resolve-LimsAppMigPipelineRunId {
     }
 
     return [pscustomobject]@{ Accepted = $false; RunId = ''; Reason = "Unsupported action '$Action'." }
+}
+
+function Resolve-LimsAppMigPipelineAzureFilesUnc {
+    <#
+        Form default is the literal token not-used so the required
+        parameter can be submitted for actions that ignore UNC.
+        configure-app and activate-app never accept that placeholder.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [string] $Action,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SuppliedUnc
+    )
+
+    $supplied = if ($null -eq $SuppliedUnc) { '' } else { $SuppliedUnc.Trim() }
+    $isPlaceholder = Test-LimsAppMigLiteralToken -Value $supplied -Token 'not-used'
+
+    if ($Action -eq 'configure-app' -or $Action -eq 'activate-app') {
+        if ($isPlaceholder) {
+            return [pscustomobject]@{
+                Accepted = $false
+                Unc      = ''
+                Reason   = "azureFilesUnc placeholder 'not-used' is not accepted for configure-app or activate-app. Supply the reviewed v2 UNC after AzureFilesUncReviewStatus is Passed."
+            }
+        }
+        return [pscustomobject]@{ Accepted = $true; Unc = $supplied; Reason = $null }
+    }
+
+    if ($Action -eq 'plan' -or $Action -eq 'attach-and-inspect' -or $Action -eq 'stage' -or $Action -eq 'cleanup') {
+        return [pscustomobject]@{ Accepted = $true; Unc = ''; Reason = $null }
+    }
+
+    return [pscustomobject]@{ Accepted = $false; Unc = ''; Reason = "Unsupported action '$Action'." }
 }
 
 function ConvertTo-NormalizedResourceId {
@@ -824,7 +870,15 @@ function Test-AzureFilesUncReadyForLink {
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SuppliedUnc,
         [Parameter(Mandatory = $true)] $AppV2
     )
-    if ([string]::IsNullOrWhiteSpace($SuppliedUnc)) {
+    $supplied = if ($null -eq $SuppliedUnc) { '' } else { $SuppliedUnc.Trim() }
+    if (Test-LimsAppMigLiteralToken -Value $supplied -Token 'not-used') {
+        return [pscustomobject]@{
+            Ready  = $false
+            Skip   = $false
+            Reason = "azureFilesUnc placeholder 'not-used' is not accepted for configure-app or activate-app. Supply the reviewed v2 UNC after AzureFilesUncReviewStatus is Passed."
+        }
+    }
+    if ([string]::IsNullOrWhiteSpace($supplied)) {
         return [pscustomobject]@{ Ready = $false; Skip = $true; Reason = 'Azure Files UNC was not supplied. The startup task is registered disabled and the sdmshome link is not created.' }
     }
     if ([string]$AppV2.AzureFilesUncReviewStatus -ne 'Passed') {
@@ -837,7 +891,7 @@ function Test-AzureFilesUncReadyForLink {
     if ([string]::IsNullOrWhiteSpace([string]$AppV2.AzureFilesUnc)) {
         return [pscustomobject]@{ Ready = $false; Skip = $false; Reason = 'Azure Files UNC was supplied but the reviewed mapping UNC is empty. Record the v2 UNC in the mapping before creating the link.' }
     }
-    if (-not (Test-NormalizedUncEquals -Left $SuppliedUnc -Right $AppV2.AzureFilesUnc)) {
+    if (-not (Test-NormalizedUncEquals -Left $supplied -Right $AppV2.AzureFilesUnc)) {
         return [pscustomobject]@{
             Ready  = $false
             Skip   = $false

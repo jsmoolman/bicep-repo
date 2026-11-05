@@ -62,10 +62,16 @@
 #   preserved until temporary-disk cleanup succeeds. Overlapping
 #   attempts are refused even with the same migration run ID.
 #
-#   migrationRunId is passed only through task environment values and is
-#   validated as a numeric Azure DevOps Build.BuildId before it is
-#   published or used. Plan is read-only, including when the Disk
-#   Encryption Set pin is missing (report live DES, then fail).
+#   migrationRunId defaults to the literal token auto so the required
+#   form field can be submitted. auto is resolved to this Build.BuildId
+#   for stage and attach-and-inspect before numeric validation.
+#   cleanup rejects auto and requires the original run's numeric ID.
+#   The resolved value is passed only through task environment values
+#   and must be a numeric Azure DevOps Build.BuildId before it is
+#   published or used. azureFilesUnc defaults to not-used for actions
+#   that ignore UNC; configure-app and activate-app reject that
+#   placeholder. Plan is read-only, including when the Disk Encryption
+#   Set pin is missing (report live DES, then fail).
 #
 #   Permissions: the Azure DevOps service connection reused below already
 #   has customer-confirmed Owner access across all LIMS subscriptions.
@@ -128,9 +134,9 @@ parameters:
       - activate-app
 
   - name: azureFilesUnc
-    displayName: "configure-app / activate-app — explicit v2 Azure Files UNC for A:\\lv89\\sdmshome. Leave empty to skip link creation. Must match the reviewed mapping UNC after AzureFilesUncReviewStatus is Passed."
+    displayName: "configure-app / activate-app — explicit v2 Azure Files UNC for A:\\lv89\\sdmshome. Leave 'not-used' only for actions that ignore UNC (plan, attach-and-inspect, stage, cleanup). configure-app and activate-app reject 'not-used'; supply the reviewed mapping UNC after AzureFilesUncReviewStatus is Passed."
     type: string
-    default: ''
+    default: 'not-used'
 
   - name: captureMode
     displayName: "stage and attach-and-inspect, REQUIRED — record whether this capture is 'online' (source still writable) or 'writes-quiesced' (application writes were stopped for the capture window). Ignored for plan, cleanup, configure-app, and activate-app. 'unspecified' is rejected by stage and attach-and-inspect."
@@ -142,9 +148,9 @@ parameters:
       - writes-quiesced
 
   - name: migrationRunId
-    displayName: "stage / attach-and-inspect — leave empty to use this Build.BuildId. Overlapping attempts with the same run ID are refused. cleanup — REQUIRED; the stage or attach-and-inspect Build.BuildId that created the temporary disk. Ignored for plan."
+    displayName: "stage / attach-and-inspect — leave 'auto' to use this Build.BuildId. Overlapping attempts with the same run ID are refused. cleanup — replace 'auto' with the original numeric Build.BuildId of the stage or attach-and-inspect run that created the temporary disk. 'auto' is rejected for cleanup. Ignored for plan."
     type: string
-    default: ''
+    default: 'auto'
 
   - name: deleteSnapshot
     displayName: 'cleanup only — when true, also delete this run''s incremental snapshot after verifying its resource ID. Default false (retain). Ignored for plan, attach-and-inspect, and stage.'
@@ -206,13 +212,28 @@ jobs:
               exit 1
             }
           }
+          $uncResolved = Resolve-LimsAppMigPipelineAzureFilesUnc -Action $env:LIMS_APP_MIG_ACTION -SuppliedUnc $env:LIMS_APP_MIG_AZURE_FILES_UNC
+          if (-not $uncResolved.Accepted) {
+            Write-Error $uncResolved.Reason
+            exit 1
+          }
+          $unc = [string]$uncResolved.Unc
+          if (-not [string]::IsNullOrEmpty($unc)) {
+            $uncSafe = Test-LimsAppMigPipelineSafeValue -Name 'effectiveAzureFilesUnc' -Value $unc
+            if (-not $uncSafe.Accepted) {
+              Write-Error $uncSafe.Reason
+              exit 1
+            }
+          }
           Write-Output "Effective migration run ID: '$runId' (action=$($env:LIMS_APP_MIG_ACTION))"
           Write-Output "##vso[task.setvariable variable=effectiveMigrationRunId]$runId"
+          Write-Output "##vso[task.setvariable variable=effectiveAzureFilesUnc]$unc"
         displayName: 'Resolve migration run ID'
         env:
           LIMS_APP_MIG_ACTION: ${{ parameters.action }}
           LIMS_APP_MIG_RUN_ID_INPUT: ${{ parameters.migrationRunId }}
           LIMS_APP_MIG_BUILD_ID: $(Build.BuildId)
+          LIMS_APP_MIG_AZURE_FILES_UNC: ${{ parameters.azureFilesUnc }}
           LIMS_APP_MIG_SAFETY_SCRIPT: $(safetyScriptPath)
 
       - task: AzureCLI@2
@@ -412,7 +433,7 @@ jobs:
                 ConfigurePhase=$(limsAppMigConfigurePhase)
                 ExpectedDestinationDiskResourceId=$(limsAppMigDestinationDiskId)
                 ExpectedDestinationDiskUniqueId=$(limsAppMigDestinationDiskUniqueId)
-                AzureFilesUnc=${{ parameters.azureFilesUnc }}
+                AzureFilesUnc=$(effectiveAzureFilesUnc)
               ${{ if eq(parameters.action, 'configure-app') }}:
                 RUN_COMMAND_PROTECTED_PARAMETERS: |
                   JbossRunnerPassword=$(jbossRunnerPassword)

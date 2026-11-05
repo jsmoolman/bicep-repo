@@ -302,6 +302,8 @@ Describe 'committed pipeline and scripts keep secrets out of source' {
     It 'references the variable group only for configure-app and never hardcodes secret values' {
         $pipeline = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\..\.azuredevops\pipelines\migrate-lims-app-data-disk.yml') -Raw
         $pipeline | Should -Match 'lims-dev-app-v2-secrets'
+        $pipeline | Should -Match '(?m)^\s+default: ''auto'''
+        $pipeline | Should -Match '(?m)^\s+default: ''not-used'''
         $pipeline | Should -Match 'eq\(parameters\.action, ''configure-app''\)'
         $pipeline | Should -Match '\$\(jbossRunnerPassword\)'
         $pipeline | Should -Match '\$\(azureFilesAccessKey\)'
