@@ -1,9 +1,11 @@
 <#
     Pester tests for Configure-LimsAppV2.ps1.
 
-    Mocked adapters only. Covers reruns, a wrong VM, a missing secret,
-    and a conflicting sdmshome link. Secrets must not appear in failure
-    messages.
+    Mocked adapters cover preflight-before-mutation, a wrong VM, a
+    missing secret, a conflicting sdmshome link, a stale scheduled-task
+    result, and task-can-read / JBoss-cannot. A separate Describe
+    exercises the real Register-ScheduledTask User parameter set with
+    disposable credentials when the host allows it.
 #>
 
 Set-StrictMode -Version Latest
@@ -14,6 +16,21 @@ BeforeAll {
     . (Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Safety.ps1')
     . (Join-Path $PSScriptRoot 'Configure-LimsAppV2.ps1')
     $script:Dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+
+    function New-CompleteDevEnvironment {
+        $clone = $script:Dev.PSObject.Copy()
+        $clone.AppV2 = $script:Dev.AppV2.PSObject.Copy()
+        $clone.AppV2.JbossProcrunExePath = 'A:\jboss\bin\prunsrv.exe'
+        $clone.AppV2.JbossProcrunJvm = 'A:\java\bin\server\jvm.dll'
+        $clone.AppV2.JbossProcrunStartClass = 'org.jboss.modules.Main'
+        $clone.AppV2.JbossProcrunWorkingPath = 'A:\jboss'
+        $clone.AppV2.ApacheBinaryPath = 'A:\Apache24\bin\httpd.exe'
+        $clone.AppV2.ApacheArguments = '-k runservice'
+        $clone.AppV2.ShibbolethBinaryPath = 'A:\Shibboleth\sbin\shibd.exe'
+        $clone.AppV2.ShibbolethArguments = '-f A:\Shibboleth\etc\shibboleth\shibboleth2.xml -t xml'
+        $clone.AppV2.JbossRunnerDirectoryPaths = @('A:\jboss')
+        return $clone
+    }
 }
 
 Describe 'reviewed DEV AppV2 mapping' {
@@ -74,9 +91,15 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         Mock Stop-ServiceAdapter { }
         Mock Start-ServiceAdapter { }
         Mock Get-ScheduledTaskAdapter { param($TaskName) return $script:tasks[$TaskName] }
-        Mock Register-ScheduledTaskAdapter { param($TaskName) $script:tasks[$TaskName] = [pscustomobject]@{ TaskName = $TaskName; Disabled = $true } }
+        Mock Register-ScheduledTaskAdapter { param($TaskName, $Disabled) $script:tasks[$TaskName] = [pscustomobject]@{ TaskName = $TaskName; Disabled = $Disabled } }
         Mock Enable-ScheduledTaskAdapter { }
+        Mock Disable-ScheduledTaskAdapter { param($TaskName) if ($script:tasks.ContainsKey($TaskName)) { $script:tasks[$TaskName].Disabled = $true } }
         Mock Start-ScheduledTaskAdapter { }
+        Mock Get-ScheduledTaskInfoAdapter { return [pscustomobject]@{ LastRunTime = [datetime]::MinValue; LastTaskResult = 0x41301 } }
+        Mock Get-UtcNowAdapter { return [datetime]::Parse('2026-11-05T04:00:00Z').ToUniversalTime() }
+        Mock Wait-FreshScheduledTaskResultAdapter { return [pscustomobject]@{ Fresh = $true; Succeeded = $true; Reason = $null } }
+        Mock Get-ServiceProcessIdAdapter { return 4242 }
+        Mock Test-PathReadAsProcessAdapter { return [pscustomobject]@{ Readable = $true; Reason = $null } }
         Mock Add-AzureFilesCredentialAdapter { }
         Mock Test-PathExistsAdapter { param($Path) return $script:createdLinks.ContainsKey($Path) }
         Mock Get-ItemAdapter { param($Path) return $script:createdLinks[$Path] }
@@ -117,42 +140,73 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         $script:Params.JbossRunnerPassword = ''
         $failure = $null
         try { Invoke-LimsAppV2Configure @script:Params } catch { $failure = $_.Exception.Message }
+        $failure | Should -Match 'Preflight failed before any guest change'
         $failure | Should -Match 'JbossRunnerPassword'
         $failure | Should -Match 'not logged'
+        $failure | Should -Match 'Procrun'
         $failure | Should -Not -Match 'NotARealKey'
         Should -Invoke New-LocalUserAdapter -Times 0
+        Should -Invoke Register-ScheduledTaskAdapter -Times 0
+        Should -Invoke Invoke-ProcessAdapter -Times 0
     }
 
-    It 'reconciles an existing jboss-runner account on rerun' {
+    It 'reports every missing wrapper setting and does not mutate on rerun when preflight fails' {
         $script:localUsers['jboss-runner'] = [pscustomobject]@{ Name = 'jboss-runner' }
         $failure = $null
         try { Invoke-LimsAppV2Configure @script:Params } catch { $failure = $_.Exception.Message }
+        $failure | Should -Match 'Preflight failed before any guest change'
         $failure | Should -Match 'Procrun settings are incomplete'
+        $failure | Should -Match 'Apache-2.4.57'
+        $failure | Should -Match 'shibd_Default'
+        Should -Invoke New-LocalUserAdapter -Times 0
+        Should -Invoke Set-LocalUserPasswordAdapter -Times 0
+        Should -Invoke Register-ScheduledTaskAdapter -Times 0
+        Should -Invoke Invoke-ProcessAdapter -Times 0
+    }
+
+    It 'reconciles an existing jboss-runner account on rerun after preflight passes' {
+        $clone = New-CompleteDevEnvironment
+        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Test-PathExistsAdapter {
+            param($Path)
+            if ($Path -eq 'A:\lv89\sdmshome') { return $script:createdLinks.ContainsKey($Path) }
+            return $true
+        }
+        $script:localUsers['jboss-runner'] = [pscustomobject]@{ Name = 'jboss-runner' }
+        $null = Invoke-LimsAppV2Configure @script:Params
         $script:localUsers['jboss-runner'].Reconciled | Should -Be $true
         Should -Invoke New-LocalUserAdapter -Times 0
         Should -Invoke Set-LocalUserPasswordAdapter -Times 1
         Should -Invoke Grant-ServiceLogonRightAdapter -Times 1
-        Should -Invoke Register-ScheduledTaskAdapter -Times 1
+        Should -Invoke Register-ScheduledTaskAdapter -Times 1 -ParameterFilter { $Disabled -eq $true }
     }
 
-    It 'fails when a different item occupies A:\lv89\sdmshome' {
-        $clone = $script:Dev.PSObject.Copy()
-        $clone.AppV2 = $script:Dev.AppV2.PSObject.Copy()
+    It 'provisions the Azure Files credential as jboss-runner and registers the task disabled' {
+        $clone = New-CompleteDevEnvironment
         $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
         $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
-        $clone.AppV2.JbossProcrunExePath = 'A:\jboss\bin\prunsrv.exe'
-        $clone.AppV2.JbossProcrunJvm = 'A:\java\bin\server\jvm.dll'
-        $clone.AppV2.JbossProcrunStartClass = 'org.jboss.modules.Main'
-        $clone.AppV2.JbossProcrunWorkingPath = 'A:\jboss'
-        $clone.AppV2.ApacheBinaryPath = 'A:\Apache24\bin\httpd.exe'
-        $clone.AppV2.ApacheArguments = '-k runservice'
-        $clone.AppV2.ShibbolethBinaryPath = 'A:\Shibboleth\sbin\shibd.exe'
-        $clone.AppV2.ShibbolethArguments = '-f A:\Shibboleth\etc\shibboleth\shibboleth2.xml -t xml'
         Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
         Mock Test-PathExistsAdapter {
             param($Path)
-            if ($Path -like '*prunsrv.exe' -or $Path -like '*httpd.exe' -or $Path -like '*shibd.exe' -or $Path -like '*\lv89') { return $true }
-            return $false
+            return $Path -ne 'A:\lv89\sdmshome'
+        }
+        $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        $null = Invoke-LimsAppV2Configure @script:Params
+        Should -Invoke Add-AzureFilesCredentialAdapter -Times 1 -ParameterFilter { $RunAsUserName -eq '.\jboss-runner' -and $Target -eq 'limsdevfiles.file.core.windows.net' }
+        Should -Invoke Register-ScheduledTaskAdapter -Times 1 -ParameterFilter { $Disabled -eq $true -and $UserName -eq '.\jboss-runner' }
+        Should -Invoke New-DirectorySymbolicLinkAdapter -Times 1
+        Should -Invoke Enable-ScheduledTaskAdapter -Times 0
+    }
+
+    It 'fails when a different item occupies A:\lv89\sdmshome and does not mutate' {
+        $clone = New-CompleteDevEnvironment
+        $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
+        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Test-PathExistsAdapter {
+            param($Path)
+            if ($Path -eq 'A:\lv89\sdmshome') { return $true }
+            return $true
         }
         $link = 'A:\lv89\sdmshome'
         $script:createdLinks[$link] = [pscustomobject]@{
@@ -162,7 +216,69 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         }
         $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
         { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*existing directory*'
+        Should -Invoke New-LocalUserAdapter -Times 0
+        Should -Invoke Register-ScheduledTaskAdapter -Times 0
         Should -Invoke New-DirectorySymbolicLinkAdapter -Times 0
+        Should -Invoke Add-AzureFilesCredentialAdapter -Times 0
+    }
+
+    It 'refuses a stale scheduled-task result, leaves JBoss stopped, and restores the task to disabled' {
+        $clone = New-CompleteDevEnvironment
+        $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
+        $clone.AppV2.JdbcSettingsReviewStatus = 'Passed'
+        $clone.AppV2.ApacheSettingsReviewStatus = 'Passed'
+        $clone.AppV2.ShibbolethSettingsReviewStatus = 'Passed'
+        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Test-PathExistsAdapter { return $true }
+        $link = 'A:\lv89\sdmshome'
+        $script:createdLinks[$link] = [pscustomobject]@{
+            PSIsContainer = $true
+            Attributes    = [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+            Target        = '\\limsdevfiles.file.core.windows.net\lv89'
+        }
+        $script:tasks['LIMS-AzureFiles-Sdmshome'] = [pscustomobject]@{ TaskName = 'LIMS-AzureFiles-Sdmshome'; Disabled = $true }
+        $script:services['JBoss-8.0'] = [pscustomobject]@{ Name = 'JBoss-8.0'; Status = 'Stopped' }
+        Mock Wait-FreshScheduledTaskResultAdapter {
+            return [pscustomobject]@{ Fresh = $false; Succeeded = $false; Reason = 'Scheduled-task LastRunTime was not updated for this attempt. Refusing to accept a stale result.' }
+        }
+        $script:Params.ConfigurePhase = 'Activate'
+        $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*stale*'
+        Should -Invoke Start-ServiceAdapter -Times 0
+        Should -Invoke Enable-ScheduledTaskAdapter -Times 0
+        Should -Invoke Disable-ScheduledTaskAdapter -Times 1
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 0
+    }
+
+    It 'leaves JBoss stopped and restores the task when the task can read the share but JBoss cannot' {
+        $clone = New-CompleteDevEnvironment
+        $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
+        $clone.AppV2.JdbcSettingsReviewStatus = 'Passed'
+        $clone.AppV2.ApacheSettingsReviewStatus = 'Passed'
+        $clone.AppV2.ShibbolethSettingsReviewStatus = 'Passed'
+        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Test-PathExistsAdapter { return $true }
+        $link = 'A:\lv89\sdmshome'
+        $script:createdLinks[$link] = [pscustomobject]@{
+            PSIsContainer = $true
+            Attributes    = [System.IO.FileAttributes]::Directory -bor [System.IO.FileAttributes]::ReparsePoint
+            Target        = '\\limsdevfiles.file.core.windows.net\lv89'
+        }
+        $script:tasks['LIMS-AzureFiles-Sdmshome'] = [pscustomobject]@{ TaskName = 'LIMS-AzureFiles-Sdmshome'; Disabled = $true }
+        $script:services['JBoss-8.0'] = [pscustomobject]@{ Name = 'JBoss-8.0'; Status = 'Stopped' }
+        Mock Start-ServiceAdapter { $script:services['JBoss-8.0'].Status = 'Running' }
+        Mock Stop-ServiceAdapter { $script:services['JBoss-8.0'].Status = 'Stopped' }
+        Mock Get-ServiceAdapter { param($Name) return $script:services[$Name] }
+        Mock Test-PathReadAsProcessAdapter { return [pscustomobject]@{ Readable = $false; Reason = "JBoss service context cannot read '$link'." } }
+        $script:Params.ConfigurePhase = 'Activate'
+        $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
+        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*JBoss service context cannot read*'
+        $script:services['JBoss-8.0'].Status | Should -Be 'Stopped'
+        $script:tasks['LIMS-AzureFiles-Sdmshome'].Disabled | Should -Be $true
+        Should -Invoke Enable-ScheduledTaskAdapter -Times 0
+        Should -Invoke Set-ServiceStartupTypeAdapter -Times 0
     }
 }
 
@@ -178,5 +294,40 @@ Describe 'committed pipeline and scripts keep secrets out of source' {
         $guest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Configure-LimsAppV2.ps1') -Raw
         $guest | Should -Not -Match 'NotARealPassword'
         $guest | Should -Match 'protected parameters'
+        $guest | Should -Match 'Register-ScheduledTask -TaskName \$TaskName -Action \$action -Trigger \$trigger -Settings \$settings -User \$UserName -Password \$Password -RunLevel Highest -Force'
+        $guest | Should -Not -Match 'Register-ScheduledTask[^\r\n]*-Principal'
+        $guest | Should -Match 'LoadUserProfile'
+        $guest | Should -Match 'RunAsUserName'
+        $guest | Should -Not -Match '/pass:\$AccessKey[^\r\n]*Write-Host'
+    }
+}
+
+Describe 'Real Windows Register-ScheduledTask (User parameter set)' {
+    It 'registers a disabled startup task with disposable credentials' {
+        $principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+        if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+            Set-ItResult -Skipped -Because 'Administrator is required to create a disposable local user and call Register-ScheduledTask. Mocked tests already cover the orchestration; this host did not exercise the real cmdlet.'
+            return
+        }
+        $taskName = 'lims-app-v2-task-' + [guid]::NewGuid().ToString('N').Substring(0, 8)
+        $userName = 'limsT' + [guid]::NewGuid().ToString('N').Substring(0, 10)
+        $plain = 'Tmp!' + [guid]::NewGuid().ToString('N')
+        $createdUser = $false
+        $createdTask = $false
+        try {
+            $secure = ConvertTo-SecureString -String $plain -AsPlainText -Force
+            New-LocalUser -Name $userName -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires | Out-Null
+            $createdUser = $true
+            Register-ScheduledTaskAdapter -TaskName $taskName -UserName ".\$userName" -Password $plain -Command 'powershell.exe' -Arguments '-NoProfile -NonInteractive -Command "exit 0"' -Disabled $true
+            $createdTask = $true
+            $task = Get-ScheduledTask -TaskName $taskName
+            $task.Settings.Enabled | Should -Be $false
+            $task.Principal.LogonType | Should -Be 'Password'
+            $task.Principal.UserId | Should -Match $userName
+        }
+        finally {
+            if ($createdTask) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+            if ($createdUser) { Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue }
+        }
     }
 }

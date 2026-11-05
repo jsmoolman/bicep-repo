@@ -328,6 +328,67 @@ Describe 'APP v2 configuration safety decisions' {
         (Test-LimsAppV2ActivationReviews -AppV2 $ready).Passed | Should -Be $true
     }
 
+    It 'collects missing secrets, wrapper settings, invalid paths, and a link conflict before any mutation' {
+        $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+        $empty = Get-LimsAppV2RegisterPreflight -Environment $dev -JbossRunnerPassword '' -AzureFilesAccessKey 'NotARealKey' -AzureFilesUnc '' -PathExists @{}
+        $empty.Allowed | Should -Be $false
+        $empty.Reason | Should -Match 'JbossRunnerPassword'
+        $empty.Reason | Should -Match 'Procrun'
+        $empty.Reason | Should -Match 'Apache-2.4.57'
+        $empty.Reason | Should -Match 'shibd_Default'
+        $empty.Reason | Should -Match 'application-directory'
+        $empty.Reason | Should -Not -Match 'NotARealKey'
+
+        $ready = $dev.PSObject.Copy()
+        $ready.AppV2 = $dev.AppV2.PSObject.Copy()
+        $ready.AppV2.JbossProcrunExePath = 'A:\jboss\bin\prunsrv.exe'
+        $ready.AppV2.JbossProcrunJvm = 'A:\java\bin\server\jvm.dll'
+        $ready.AppV2.JbossProcrunStartClass = 'org.jboss.modules.Main'
+        $ready.AppV2.JbossProcrunWorkingPath = 'A:\jboss'
+        $ready.AppV2.ApacheBinaryPath = 'A:\Apache24\bin\httpd.exe'
+        $ready.AppV2.ApacheArguments = '-k runservice'
+        $ready.AppV2.ShibbolethBinaryPath = 'A:\Shibboleth\sbin\shibd.exe'
+        $ready.AppV2.ShibbolethArguments = '-f A:\Shibboleth\etc\shibboleth\shibboleth2.xml'
+        $ready.AppV2.JbossRunnerDirectoryPaths = @('A:\jboss')
+        $ready.AppV2.AzureFilesUnc = '\\limsfiles.file.core.windows.net\lv89'
+        $ready.AppV2.AzureFilesUncReviewStatus = 'Passed'
+        $paths = @{
+            'A:\jboss\bin\prunsrv.exe' = $true
+            'A:\java\bin\server\jvm.dll' = $true
+            'A:\jboss' = $true
+            'A:\Apache24\bin\httpd.exe' = $true
+            'A:\Shibboleth\sbin\shibd.exe' = $true
+        }
+        $conflict = [pscustomobject]@{
+            ParentExists   = $true
+            Exists         = $true
+            IsReparsePoint = $false
+            IsDirectory    = $true
+            IsFile         = $false
+            Target         = ''
+        }
+        $blocked = Get-LimsAppV2RegisterPreflight -Environment $ready -JbossRunnerPassword 'pw' -AzureFilesAccessKey 'key' -AzureFilesUnc '\\limsfiles.file.core.windows.net\lv89' -PathExists $paths -LinkObservation $conflict
+        $blocked.Allowed | Should -Be $false
+        $blocked.Reason | Should -Match 'existing directory'
+        (Get-LimsAppV2RegisterPreflight -Environment $ready -JbossRunnerPassword 'pw' -AzureFilesAccessKey 'key' -AzureFilesUnc '\\limsfiles.file.core.windows.net\lv89' -PathExists $paths -LinkObservation ([pscustomobject]@{
+                    ParentExists = $true; Exists = $false; IsReparsePoint = $false; IsDirectory = $false; IsFile = $false; Target = ''
+                })).Allowed | Should -Be $true
+    }
+
+    It 'rejects a stale scheduled-task LastRunTime even when LastTaskResult is 0' {
+        $started = [datetime]::Parse('2026-11-05T03:00:00Z').ToUniversalTime()
+        $stale = [datetime]::Parse('2026-11-05T02:00:00Z').ToUniversalTime()
+        $same = Test-LimsAppV2ScheduledTaskResultIsFresh -AttemptStartedUtc $started -PreviousLastRunTime $stale -CurrentLastRunTime $stale -LastTaskResult 0
+        $same.Fresh | Should -Be $false
+        $same.Reason | Should -Match 'stale'
+        $freshFail = Test-LimsAppV2ScheduledTaskResultIsFresh -AttemptStartedUtc $started -PreviousLastRunTime $stale -CurrentLastRunTime $started.AddSeconds(5) -LastTaskResult 2
+        $freshFail.Fresh | Should -Be $true
+        $freshFail.Succeeded | Should -Be $false
+        $ok = Test-LimsAppV2ScheduledTaskResultIsFresh -AttemptStartedUtc $started -PreviousLastRunTime $stale -CurrentLastRunTime $started.AddSeconds(5) -LastTaskResult 0
+        $ok.Fresh | Should -Be $true
+        $ok.Succeeded | Should -Be $true
+    }
+
     It 'creates the sdmshome link only when the supplied UNC is reviewed and matches the mapping' {
         $dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
         $skip = Test-AzureFilesUncReadyForLink -SuppliedUnc '' -AppV2 $dev.AppV2

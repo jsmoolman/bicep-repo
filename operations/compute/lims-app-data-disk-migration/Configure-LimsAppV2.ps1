@@ -245,12 +245,16 @@ function Register-ScheduledTaskAdapter {
     )
     $action = New-ScheduledTaskAction -Execute $Command -Argument $Arguments
     $trigger = New-ScheduledTaskTrigger -AtStartup
-    $principal = New-ScheduledTaskPrincipal -UserId $UserName -LogonType Password -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    if ($Disabled) {
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -Disable
+    }
+    else {
+        $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    }
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existing) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false }
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Password $Password -User $UserName | Out-Null
-    if ($Disabled) { Disable-ScheduledTask -TaskName $TaskName | Out-Null }
+    # User parameter set only: -User/-Password/-RunLevel. Do not mix -Principal.
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $UserName -Password $Password -RunLevel Highest -Force | Out-Null
 }
 
 function Enable-ScheduledTaskAdapter {
@@ -258,20 +262,111 @@ function Enable-ScheduledTaskAdapter {
     Enable-ScheduledTask -TaskName $TaskName | Out-Null
 }
 
+function Disable-ScheduledTaskAdapter {
+    param([Parameter(Mandatory = $true)] [string] $TaskName)
+    Disable-ScheduledTask -TaskName $TaskName | Out-Null
+}
+
 function Start-ScheduledTaskAdapter {
     param([Parameter(Mandatory = $true)] [string] $TaskName)
     Start-ScheduledTask -TaskName $TaskName
 }
 
+function Get-ScheduledTaskInfoAdapter {
+    param([Parameter(Mandatory = $true)] [string] $TaskName)
+    return Get-ScheduledTaskInfo -TaskName $TaskName
+}
+
+function Get-UtcNowAdapter { return [datetime]::UtcNow }
+
 function Add-AzureFilesCredentialAdapter {
     param(
         [Parameter(Mandatory = $true)] [string] $Target,
         [Parameter(Mandatory = $true)] [string] $User,
-        [Parameter(Mandatory = $true)] [string] $AccessKey
+        [Parameter(Mandatory = $true)] [string] $AccessKey,
+        [Parameter(Mandatory = $true)] [string] $RunAsUserName,
+        [Parameter(Mandatory = $true)] [string] $RunAsPassword
     )
-    $p = Start-Process -FilePath 'cmdkey.exe' -ArgumentList @("/add:$Target", "/user:$User", "/pass:$AccessKey") -Wait -PassThru -WindowStyle Hidden
+    $secure = ConvertTo-SecureStringPlain -Plain $RunAsPassword
+    $runAs = New-Object System.Management.Automation.PSCredential($RunAsUserName, $secure)
+    $p = Start-Process -FilePath 'cmdkey.exe' -ArgumentList @("/add:$Target", "/user:$User", "/pass:$AccessKey") -Credential $runAs -LoadUserProfile -Wait -PassThru -WindowStyle Hidden
     if ([int]$p.ExitCode -ne 0) {
-        Assert-LimsAppV2ConfigFailure "cmdkey failed with exit code $($p.ExitCode) while provisioning the Azure Files credential. The access key is not logged."
+        Assert-LimsAppV2ConfigFailure "cmdkey failed with exit code $($p.ExitCode) while provisioning the Azure Files credential in the '$RunAsUserName' context. The access key is not logged."
+    }
+}
+
+function Get-ServiceProcessIdAdapter {
+    param([Parameter(Mandatory = $true)] [string] $Name)
+    $svc = Get-CimInstance -ClassName Win32_Service -Filter "Name='$Name'" -ErrorAction SilentlyContinue
+    if (-not $svc) { return 0 }
+    return [int]$svc.ProcessId
+}
+
+function Test-PathReadAsProcessAdapter {
+    param(
+        [Parameter(Mandatory = $true)] [int] $ProcessId,
+        [Parameter(Mandatory = $true)] [string] $Path
+    )
+    if ($ProcessId -le 0) {
+        return [pscustomobject]@{ Readable = $false; Reason = "Service process id $ProcessId is not running; cannot read '$Path' in that context." }
+    }
+    if (-not ('LimsAppV2ProcessToken' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class LimsAppV2ProcessToken {
+    public const uint TOKEN_DUPLICATE = 0x0002;
+    public const uint TOKEN_QUERY = 0x0008;
+    public const uint PROCESS_QUERY_INFORMATION = 0x0400;
+    public const uint PROCESS_QUERY_LIMITED_INFORMATION = 0x1000;
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern IntPtr OpenProcess(uint access, bool inherit, int pid);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    public static extern bool OpenProcessToken(IntPtr process, uint access, out IntPtr token);
+    [DllImport("advapi32.dll", SetLastError=true)]
+    public static extern bool DuplicateToken(IntPtr token, int level, out IntPtr dup);
+    [DllImport("kernel32.dll", SetLastError=true)]
+    public static extern bool CloseHandle(IntPtr handle);
+}
+'@
+    }
+    $process = [LimsAppV2ProcessToken]::OpenProcess(
+        [LimsAppV2ProcessToken]::PROCESS_QUERY_INFORMATION -bor [LimsAppV2ProcessToken]::PROCESS_QUERY_LIMITED_INFORMATION,
+        $false,
+        $ProcessId
+    )
+    if ($process -eq [IntPtr]::Zero) {
+        return [pscustomobject]@{ Readable = $false; Reason = "Unable to open service process $ProcessId to read '$Path'." }
+    }
+    $token = [IntPtr]::Zero
+    $dup = [IntPtr]::Zero
+    $impersonation = $null
+    try {
+        $opened = [LimsAppV2ProcessToken]::OpenProcessToken(
+            $process,
+            [LimsAppV2ProcessToken]::TOKEN_DUPLICATE -bor [LimsAppV2ProcessToken]::TOKEN_QUERY,
+            [ref]$token
+        )
+        if (-not $opened) {
+            return [pscustomobject]@{ Readable = $false; Reason = "Unable to open the token for service process $ProcessId." }
+        }
+        $duplicated = [LimsAppV2ProcessToken]::DuplicateToken($token, 2, [ref]$dup)
+        if (-not $duplicated) {
+            return [pscustomobject]@{ Readable = $false; Reason = "Unable to duplicate the token for service process $ProcessId." }
+        }
+        $identity = New-Object System.Security.Principal.WindowsIdentity($dup)
+        $impersonation = $identity.Impersonate()
+        $null = Get-ChildItem -LiteralPath $Path -Force
+        return [pscustomobject]@{ Readable = $true; Reason = $null }
+    }
+    catch {
+        return [pscustomobject]@{ Readable = $false; Reason = "JBoss service context cannot read '$Path'." }
+    }
+    finally {
+        if ($impersonation) { $impersonation.Undo() }
+        if ($dup -ne [IntPtr]::Zero) { [void][LimsAppV2ProcessToken]::CloseHandle($dup) }
+        if ($token -ne [IntPtr]::Zero) { [void][LimsAppV2ProcessToken]::CloseHandle($token) }
+        [void][LimsAppV2ProcessToken]::CloseHandle($process)
     }
 }
 
@@ -284,6 +379,50 @@ function Get-SdmshomeLinkPath {
     param([Parameter(Mandatory = $true)] $Environment)
     $relative = [string]$Environment.AppV2.SdmshomeLinkRelativePath
     return ('{0}:\{1}' -f $Environment.DestinationDriveLetter.Trim().TrimEnd(':'), $relative.TrimStart('\'))
+}
+
+function Get-SdmshomeLinkObservation {
+    param([Parameter(Mandatory = $true)] $Environment)
+    $linkPath = Get-SdmshomeLinkPath -Environment $Environment
+    $parent = Split-Path -Parent $linkPath
+    $item = Get-ItemAdapter -Path $linkPath
+    $isReparse = $false
+    $isDir = $false
+    $isFile = $false
+    $target = ''
+    if ($item) {
+        $isReparse = [bool]($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint)
+        $isDir = [bool]$item.PSIsContainer -and -not $isReparse
+        $isFile = -not $item.PSIsContainer
+        if ($item.PSObject.Properties['Target'] -and $item.Target) { $target = [string](@($item.Target)[0]) }
+    }
+    return [pscustomobject]@{
+        LinkPath       = $linkPath
+        ParentPath     = $parent
+        ParentExists   = (Test-PathExistsAdapter -Path $parent)
+        Exists         = ($null -ne $item)
+        IsReparsePoint = $isReparse
+        IsDirectory    = $isDir
+        IsFile         = $isFile
+        Target         = $target
+        Item           = $item
+    }
+}
+
+function Get-RegisterPreflightPathExists {
+    param([Parameter(Mandatory = $true)] $Environment)
+    $app = $Environment.AppV2
+    $paths = @(
+        $app.JbossProcrunExePath, $app.JbossProcrunJvm, $app.JbossProcrunWorkingPath,
+        $app.ApacheBinaryPath, $app.ShibbolethBinaryPath
+    ) + @($app.JbossRunnerDirectoryPaths)
+    $map = @{}
+    foreach ($path in $paths) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$path)) {
+            $map[$path] = [bool](Test-PathExistsAdapter -Path $path)
+        }
+    }
+    return $map
 }
 
 function Assert-ConfigureTargetIdentity {
@@ -480,7 +619,8 @@ function Invoke-SdmshomeLinkProvision {
     param(
         [Parameter(Mandatory = $true)] $Environment,
         [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $SuppliedUnc,
-        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $AccessKey
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $AccessKey,
+        [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $JbossRunnerPassword
     )
     $ready = Test-AzureFilesUncReadyForLink -SuppliedUnc $SuppliedUnc -AppV2 $Environment.AppV2
     if ($ready.Skip) {
@@ -493,7 +633,7 @@ function Invoke-SdmshomeLinkProvision {
 
     $cred = Get-AzureFilesCredentialTargetFromUnc -Unc $Environment.AppV2.AzureFilesUnc
     if (-not $cred.Accepted) { Assert-LimsAppV2ConfigFailure $cred.Reason }
-    Add-AzureFilesCredentialAdapter -Target $cred.Target -User $cred.User -AccessKey $AccessKey
+    Add-AzureFilesCredentialAdapter -Target $cred.Target -User $cred.User -AccessKey $AccessKey -RunAsUserName ".\$($Environment.AppV2.JbossRunnerUserName)" -RunAsPassword $JbossRunnerPassword
 
     $linkPath = Get-SdmshomeLinkPath -Environment $Environment
     $parent = Split-Path -Parent $linkPath
@@ -538,8 +678,12 @@ function Invoke-LimsAppV2Register {
         [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $AzureFilesAccessKey,
         [Parameter(Mandatory = $true)] [AllowEmptyString()] [string] $AzureFilesUnc
     )
-    $passwordCheck = Test-LimsAppV2SecretPresent -Name 'JbossRunnerPassword' -Value $JbossRunnerPassword
-    if (-not $passwordCheck.Present) { Assert-LimsAppV2ConfigFailure $passwordCheck.Reason }
+    $pathExists = Get-RegisterPreflightPathExists -Environment $Environment
+    $linkObservation = Get-SdmshomeLinkObservation -Environment $Environment
+    $preflight = Get-LimsAppV2RegisterPreflight -Environment $Environment -JbossRunnerPassword $JbossRunnerPassword -AzureFilesAccessKey $AzureFilesAccessKey -AzureFilesUnc $AzureFilesUnc -PathExists $pathExists -LinkObservation $linkObservation
+    if (-not $preflight.Allowed) {
+        Assert-LimsAppV2ConfigFailure $preflight.Reason
+    }
 
     Invoke-JbossRunnerAccountReconcile -AppV2 $Environment.AppV2 -Password $JbossRunnerPassword
     $directoryPerms = Invoke-JbossRunnerDirectoryPermissions -AppV2 $Environment.AppV2
@@ -552,17 +696,8 @@ function Invoke-LimsAppV2Register {
     $shib = Invoke-BinaryServiceRegister -ServiceName $Environment.AppV2.ShibbolethServiceName -BinaryPath $Environment.AppV2.ShibbolethBinaryPath -Arguments $Environment.AppV2.ShibbolethArguments
     Write-Host $shib.Reason
     Invoke-AzureFilesStartupTaskRegister -Environment $Environment -Password $JbossRunnerPassword
-    $link = Invoke-SdmshomeLinkProvision -Environment $Environment -SuppliedUnc $AzureFilesUnc -AccessKey $AzureFilesAccessKey
+    $link = Invoke-SdmshomeLinkProvision -Environment $Environment -SuppliedUnc $AzureFilesUnc -AccessKey $AzureFilesAccessKey -JbossRunnerPassword $JbossRunnerPassword
     if ($link.Reason) { Write-Host $link.Reason }
-
-    $missing = @()
-    if ($directoryPerms.Missing) { $missing += $directoryPerms.Reason }
-    if ($jboss.Missing) { $missing += $jboss.Reason }
-    if ($apache.Missing) { $missing += $apache.Reason }
-    if ($shib.Missing) { $missing += $shib.Reason }
-    if ($missing.Count -gt 0) {
-        Assert-LimsAppV2ConfigFailure ("Configuration registered the local account and startup task, but service-wrapper settings are still missing: " + ($missing -join ' '))
-    }
 
     return [pscustomobject]@{
         Phase            = 'Register'
@@ -576,23 +711,33 @@ function Invoke-LimsAppV2Register {
     }
 }
 
-function Test-PathAccessAsUserAdapter {
+function Restore-ActivationFailureState {
     param(
-        [Parameter(Mandatory = $true)] [string] $Path,
-        [Parameter(Mandatory = $true)] [string] $UserName,
-        [Parameter(Mandatory = $true)] [string] $TaskName
+        [Parameter(Mandatory = $true)] $AppV2,
+        [Parameter(Mandatory = $true)] [string] $Reason
     )
-    $existing = Get-ScheduledTaskAdapter -TaskName $TaskName
-    if (-not $existing) {
-        return [pscustomobject]@{ Accessible = $false; Reason = "Startup task '$TaskName' for '$UserName' is not registered; cannot verify scheduled-task context access." }
-    }
-    Start-ScheduledTaskAdapter -TaskName $TaskName
-    Start-Sleep -Seconds 3
-    $info = Get-ScheduledTaskInfo -TaskName $TaskName
-    if ([int]$info.LastTaskResult -ne 0) {
-        return [pscustomobject]@{ Accessible = $false; Reason = "Scheduled-task context for '$UserName' could not access '$Path' (last result $($info.LastTaskResult))." }
-    }
-    return [pscustomobject]@{ Accessible = $true; Reason = $null }
+    Stop-ServiceAdapter -Name $AppV2.JbossServiceName
+    Disable-ScheduledTaskAdapter -TaskName $AppV2.AzureFilesStartupTaskName
+    Assert-LimsAppV2ConfigFailure $Reason
+}
+
+function Wait-FreshScheduledTaskResultAdapter {
+    param(
+        [Parameter(Mandatory = $true)] [string] $TaskName,
+        [Parameter(Mandatory = $true)] [datetime] $AttemptStartedUtc,
+        [Parameter(Mandatory = $false)] [AllowNull()] $PreviousLastRunTime,
+        [Parameter(Mandatory = $false)] [int] $TimeoutSeconds = 60
+    )
+    $deadline = (Get-UtcNowAdapter).AddSeconds($TimeoutSeconds)
+    $last = $null
+    do {
+        $info = Get-ScheduledTaskInfoAdapter -TaskName $TaskName
+        $last = Test-LimsAppV2ScheduledTaskResultIsFresh -AttemptStartedUtc $AttemptStartedUtc -PreviousLastRunTime $PreviousLastRunTime -CurrentLastRunTime $info.LastRunTime -LastTaskResult $info.LastTaskResult
+        if ($last.Fresh) { return $last }
+        Start-Sleep -Seconds 1
+    } while ((Get-UtcNowAdapter) -lt $deadline)
+    if ($last) { return $last }
+    return [pscustomobject]@{ Fresh = $false; Succeeded = $false; Reason = 'No scheduled-task LastRunTime was recorded for this attempt. Refusing to accept a stale result.' }
 }
 
 function Invoke-LimsAppV2Activate {
@@ -618,25 +763,39 @@ function Invoke-LimsAppV2Activate {
         Assert-LimsAppV2ConfigFailure "Activation refused: $linkPath is not a directory symbolic link to the reviewed UNC. $($decision.Reason)"
     }
 
-    $taskAccess = Test-PathAccessAsUserAdapter -Path $linkPath -UserName ".\$($app.JbossRunnerUserName)" -TaskName $app.AzureFilesStartupTaskName
-    if (-not $taskAccess.Accessible) { Assert-LimsAppV2ConfigFailure $taskAccess.Reason }
-    Write-Host "Scheduled-task context can access '$linkPath'."
+    $existingTask = Get-ScheduledTaskAdapter -TaskName $app.AzureFilesStartupTaskName
+    if (-not $existingTask) {
+        Assert-LimsAppV2ConfigFailure "Startup task '$($app.AzureFilesStartupTaskName)' is not registered; cannot verify scheduled-task context access."
+    }
+
+    $previousInfo = Get-ScheduledTaskInfoAdapter -TaskName $app.AzureFilesStartupTaskName
+    $previousLastRun = $null
+    if ($previousInfo -and $previousInfo.PSObject.Properties['LastRunTime']) { $previousLastRun = $previousInfo.LastRunTime }
+    $attemptStarted = Get-UtcNowAdapter
+    Start-ScheduledTaskAdapter -TaskName $app.AzureFilesStartupTaskName
+    $taskResult = Wait-FreshScheduledTaskResultAdapter -TaskName $app.AzureFilesStartupTaskName -AttemptStartedUtc $attemptStarted -PreviousLastRunTime $previousLastRun
+    if (-not $taskResult.Fresh -or -not $taskResult.Succeeded) {
+        Restore-ActivationFailureState -AppV2 $app -Reason $taskResult.Reason
+    }
+    Write-Host "Scheduled-task context can access '$linkPath' (fresh LastRunTime for this attempt)."
 
     $jboss = Get-ServiceAdapter -Name $app.JbossServiceName
-    if (-not $jboss) { Assert-LimsAppV2ConfigFailure "JBoss service '$($app.JbossServiceName)' is not registered." }
+    if (-not $jboss) { Restore-ActivationFailureState -AppV2 $app -Reason "JBoss service '$($app.JbossServiceName)' is not registered." }
     Start-ServiceAdapter -Name $app.JbossServiceName
     $live = Get-ServiceAdapter -Name $app.JbossServiceName
     if (-not $live -or $live.Status -ne 'Running') {
-        Assert-LimsAppV2ConfigFailure "JBoss service '$($app.JbossServiceName)' did not reach Running; service-context access was not proven."
+        Restore-ActivationFailureState -AppV2 $app -Reason "JBoss service '$($app.JbossServiceName)' did not reach Running; service-context access was not proven."
     }
-    if (-not (Test-PathExistsAdapter -Path $linkPath)) {
-        Stop-ServiceAdapter -Name $app.JbossServiceName
-        Assert-LimsAppV2ConfigFailure "JBoss service context cannot see '$linkPath'."
-    }
+    $processId = Get-ServiceProcessIdAdapter -Name $app.JbossServiceName
+    $serviceRead = Test-PathReadAsProcessAdapter -ProcessId $processId -Path $linkPath
     Stop-ServiceAdapter -Name $app.JbossServiceName
-    Write-Host "JBoss service context can access '$linkPath'. Service was stopped again."
+    if (-not $serviceRead.Readable) {
+        Restore-ActivationFailureState -AppV2 $app -Reason $serviceRead.Reason
+    }
+    Write-Host "JBoss service context can read '$linkPath'. Service was stopped again."
 
     if (-not $reviews.Passed) {
+        Disable-ScheduledTaskAdapter -TaskName $app.AzureFilesStartupTaskName
         Write-Host $reviews.Reason
         return [pscustomobject]@{
             Phase            = 'Activate'
@@ -654,7 +813,7 @@ function Invoke-LimsAppV2Activate {
         }
     }
     Enable-ScheduledTaskAdapter -TaskName $app.AzureFilesStartupTaskName
-    Write-Host 'Automatic startup enabled after the access check and reviewed v2 JDBC, Apache, Shibboleth, and UNC settings. Services were left stopped.'
+    Write-Host 'Automatic startup enabled after the fresh task check, the JBoss service-context read, and reviewed v2 JDBC, Apache, Shibboleth, and UNC settings. Services were left stopped.'
     return [pscustomobject]@{
         Phase            = 'Activate'
         AccessCheck      = 'Passed'

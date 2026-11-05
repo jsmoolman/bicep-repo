@@ -11,7 +11,7 @@
     values and flipping Enabled -- not by copying the pipeline or scripts.
 
     DiskEncryptionSetResourceId is the full ARM ID pin. DEV is pinned to
-    the customer Disk Encryption Set reported by plan #20261104.4. Plan
+    the customer Disk Encryption Set reported by plan #20261104.5. Plan
     and stage fail closed unless that pin matches both live disks. The
     DES *name* is still required so a live ID whose last segment differs
     from the reviewed name fails even before the full ID is compared.
@@ -24,7 +24,8 @@ function New-LimsAppV2Configuration {
         Post-copy APP v2 configuration. Service names are reviewed.
         Wrapper paths, UNC, and JDBC/Apache/Shibboleth reviews stay empty
         or blocked until the customer records them. configure-app reports
-        missing wrapper settings and stops before changing that service.
+        every missing wrapper setting, invalid path, required secret, and
+        UNC/link conflict together and stops before any guest change.
     #>
     param(
         [Parameter(Mandatory = $false)] [bool] $ForEnabledEnvironment = $false
@@ -146,7 +147,7 @@ function Get-LimsAppDataDiskMigrationEnvironmentMapping {
             PreferredTemporaryLun           = 1
             PreferredTemporaryDriveLetter   = 'S'
             DiskEncryptionSetName           = 'des-lims-dev-westeu'
-            # Customer DEV pin from plan #20261104.4. Do not replace with a
+            # Customer DEV pin from plan #20261104.5. Do not replace with a
             # different Disk Encryption Set.
             DiskEncryptionSetResourceId     = '/subscriptions/8ebb26a1-674a-40d1-97f8-e0a237e288a6/resourceGroups/rg-security-lims-dev-westeu/providers/Microsoft.Compute/diskEncryptionSets/des-lims-dev-westeu'
             SnapshotNamePrefix              = 'lims-app-mig-dev'

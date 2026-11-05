@@ -689,6 +689,128 @@ function Test-AzureFilesUncReadyForLink {
     return [pscustomobject]@{ Ready = $true; Skip = $false; Reason = $null }
 }
 
+function Get-LimsAppV2RegisterPreflight {
+    <#
+        Collects every register blocker before any guest mutation.
+        Reasons never include secret values.
+    #>
+    param(
+        [Parameter(Mandatory = $true)] $Environment,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $JbossRunnerPassword,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $AzureFilesAccessKey,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $AzureFilesUnc,
+        [Parameter(Mandatory = $false)] [AllowNull()] [hashtable] $PathExists,
+        [Parameter(Mandatory = $false)] [AllowNull()] $LinkObservation
+    )
+
+    if ($null -eq $PathExists) { $PathExists = @{} }
+    $app = $Environment.AppV2
+    $issues = @()
+
+    $password = Test-LimsAppV2SecretPresent -Name 'JbossRunnerPassword' -Value $JbossRunnerPassword
+    if (-not $password.Present) { $issues += $password.Reason }
+
+    $procrun = Test-LimsAppV2ProcrunSettingsComplete -AppV2 $app
+    if (-not $procrun.Complete) {
+        $issues += $procrun.Reason
+    }
+    else {
+        foreach ($path in @($app.JbossProcrunExePath, $app.JbossProcrunJvm, $app.JbossProcrunWorkingPath)) {
+            if (-not $PathExists.ContainsKey($path) -or -not [bool]$PathExists[$path]) {
+                $issues += "Reviewed Procrun path '$path' does not exist on this guest."
+            }
+        }
+    }
+
+    $apache = Test-LimsAppV2ServiceBinarySettingsComplete -ServiceName $app.ApacheServiceName -BinaryPath $app.ApacheBinaryPath -Arguments $app.ApacheArguments
+    if (-not $apache.Complete) {
+        $issues += $apache.Reason
+    }
+    elseif (-not $PathExists.ContainsKey($app.ApacheBinaryPath) -or -not [bool]$PathExists[$app.ApacheBinaryPath]) {
+        $issues += "Reviewed binary '$($app.ApacheBinaryPath)' for '$($app.ApacheServiceName)' was not found."
+    }
+
+    $shib = Test-LimsAppV2ServiceBinarySettingsComplete -ServiceName $app.ShibbolethServiceName -BinaryPath $app.ShibbolethBinaryPath -Arguments $app.ShibbolethArguments
+    if (-not $shib.Complete) {
+        $issues += $shib.Reason
+    }
+    elseif (-not $PathExists.ContainsKey($app.ShibbolethBinaryPath) -or -not [bool]$PathExists[$app.ShibbolethBinaryPath]) {
+        $issues += "Reviewed binary '$($app.ShibbolethBinaryPath)' for '$($app.ShibbolethServiceName)' was not found."
+    }
+
+    $dirPaths = @($app.JbossRunnerDirectoryPaths)
+    if ($dirPaths.Count -eq 0) {
+        $issues += 'Reviewed application-directory paths are empty; ACLs cannot be granted.'
+    }
+    else {
+        foreach ($path in $dirPaths) {
+            if (-not $PathExists.ContainsKey($path) -or -not [bool]$PathExists[$path]) {
+                $issues += "Reviewed application directory '$path' does not exist on this guest."
+            }
+        }
+    }
+
+    $unc = Test-AzureFilesUncReadyForLink -SuppliedUnc $AzureFilesUnc -AppV2 $app
+    if (-not $unc.Skip -and -not $unc.Ready) {
+        $issues += $unc.Reason
+    }
+    if ($unc.Ready) {
+        $key = Test-LimsAppV2SecretPresent -Name 'AzureFilesAccessKey' -Value $AzureFilesAccessKey
+        if (-not $key.Present) { $issues += $key.Reason }
+        $cred = Get-AzureFilesCredentialTargetFromUnc -Unc $app.AzureFilesUnc
+        if (-not $cred.Accepted) { $issues += $cred.Reason }
+        if ($null -eq $LinkObservation -or -not [bool]$LinkObservation.ParentExists) {
+            $issues += 'Parent path for A:\lv89\sdmshome does not exist. The mapped A: volume is missing lv89 after copy.'
+        }
+        else {
+            $decision = Test-SdmshomeLinkDecision -PathExists ([bool]$LinkObservation.Exists) -IsReparsePoint ([bool]$LinkObservation.IsReparsePoint) -ExistingTarget ([string]$LinkObservation.Target) -ExpectedTarget $app.AzureFilesUnc -IsDirectory ([bool]$LinkObservation.IsDirectory) -IsFile ([bool]$LinkObservation.IsFile)
+            if ($decision.Action -eq 'Fail') { $issues += $decision.Reason }
+        }
+    }
+
+    return [pscustomobject]@{
+        Allowed = ($issues.Count -eq 0)
+        Issues  = $issues
+        Reason  = $(if ($issues.Count -gt 0) { 'Preflight failed before any guest change: ' + ($issues -join ' ') } else { $null })
+    }
+}
+
+function Test-LimsAppV2ScheduledTaskResultIsFresh {
+    <#
+        A prior LastTaskResult=0 is not accepted. The current LastRunTime
+        must be strictly after the previous LastRunTime and not earlier
+        than the attempt start (2s clock skew).
+    #>
+    param(
+        [Parameter(Mandatory = $true)] [datetime] $AttemptStartedUtc,
+        [Parameter(Mandatory = $false)] [AllowNull()] $PreviousLastRunTime,
+        [Parameter(Mandatory = $false)] [AllowNull()] $CurrentLastRunTime,
+        [Parameter(Mandatory = $false)] [AllowNull()] $LastTaskResult
+    )
+
+    if ($null -eq $CurrentLastRunTime -or $CurrentLastRunTime -eq [datetime]::MinValue) {
+        return [pscustomobject]@{ Fresh = $false; Succeeded = $false; Reason = 'No scheduled-task LastRunTime was recorded for this attempt. Refusing to accept a stale result.' }
+    }
+
+    $currentUtc = $CurrentLastRunTime.ToUniversalTime()
+    if ($PreviousLastRunTime -and $PreviousLastRunTime -ne [datetime]::MinValue) {
+        if ($currentUtc -le $PreviousLastRunTime.ToUniversalTime()) {
+            return [pscustomobject]@{ Fresh = $false; Succeeded = $false; Reason = 'Scheduled-task LastRunTime was not updated for this attempt. Refusing to accept a stale result.' }
+        }
+    }
+    if ($currentUtc -lt $AttemptStartedUtc.AddSeconds(-2)) {
+        return [pscustomobject]@{ Fresh = $false; Succeeded = $false; Reason = 'Scheduled-task LastRunTime is older than this attempt. Refusing to accept a stale result.' }
+    }
+    if ($null -eq $LastTaskResult -or [int]$LastTaskResult -ne 0) {
+        return [pscustomobject]@{
+            Fresh     = $true
+            Succeeded = $false
+            Reason    = "Scheduled-task context could not access the reviewed path (last result $LastTaskResult)."
+        }
+    }
+    return [pscustomobject]@{ Fresh = $true; Succeeded = $true; Reason = $null }
+}
+
 function Test-LimsAppMigStageCleanupAllowed {
     param([Parameter(Mandatory = $true)] $Environment)
 
