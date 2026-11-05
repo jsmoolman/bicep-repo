@@ -107,25 +107,88 @@ Describe 'Get-AtomicLockApplyDecision' {
         (Get-AtomicLockApplyDecision -Classification 'Found').Allowed | Should -Be $true
         $lost = Get-AtomicLockApplyDecision -Classification 'PreconditionFailed'
         $lost.Allowed | Should -Be $false
-        $lost.Reason | Should -Match 'If-Match precondition failed'
+        $lost.Reason | Should -Match 'If-Match race'
         (Get-AtomicLockApplyDecision -Classification 'AlreadyExists').Allowed | Should -Be $false
     }
 }
 
-Describe 'Get-PreSubmitRecoveryDecision' {
-    It 'allows reviewed attach-and-inspect recovery only when the command never existed and was never marked submitted' {
-        $ok = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+Describe 'Get-GuestSubmittedEvidenceDecision' {
+    It 'accepts only the exact token false and treats every other value as unknown' {
+        (Get-GuestSubmittedEvidenceDecision -Value 'false').Accepted | Should -Be $true
+        foreach ($unknown in @($null, '', ' ', 'true', 'True', 'TRUE', 'false ', ' false', 'FALSE', 'False', '0', '1', 'yes', 'no')) {
+            $result = Get-GuestSubmittedEvidenceDecision -Value $unknown
+            $result.Accepted | Should -Be $false
+            $result.Reason | Should -Match "explicit value 'false'"
+        }
+        $boolFalse = Get-GuestSubmittedEvidenceDecision -Value $false
+        $boolFalse.Accepted | Should -Be $false
+        $boolTrue = Get-GuestSubmittedEvidenceDecision -Value $true
+        $boolTrue.Accepted | Should -Be $false
+    }
+}
+
+Describe 'Get-InspectAttemptStateTransitionDecision' {
+    It 'allows only Prepared to Submitting or Prepared to Recovering' {
+        (Get-InspectAttemptStateTransitionDecision -FromState 'Prepared' -ToState 'Submitting').Allowed | Should -Be $true
+        (Get-InspectAttemptStateTransitionDecision -FromState 'Prepared' -ToState 'Recovering').Allowed | Should -Be $true
+        $fromSubmitting = Get-InspectAttemptStateTransitionDecision -FromState 'Submitting' -ToState 'Recovering'
+        $fromSubmitting.Allowed | Should -Be $false
+        $fromSubmitting.Reason | Should -Match 'Prepared'
+        $fromRecovering = Get-InspectAttemptStateTransitionDecision -FromState 'Recovering' -ToState 'Submitting'
+        $fromRecovering.Allowed | Should -Be $false
+        $missing = Get-InspectAttemptStateTransitionDecision -FromState '' -ToState 'Recovering'
+        $missing.Allowed | Should -Be $false
+        $nullState = Get-InspectAttemptStateTransitionDecision -FromState $null -ToState 'Submitting'
+        $nullState.Allowed | Should -Be $false
+        $wrongCase = Get-InspectAttemptStateTransitionDecision -FromState 'prepared' -ToState 'Recovering'
+        $wrongCase.Allowed | Should -Be $false
+    }
+}
+
+Describe 'Get-InspectSubmitDecision' {
+    It 'allows submit only from Prepared with explicit false, inspect-only status, and this run holding the lock' {
+        $ok = Get-InspectSubmitDecision -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
         $ok.Allowed | Should -Be $true
-        $notRequested = Get-PreSubmitRecoveryDecision -Requested $false -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $missingEvidence = Get-InspectSubmitDecision -GuestSubmittedTag '' -AttemptStateTag 'Prepared' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $missingEvidence.Allowed | Should -Be $false
+        $missingEvidence.Reason | Should -Match "explicit value 'false'"
+        $alreadySubmitting = Get-InspectSubmitDecision -GuestSubmittedTag 'false' -AttemptStateTag 'Submitting' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $alreadySubmitting.Allowed | Should -Be $false
+        $otherOwner = Get-InspectSubmitDecision -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LockOwnerRunId '9' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $otherOwner.Allowed | Should -Be $false
+        $stage = Get-InspectSubmitDecision -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'Pending'
+        $stage.Allowed | Should -Be $false
+    }
+}
+
+Describe 'Get-PreSubmitRecoveryDecision' {
+    It 'allows reviewed attach-and-inspect recovery only when Prepared, explicit false, and the command never existed' {
+        $ok = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $ok.Allowed | Should -Be $true
+        $notRequested = Get-PreSubmitRecoveryDecision -Requested $false -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
         $notRequested.Allowed | Should -Be $false
         $notRequested.Reason | Should -Match 'not requested'
-        $submitted = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'true' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $submitted = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'true' -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
         $submitted.Allowed | Should -Be $false
-        $submitted.Reason | Should -Match 'Guest submission was recorded'
-        $stage = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'Pending'
+        $submitted.Reason | Should -Match "explicit value 'false'"
+        $stage = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'Pending'
         $stage.Allowed | Should -Be $false
-        $otherOwner = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -LookupClassification 'NotFound' -LockOwnerRunId '9' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $otherOwner = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '9' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
         $otherOwner.Allowed | Should -Be $false
+        $alreadySubmitting = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -AttemptStateTag 'Submitting' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $alreadySubmitting.Allowed | Should -Be $false
+        $alreadySubmitting.Reason | Should -Match 'Prepared'
+    }
+
+    It 'blocks recovery when GuestSubmitted is missing, empty, or malformed' {
+        foreach ($unknown in @($null, '', ' ', 'TRUE', '1', 'FALSE', 'False', 'false ')) {
+            $result = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag $unknown -AttemptStateTag 'Prepared' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+            $result.Allowed | Should -Be $false
+            $result.Reason | Should -Match "explicit value 'false'"
+        }
+        $missingState = Get-PreSubmitRecoveryDecision -Requested $true -GuestSubmittedTag 'false' -AttemptStateTag '' -LookupClassification 'NotFound' -LockOwnerRunId '10' -ThisRunId '10' -CopyStatusTag 'InspectOnly'
+        $missingState.Allowed | Should -Be $false
+        $missingState.Reason | Should -Match 'Prepared'
     }
 }
 

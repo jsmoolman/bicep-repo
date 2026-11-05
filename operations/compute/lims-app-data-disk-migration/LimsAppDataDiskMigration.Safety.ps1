@@ -256,7 +256,7 @@ function Get-AtomicLockApplyDecision {
     if ($Classification -eq 'PreconditionFailed') {
         return [pscustomobject]@{
             Allowed = $false
-            Reason  = 'Lost the atomic destination-VM lock race (If-Match precondition failed). Another attempt updated the VM. No snapshot, disk create, or attach was performed.'
+            Reason  = 'Lost the If-Match race (precondition failed). Another attempt updated the VM. This path must stop.'
         }
     }
     return [pscustomobject]@{
@@ -265,17 +265,63 @@ function Get-AtomicLockApplyDecision {
     }
 }
 
+function Get-GuestSubmittedEvidenceDecision {
+    <#
+        Only the exact token written at lock/attach time is evidence that
+        guest submission has not started. Missing, empty, or any other
+        value is unknown and blocks recovery and submission.
+    #>
+    param([Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] $Value)
+
+    if ($null -eq $Value) {
+        return [pscustomobject]@{ Accepted = $false; Reason = "GuestSubmitted must be the explicit value 'false'. Missing, empty, or other values are unknown and block recovery and submission." }
+    }
+    if ($Value -is [bool]) {
+        return [pscustomobject]@{ Accepted = $false; Reason = "GuestSubmitted must be the explicit value 'false'. Missing, empty, or other values are unknown and block recovery and submission." }
+    }
+    if ([string]$Value -ceq 'false') {
+        return [pscustomobject]@{ Accepted = $true; Reason = $null }
+    }
+    return [pscustomobject]@{
+        Accepted = $false
+        Reason   = "GuestSubmitted must be the explicit value 'false'. Missing, empty, or other values are unknown and block recovery and submission."
+    }
+}
+
+function Get-InspectAttemptStateTransitionDecision {
+    <#
+        Mutually exclusive inspect-attempt transitions. Only one of
+        Prepared -> Submitting or Prepared -> Recovering may succeed.
+        The exclusive write uses If-Match; the loser must stop.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $FromState,
+        [Parameter(Mandatory = $true)] [string] $ToState
+    )
+
+    $from = if ($null -eq $FromState) { '' } else { [string]$FromState }
+    if ($from -ceq 'Prepared' -and ($ToState -ceq 'Submitting' -or $ToState -ceq 'Recovering')) {
+        return [pscustomobject]@{ Allowed = $true; Reason = $null }
+    }
+    return [pscustomobject]@{
+        Allowed = $false
+        Reason  = "Inspect attempt state '$from' cannot transition to '$ToState'. Only Prepared -> Submitting or Prepared -> Recovering is allowed."
+    }
+}
+
 function Get-PreSubmitRecoveryDecision {
     <#
         Reviewed recovery when attach-and-inspect ended before guest
         submission. NotFound alone is still indeterminate. Recovery is
         allowed only when the operator explicitly requests it, the
-        attempt is inspect-only, guest submission was never recorded,
-        the inspect command is NotFound, and this run holds the lock.
+        attempt is inspect-only, GuestSubmitted is the explicit value
+        false, the attempt state is Prepared, the inspect command is
+        NotFound, and this run holds the lock.
     #>
     param(
         [Parameter(Mandatory = $false)] [bool] $Requested = $false,
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $GuestSubmittedTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $AttemptStateTag,
         [Parameter(Mandatory = $true)] [string] $LookupClassification,
         [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $LockOwnerRunId,
         [Parameter(Mandatory = $true)] [string] $ThisRunId,
@@ -294,12 +340,13 @@ function Get-PreSubmitRecoveryDecision {
             Reason  = 'Pre-submit recovery is reviewed only for attach-and-inspect (CopyStatus=InspectOnly).'
         }
     }
-    $submitted = [string]$GuestSubmittedTag
-    if ($submitted -eq 'true' -or $submitted -eq 'True' -or $submitted -eq '1') {
-        return [pscustomobject]@{
-            Allowed = $false
-            Reason  = 'Guest submission was recorded. Run Command NotFound is indeterminate; do not treat the command as never submitted.'
-        }
+    $submitted = Get-GuestSubmittedEvidenceDecision -Value $GuestSubmittedTag
+    if (-not $submitted.Accepted) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $submitted.Reason }
+    }
+    $transition = Get-InspectAttemptStateTransitionDecision -FromState $AttemptStateTag -ToState 'Recovering'
+    if (-not $transition.Allowed) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $transition.Reason }
     }
     if ($LookupClassification -ne 'NotFound') {
         return [pscustomobject]@{
@@ -311,6 +358,40 @@ function Get-PreSubmitRecoveryDecision {
         return [pscustomobject]@{
             Allowed = $false
             Reason  = "Pre-submit recovery requires the destination VM lock to be held by this run '$ThisRunId'."
+        }
+    }
+    return [pscustomobject]@{ Allowed = $true; Reason = $null }
+}
+
+function Get-InspectSubmitDecision {
+    <#
+        The submit path may continue only from Prepared with an explicit
+        GuestSubmitted=false. The exclusive If-Match write to Submitting
+        is applied after this decision.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $GuestSubmittedTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $AttemptStateTag,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $LockOwnerRunId,
+        [Parameter(Mandatory = $true)] [string] $ThisRunId,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $CopyStatusTag
+    )
+
+    if ($CopyStatusTag -ne 'InspectOnly') {
+        return [pscustomobject]@{ Allowed = $false; Reason = 'Guest submission is recorded only for attach-and-inspect (CopyStatus=InspectOnly).' }
+    }
+    $submitted = Get-GuestSubmittedEvidenceDecision -Value $GuestSubmittedTag
+    if (-not $submitted.Accepted) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $submitted.Reason }
+    }
+    $transition = Get-InspectAttemptStateTransitionDecision -FromState $AttemptStateTag -ToState 'Submitting'
+    if (-not $transition.Allowed) {
+        return [pscustomobject]@{ Allowed = $false; Reason = $transition.Reason }
+    }
+    if ([string]::IsNullOrWhiteSpace($LockOwnerRunId) -or $LockOwnerRunId -ne $ThisRunId) {
+        return [pscustomobject]@{
+            Allowed = $false
+            Reason  = "Guest submission requires the destination VM lock to be held by this run '$ThisRunId'."
         }
     }
     return [pscustomobject]@{ Allowed = $true; Reason = $null }

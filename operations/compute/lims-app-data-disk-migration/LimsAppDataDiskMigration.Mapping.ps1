@@ -196,6 +196,7 @@ function Get-LimsAppDataDiskMigrationLockTagKeys {
         TemporaryLun    = 'limsAppMigTemporaryLun'
         GuestCommand    = 'limsAppMigGuestCommand'
         GuestSubmitted  = 'limsAppMigGuestSubmitted'
+        AttemptState    = 'limsAppMigAttemptState'
         Phase           = 'limsAppMigPhase'
         CopyCompleted   = 'limsAppMigCopyCompleted'
     }

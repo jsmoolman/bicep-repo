@@ -1216,7 +1216,7 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
     }
 
     $effectiveCopyStatus = $(if ($CopyStatus) { $CopyStatus } else { 'Pending' })
-    Set-AzResourceTagsMergeAdapter -ResourceId $checks.DestinationVmId -Tags @{
+    $recordTags = @{
         $tagKeys.RunId            = $MigrationRunId
         $tagKeys.SnapshotId       = [string]$snapshot.id
         $tagKeys.TempDiskId       = [string]$tempDisk.id
@@ -1228,6 +1228,11 @@ function Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach {
         $tagKeys.GuestCommand     = $guestCommandName
         $tagKeys.Phase            = $Phase
     }
+    if ($effectiveCopyStatus -eq 'InspectOnly') {
+        $recordTags[$tagKeys.GuestSubmitted] = 'false'
+        $recordTags[$tagKeys.AttemptState] = 'Prepared'
+    }
+    Set-AzResourceTagsMergeAdapter -ResourceId $checks.DestinationVmId -Tags $recordTags
 
     Write-OperatorLog "===== LIMS APP data-disk migration: $OperatorTitle ====="
     Write-OperatorLog "Migration run ID            : $MigrationRunId"
@@ -1293,6 +1298,56 @@ function Invoke-LimsAppDataDiskMigrationStage {
     return Invoke-LimsAppDataDiskMigrationAcquireSnapshotAndAttach -Environment $Environment -MigrationRunId $MigrationRunId -CaptureMode $CaptureMode -LockPurpose 'Stage' -Phase 'GuestPending' -CopyStatus $effectiveCopyStatus -OperatorTitle 'STAGE (Azure)'
 }
 
+function Invoke-LimsAppDataDiskMigrationExclusiveAttemptTransition {
+    param(
+        [Parameter(Mandatory = $true)] $DestinationVm,
+        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
+        [Parameter(Mandatory = $true)] [ValidateSet('Submitting', 'Recovering')] [string] $ToState
+    )
+
+    $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
+    $etag = Get-ResourceEtag -Resource $DestinationVm
+    if ([string]::IsNullOrWhiteSpace($etag)) {
+        Assert-LimsAppMigControlFailure "Destination VM '$($DestinationVm.id)' has no etag. Refusing the '$ToState' transition without If-Match."
+    }
+
+    $owner = Get-VmTagValue -Vm $DestinationVm -Key $tagKeys.RunId
+    $submitted = Get-VmTagValue -Vm $DestinationVm -Key $tagKeys.GuestSubmitted
+    $attemptState = Get-VmTagValue -Vm $DestinationVm -Key $tagKeys.AttemptState
+    $copyStatus = Get-VmTagValue -Vm $DestinationVm -Key $tagKeys.CopyStatus
+    if ($ToState -eq 'Submitting') {
+        $gate = Get-InspectSubmitDecision -GuestSubmittedTag $submitted -AttemptStateTag $attemptState -LockOwnerRunId $owner -ThisRunId $MigrationRunId -CopyStatusTag $copyStatus
+        if (-not $gate.Allowed) {
+            Assert-LimsAppMigControlFailure $gate.Reason
+        }
+    }
+    else {
+        $evidence = Get-GuestSubmittedEvidenceDecision -Value $submitted
+        if (-not $evidence.Accepted) {
+            Assert-LimsAppMigControlFailure $evidence.Reason
+        }
+        $transition = Get-InspectAttemptStateTransitionDecision -FromState $attemptState -ToState $ToState
+        if (-not $transition.Allowed) {
+            Assert-LimsAppMigControlFailure $transition.Reason
+        }
+        if ([string]::IsNullOrWhiteSpace($owner) -or $owner -ne $MigrationRunId) {
+            Assert-LimsAppMigControlFailure "Inspect recovery transition requires the destination VM lock to be held by this run '$MigrationRunId'."
+        }
+    }
+
+    $merged = ConvertTo-TagHashtable -Tags $DestinationVm.tags
+    $merged[$tagKeys.AttemptState] = $ToState
+    if ($ToState -eq 'Submitting') {
+        $merged[$tagKeys.GuestSubmitted] = 'true'
+    }
+    Write-OperatorLog "Transitioning inspect attempt '$MigrationRunId' Prepared -> $ToState with If-Match."
+    $apply = Set-AzVmTagsIfMatchAdapter -ResourceId ([string]$DestinationVm.id) -IfMatch $etag -Tags $merged
+    $applyDecision = Get-AtomicLockApplyDecision -Classification $apply.Classification
+    if (-not $applyDecision.Allowed) {
+        Assert-LimsAppMigControlFailure $applyDecision.Reason
+    }
+}
+
 function Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted {
     param(
         [Parameter(Mandatory = $true)] $Environment,
@@ -1306,14 +1361,7 @@ function Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted {
 
     $destinationVm = Get-AzVmAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName
     Assert-VmIdentityMatchesMapping -Vm $destinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
-    $tagKeys = Get-LimsAppDataDiskMigrationLockTagKeys
-    $owner = Get-VmTagValue -Vm $destinationVm -Key $tagKeys.RunId
-    if ($owner -ne $MigrationRunId) {
-        Assert-LimsAppMigControlFailure "Refusing to record guest submission because destination lock run '$owner' is not this run '$MigrationRunId'."
-    }
-    Set-AzResourceTagsMergeAdapter -ResourceId ([string]$destinationVm.id) -Tags @{
-        $tagKeys.GuestSubmitted = 'true'
-    }
+    Invoke-LimsAppDataDiskMigrationExclusiveAttemptTransition -DestinationVm $destinationVm -MigrationRunId $MigrationRunId -ToState 'Submitting'
     Write-OperatorLog "Recorded guest submission for run '$MigrationRunId' on '$($destinationVm.id)' before creating the Run Command."
 }
 
@@ -1359,10 +1407,11 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
     $recordedSnapshotId = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.SnapshotId
     $recordedCopyStatus = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.CopyStatus
     $recordedGuestSubmitted = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.GuestSubmitted
+    $recordedAttemptState = Get-VmTagValue -Vm $checks.DestinationVm -Key $tagKeys.AttemptState
 
     $commandLookup = Get-AzRunCommandLookupAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName -RunCommandName $guestCommandName
     $commandDecision = Get-GuestCommandCleanupDecision -LookupClassification $commandLookup.Classification -ExecutionState (Get-RunCommandExecutionState -Resource $commandLookup.Resource)
-    $preSubmitDecision = Get-PreSubmitRecoveryDecision -Requested $PreSubmitRecovery -GuestSubmittedTag $recordedGuestSubmitted -LookupClassification $commandLookup.Classification -LockOwnerRunId $recordedRunId -ThisRunId $MigrationRunId -CopyStatusTag $recordedCopyStatus
+    $preSubmitDecision = Get-PreSubmitRecoveryDecision -Requested $PreSubmitRecovery -GuestSubmittedTag $recordedGuestSubmitted -AttemptStateTag $recordedAttemptState -LookupClassification $commandLookup.Classification -LockOwnerRunId $recordedRunId -ThisRunId $MigrationRunId -CopyStatusTag $recordedCopyStatus
     if (-not $commandDecision.Allowed -and -not $preSubmitDecision.Allowed) {
         if ($PreSubmitRecovery) {
             Assert-LimsAppMigControlFailure $preSubmitDecision.Reason
@@ -1370,7 +1419,12 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         Assert-LimsAppMigControlFailure $commandDecision.Reason
     }
 
-    if (-not $preSubmitDecision.Allowed) {
+    if ($preSubmitDecision.Allowed) {
+        $freshDestinationVm = Get-AzVmAdapter -SubscriptionId $Environment.SubscriptionId -ResourceGroupName $Environment.ResourceGroupName -VmName $Environment.DestinationVmName
+        Assert-VmIdentityMatchesMapping -Vm $freshDestinationVm -Environment $Environment -ExpectedVmName $Environment.DestinationVmName -Role 'Destination'
+        Invoke-LimsAppDataDiskMigrationExclusiveAttemptTransition -DestinationVm $freshDestinationVm -MigrationRunId $MigrationRunId -ToState 'Recovering'
+    }
+    else {
         $gate = Test-LimsAppMigStageCleanupAllowed -Environment $Environment
         if (-not $gate.Allowed) {
             Assert-LimsAppMigControlFailure $gate.Reason
@@ -1473,7 +1527,7 @@ function Invoke-LimsAppDataDiskMigrationCleanup {
         Remove-AzResourceTagsAdapter -ResourceId $checks.DestinationVmId -TagKeys @(
             $tagKeys.RunId, $tagKeys.SnapshotId, $tagKeys.TempDiskId, $tagKeys.TempDiskUniqueId,
             $tagKeys.DestDiskUniqueId, $tagKeys.CaptureMode, $tagKeys.CopyStatus,
-            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.GuestSubmitted, $tagKeys.Phase
+            $tagKeys.TemporaryLun, $tagKeys.GuestCommand, $tagKeys.GuestSubmitted, $tagKeys.AttemptState, $tagKeys.Phase
         )
         # limsAppMigCopyCompleted is retained so configure-app can prove
         # the mapped A: copy after the temporary-disk lock is released.

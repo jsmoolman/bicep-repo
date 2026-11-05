@@ -152,7 +152,7 @@ parameters:
     default: false
 
   - name: preSubmitRecovery
-    displayName: 'cleanup only — reviewed recovery when attach-and-inspect ended before guest submission and the inspect Run Command never existed. Requires CopyStatus=InspectOnly, limsAppMigGuestSubmitted=false, command NotFound, and this run holding the destination-VM lock. Default false. NotFound alone remains indeterminate.'
+    displayName: 'cleanup only — reviewed recovery when attach-and-inspect ended before guest submission and the inspect Run Command never existed. Requires CopyStatus=InspectOnly, limsAppMigAttemptState=Prepared, the exact token limsAppMigGuestSubmitted=false, command NotFound, and this run holding the destination-VM lock. Missing or unknown GuestSubmitted values block. Default false. NotFound alone remains indeterminate.'
     type: boolean
     default: false
 

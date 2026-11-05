@@ -668,7 +668,7 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         }
         $null = Invoke-LimsAppDataDiskMigrationAttachAndInspect -Environment (New-MatchingEnvironment) -MigrationRunId '10' -CaptureMode 'online'
         { Invoke-LimsAppDataDiskMigrationAttachAndInspect -Environment (New-MatchingEnvironment) -MigrationRunId '11' -CaptureMode 'online' } |
-            Should -Throw -ExpectedMessage '*If-Match precondition failed*'
+            Should -Throw -ExpectedMessage '*If-Match race*'
         Should -Invoke Set-AzVmTagsIfMatchAdapter -Times 2
         Should -Invoke New-AzIncrementalSnapshotAdapter -Times 1
         Should -Invoke New-AzDiskFromSnapshotAdapter -Times 1
@@ -702,6 +702,8 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         $script:recordedTags.limsAppMigSnapshotId | Should -Be $script:snapId
         $script:recordedTags.limsAppMigCopyStatus | Should -Be 'InspectOnly'
         $script:recordedTags.limsAppMigPhase | Should -Be 'InspectAttached'
+        $script:recordedTags.limsAppMigGuestSubmitted | Should -Be 'false'
+        $script:recordedTags.limsAppMigAttemptState | Should -Be 'Prepared'
         Should -Invoke New-AzIncrementalSnapshotAdapter -Times 1 -ParameterFilter { $SourceDiskId -eq $script:sourceId }
         Should -Invoke Add-AzVmDataDiskAdapter -Times 1 -ParameterFilter {
             $VmName -eq $script:Dev.DestinationVmName -and $Lun -eq 1 -and $DiskName -eq 'lims-app-mig-dev-tmp'
@@ -720,8 +722,15 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
             limsAppMigLockRunId       = '10'
             limsAppMigCopyStatus      = 'InspectOnly'
             limsAppMigGuestSubmitted  = 'false'
+            limsAppMigAttemptState    = 'Prepared'
             limsAppMigTempDiskId      = $tempId
             limsAppMigSnapshotId      = $script:snapId
+        }
+        $script:transitionTags = $null
+        Mock Set-AzVmTagsIfMatchAdapter {
+            param($Tags)
+            $script:transitionTags = $Tags
+            return (New-Lookup -Classification 'Found')
         }
         $script:destDisks = @(
             (New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName),
@@ -755,6 +764,132 @@ Describe 'Invoke-LimsAppDataDiskMigrationAttachAndInspect (orchestration, mocked
         Should -Invoke Remove-AzSnapshotAdapter -Times 0
         Should -Invoke Remove-AzRunCommandAdapter -Times 0
         Should -Invoke Remove-AzResourceTagsAdapter -Times 1
+        $script:transitionTags.limsAppMigAttemptState | Should -Be 'Recovering'
+        $script:transitionTags.limsAppMigGuestSubmitted | Should -Be 'false'
+    }
+
+    It 'refuses pre-submit recovery when GuestSubmitted is missing or unknown' {
+        $null = Invoke-LimsAppDataDiskMigrationAttachAndInspect -Environment (New-MatchingEnvironment) -MigrationRunId '10' -CaptureMode 'online'
+        $tempId = New-FakeManagedDiskId -Name $script:names.TemporaryDiskName
+        $script:destDisks = @(
+            (New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName),
+            (New-FakeDataDisk -Lun 1 -Name $script:names.TemporaryDiskName)
+        )
+        Mock Get-AzRunCommandLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Get-AzDiskLookupAdapter {
+            $disk = New-FakeDisk -Name $script:names.TemporaryDiskName -DesId $script:des -SourceId $script:snapId -ManagedBy (New-FakeVmId -Name $script:Dev.DestinationVmName) -UniqueId 'TEMPDISKUID' -Tags ([pscustomobject]@{ limsAppMigLockRunId = '10' })
+            return (New-Lookup -Classification 'Found' -Resource $disk)
+        }
+        Mock Remove-AzVmDataDiskAdapter { }
+        Mock Remove-AzDiskAdapter { }
+        foreach ($unknown in @($null, '', 'TRUE', '1', 'FALSE')) {
+            $tags = [pscustomobject]@{
+                limsAppMigLockRunId      = '10'
+                limsAppMigCopyStatus     = 'InspectOnly'
+                limsAppMigAttemptState   = 'Prepared'
+                limsAppMigTempDiskId     = $tempId
+                limsAppMigSnapshotId     = $script:snapId
+            }
+            if ($null -ne $unknown) {
+                $tags | Add-Member -NotePropertyName 'limsAppMigGuestSubmitted' -NotePropertyValue $unknown
+            }
+            Mock Get-AzVmAdapter {
+                param($VmName)
+                if ($VmName -eq $script:Dev.SourceVmName) {
+                    return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+                }
+                return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Tags $tags
+            }
+            { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '10' -DeleteSnapshot $false -PreSubmitRecovery $true } |
+                Should -Throw -ExpectedMessage "*explicit value 'false'*"
+            Should -Invoke Remove-AzVmDataDiskAdapter -Times 0
+            Should -Invoke Remove-AzDiskAdapter -Times 0
+        }
+    }
+
+    It 'records guest submission only by If-Match Prepared to Submitting' {
+        $inspectTags = [pscustomobject]@{
+            limsAppMigLockRunId      = '10'
+            limsAppMigCopyStatus     = 'InspectOnly'
+            limsAppMigGuestSubmitted = 'false'
+            limsAppMigAttemptState   = 'Prepared'
+        }
+        $script:transitionTags = $null
+        $script:ifMatch = $null
+        Mock Get-AzVmAdapter {
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Tags $inspectTags
+        }
+        Mock Set-AzVmTagsIfMatchAdapter {
+            param($IfMatch, $Tags)
+            $script:ifMatch = $IfMatch
+            $script:transitionTags = $Tags
+            return (New-Lookup -Classification 'Found')
+        }
+        Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted -Environment (New-MatchingEnvironment) -MigrationRunId '10'
+        $script:ifMatch | Should -Be 'etag-1'
+        $script:transitionTags.limsAppMigAttemptState | Should -Be 'Submitting'
+        $script:transitionTags.limsAppMigGuestSubmitted | Should -Be 'true'
+        Should -Invoke Set-AzResourceTagsMergeAdapter -Times 0
+    }
+
+    It 'lets only the winning If-Match path continue when submit and recover overlap' {
+        $tempId = New-FakeManagedDiskId -Name $script:names.TemporaryDiskName
+        $inspectTags = [pscustomobject]@{
+            limsAppMigLockRunId      = '10'
+            limsAppMigCopyStatus     = 'InspectOnly'
+            limsAppMigGuestSubmitted = 'false'
+            limsAppMigAttemptState   = 'Prepared'
+            limsAppMigTempDiskId     = $tempId
+            limsAppMigSnapshotId     = $script:snapId
+        }
+        $script:destDisks = @(
+            (New-FakeDataDisk -Lun 0 -Name $script:Dev.DestinationDataDiskName),
+            (New-FakeDataDisk -Lun 1 -Name $script:names.TemporaryDiskName)
+        )
+        Mock Get-AzVmAdapter {
+            param($VmName)
+            if ($VmName -eq $script:Dev.SourceVmName) {
+                return New-FakeVm -Name $script:Dev.SourceVmName -DataDisks $script:sourceDisks
+            }
+            return New-FakeVm -Name $script:Dev.DestinationVmName -DataDisks $script:destDisks -Tags $inspectTags
+        }
+        Mock Get-AzRunCommandLookupAdapter { return (New-Lookup -Classification 'NotFound') }
+        Mock Get-AzDiskLookupAdapter {
+            $disk = New-FakeDisk -Name $script:names.TemporaryDiskName -DesId $script:des -SourceId $script:snapId -ManagedBy (New-FakeVmId -Name $script:Dev.DestinationVmName) -UniqueId 'TEMPDISKUID' -Tags ([pscustomobject]@{ limsAppMigLockRunId = '10' })
+            return (New-Lookup -Classification 'Found' -Resource $disk)
+        }
+        Mock Get-AzSnapshotLookupAdapter {
+            return (New-Lookup -Classification 'Found' -Resource ([pscustomobject]@{ id = $script:snapId; creationData = [pscustomobject]@{ sourceResourceId = $script:sourceId } }))
+        }
+        Mock Remove-AzVmDataDiskAdapter { }
+        Mock Remove-AzDiskAdapter { }
+        Mock Remove-AzResourceTagsAdapter { }
+        $script:transitionApplies = 0
+        $script:winningState = $null
+        Mock Set-AzVmTagsIfMatchAdapter {
+            param($Tags)
+            $script:transitionApplies++
+            if ($script:transitionApplies -eq 1) {
+                $script:winningState = $Tags.limsAppMigAttemptState
+                return (New-Lookup -Classification 'Found')
+            }
+            return (New-Lookup -Classification 'PreconditionFailed' -Text 'PreconditionFailed (412)')
+        }
+
+        Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted -Environment (New-MatchingEnvironment) -MigrationRunId '10'
+        $script:winningState | Should -Be 'Submitting'
+        { Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '10' -DeleteSnapshot $false -PreSubmitRecovery $true } |
+            Should -Throw -ExpectedMessage '*If-Match race*'
+        Should -Invoke Remove-AzVmDataDiskAdapter -Times 0
+        Should -Invoke Remove-AzDiskAdapter -Times 0
+        Should -Invoke Remove-AzResourceTagsAdapter -Times 0
+
+        $script:transitionApplies = 0
+        $script:winningState = $null
+        Invoke-LimsAppDataDiskMigrationCleanup -Environment (New-MatchingEnvironment) -MigrationRunId '10' -DeleteSnapshot $false -PreSubmitRecovery $true
+        $script:winningState | Should -Be 'Recovering'
+        { Invoke-LimsAppDataDiskMigrationMarkGuestSubmitted -Environment (New-MatchingEnvironment) -MigrationRunId '10' } |
+            Should -Throw -ExpectedMessage '*If-Match race*'
     }
 }
 
