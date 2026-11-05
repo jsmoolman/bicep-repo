@@ -375,6 +375,22 @@ Describe 'APP v2 configuration safety decisions' {
                 })).Allowed | Should -Be $true
     }
 
+    It 'accepts a machine-qualified task user only when it resolves to the local account SID' {
+        $sid = 'S-1-5-21-1-2-3-1001'
+        (Test-ScheduledTaskUserResolution -SamAccountName 'jboss-runner' -Candidate 'HOST\jboss-runner' -ExpectedSid $sid -ResolvedSid $sid).Accepted | Should -Be $true
+        $missing = Test-ScheduledTaskUserResolution -SamAccountName 'jboss-runner' -Candidate 'HOST\jboss-runner' -ExpectedSid '' -ResolvedSid $sid
+        $missing.Accepted | Should -Be $false
+        $missing.Reason | Should -Match 'SID was not found'
+        $unresolved = Test-ScheduledTaskUserResolution -SamAccountName 'jboss-runner' -Candidate 'HOST\jboss-runner' -ExpectedSid $sid -ResolvedSid ''
+        $unresolved.Accepted | Should -Be $false
+        $unresolved.Reason | Should -Match 'did not resolve'
+        $other = Test-ScheduledTaskUserResolution -SamAccountName 'jboss-runner' -Candidate 'HOST\jboss-runner' -ExpectedSid $sid -ResolvedSid 'S-1-5-21-9-9-9-9'
+        $other.Accepted | Should -Be $false
+        $other.Reason | Should -Match 'different SID'
+        (Get-ScheduledTaskSamAccountName -UserName '.\jboss-runner') | Should -Be 'jboss-runner'
+        (Get-ScheduledTaskSamAccountName -UserName 'HOST\jboss-runner') | Should -Be 'jboss-runner'
+    }
+
     It 'rejects a stale scheduled-task LastRunTime even when LastTaskResult is 0' {
         $started = [datetime]::Parse('2026-11-05T03:00:00Z').ToUniversalTime()
         $stale = [datetime]::Parse('2026-11-05T02:00:00Z').ToUniversalTime()

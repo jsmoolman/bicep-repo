@@ -234,6 +234,35 @@ function Get-ScheduledTaskAdapter {
     return Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
 }
 
+function Get-LocalAccountSidAdapter {
+    param([Parameter(Mandatory = $true)] [string] $SamAccountName)
+    $user = Get-LocalUser -Name $SamAccountName -ErrorAction SilentlyContinue
+    if (-not $user) { return '' }
+    return [string]$user.SID.Value
+}
+
+function Resolve-AccountSidAdapter {
+    param([Parameter(Mandatory = $true)] [string] $QualifiedName)
+    try {
+        $account = New-Object System.Security.Principal.NTAccount($QualifiedName)
+        return $account.Translate([System.Security.Principal.SecurityIdentifier]).Value
+    }
+    catch {
+        return ''
+    }
+}
+
+function Resolve-ScheduledTaskRunAsUser {
+    param([Parameter(Mandatory = $true)] [string] $UserName)
+    $sam = Get-ScheduledTaskSamAccountName -UserName $UserName
+    $expectedSid = Get-LocalAccountSidAdapter -SamAccountName $sam
+    $candidate = "$(Get-ActualComputerNameAdapter)\$sam"
+    $resolvedSid = Resolve-AccountSidAdapter -QualifiedName $candidate
+    $check = Test-ScheduledTaskUserResolution -SamAccountName $sam -Candidate $candidate -ExpectedSid $expectedSid -ResolvedSid $resolvedSid
+    if (-not $check.Accepted) { Assert-LimsAppV2ConfigFailure $check.Reason }
+    return $candidate
+}
+
 function Register-ScheduledTaskAdapter {
     param(
         [Parameter(Mandatory = $true)] [string] $TaskName,
@@ -243,6 +272,7 @@ function Register-ScheduledTaskAdapter {
         [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $Arguments = '',
         [Parameter(Mandatory = $true)] [bool] $Disabled
     )
+    $resolvedUser = Resolve-ScheduledTaskRunAsUser -UserName $UserName
     $action = New-ScheduledTaskAction -Execute $Command -Argument $Arguments
     $trigger = New-ScheduledTaskTrigger -AtStartup
     if ($Disabled) {
@@ -254,7 +284,7 @@ function Register-ScheduledTaskAdapter {
     $existing = Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
     if ($existing) { Unregister-ScheduledTask -TaskName $TaskName -Confirm:$false }
     # User parameter set only: -User/-Password/-RunLevel. Do not mix -Principal.
-    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $UserName -Password $Password -RunLevel Highest -Force | Out-Null
+    Register-ScheduledTask -TaskName $TaskName -Action $action -Trigger $trigger -Settings $settings -User $resolvedUser -Password $Password -RunLevel Highest -Force | Out-Null
 }
 
 function Enable-ScheduledTaskAdapter {

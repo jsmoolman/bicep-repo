@@ -48,6 +48,22 @@ Describe 'reviewed DEV AppV2 mapping' {
     }
 }
 
+Describe 'Resolve-ScheduledTaskRunAsUser (mocked adapters)' {
+    It 'returns the machine-qualified name when it resolves to the local account SID' {
+        Mock Get-ActualComputerNameAdapter { return 'DEVHOST' }
+        Mock Get-LocalAccountSidAdapter { return 'S-1-5-21-1-2-3-1001' }
+        Mock Resolve-AccountSidAdapter { param($QualifiedName) if ($QualifiedName -eq 'DEVHOST\jboss-runner') { return 'S-1-5-21-1-2-3-1001' } return '' }
+        Resolve-ScheduledTaskRunAsUser -UserName '.\jboss-runner' | Should -Be 'DEVHOST\jboss-runner'
+    }
+
+    It 'stops when the machine-qualified name resolves to a different SID' {
+        Mock Get-ActualComputerNameAdapter { return 'DEVHOST' }
+        Mock Get-LocalAccountSidAdapter { return 'S-1-5-21-1-2-3-1001' }
+        Mock Resolve-AccountSidAdapter { return 'S-1-5-21-9-9-9-9' }
+        { Resolve-ScheduledTaskRunAsUser -UserName '.\jboss-runner' } | Should -Throw -ExpectedMessage '*different SID*'
+    }
+}
+
 Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
     BeforeEach {
         $script:destDiskId = "/subscriptions/$($script:Dev.SubscriptionId)/resourceGroups/$($script:Dev.ResourceGroupName)/providers/Microsoft.Compute/disks/$($script:Dev.DestinationDataDiskName)"
@@ -294,7 +310,7 @@ Describe 'committed pipeline and scripts keep secrets out of source' {
         $guest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Configure-LimsAppV2.ps1') -Raw
         $guest | Should -Not -Match 'NotARealPassword'
         $guest | Should -Match 'protected parameters'
-        $guest | Should -Match 'Register-ScheduledTask -TaskName \$TaskName -Action \$action -Trigger \$trigger -Settings \$settings -User \$UserName -Password \$Password -RunLevel Highest -Force'
+        $guest | Should -Match 'Register-ScheduledTask -TaskName \$TaskName -Action \$action -Trigger \$trigger -Settings \$settings -User \$resolvedUser -Password \$Password -RunLevel Highest -Force'
         $guest | Should -Not -Match 'Register-ScheduledTask[^\r\n]*-Principal'
         $guest | Should -Match 'LoadUserProfile'
         $guest | Should -Match 'RunAsUserName'
@@ -313,20 +329,21 @@ Describe 'Real Windows Register-ScheduledTask (User parameter set)' {
         $userName = 'limsT' + [guid]::NewGuid().ToString('N').Substring(0, 10)
         $plain = 'Tmp!' + [guid]::NewGuid().ToString('N')
         $createdUser = $false
-        $createdTask = $false
         try {
             $secure = ConvertTo-SecureString -String $plain -AsPlainText -Force
             New-LocalUser -Name $userName -Password $secure -PasswordNeverExpires -UserMayNotChangePassword -AccountNeverExpires | Out-Null
             $createdUser = $true
+            $expectedSid = [string](Get-LocalUser -Name $userName).SID.Value
             Register-ScheduledTaskAdapter -TaskName $taskName -UserName ".\$userName" -Password $plain -Command 'powershell.exe' -Arguments '-NoProfile -NonInteractive -Command "exit 0"' -Disabled $true
-            $createdTask = $true
             $task = Get-ScheduledTask -TaskName $taskName
             $task.Settings.Enabled | Should -Be $false
             $task.Principal.LogonType | Should -Be 'Password'
-            $task.Principal.UserId | Should -Match $userName
+            $task.Principal.UserId | Should -Match ([regex]::Escape($userName))
+            $taskSid = (New-Object System.Security.Principal.NTAccount($task.Principal.UserId)).Translate([System.Security.Principal.SecurityIdentifier]).Value
+            $taskSid | Should -Be $expectedSid
         }
         finally {
-            if ($createdTask) { Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue }
+            Unregister-ScheduledTask -TaskName $taskName -Confirm:$false -ErrorAction SilentlyContinue
             if ($createdUser) { Remove-LocalUser -Name $userName -ErrorAction SilentlyContinue }
         }
     }

@@ -811,6 +811,38 @@ function Test-LimsAppV2ScheduledTaskResultIsFresh {
     return [pscustomobject]@{ Fresh = $true; Succeeded = $true; Reason = $null }
 }
 
+function Test-ScheduledTaskUserResolution {
+    <#
+        The machine-qualified Register-ScheduledTask -User candidate must
+        resolve to the same SID as the local account created/reconciled
+        by New-LocalUser / Get-LocalUser. Reasons do not include secrets.
+    #>
+    param(
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $SamAccountName,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $Candidate,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ExpectedSid,
+        [Parameter(Mandatory = $false)] [AllowNull()] [AllowEmptyString()] [string] $ResolvedSid
+    )
+    if ([string]::IsNullOrWhiteSpace($ExpectedSid)) {
+        return [pscustomobject]@{ Accepted = $false; Reason = "Local account '$SamAccountName' SID was not found. Refusing to register the scheduled task." }
+    }
+    if ([string]::IsNullOrWhiteSpace($ResolvedSid)) {
+        return [pscustomobject]@{ Accepted = $false; Reason = "Machine-qualified name '$Candidate' did not resolve to a SID. Refusing to register the scheduled task." }
+    }
+    if ($ResolvedSid -ne $ExpectedSid) {
+        return [pscustomobject]@{ Accepted = $false; Reason = "Machine-qualified name '$Candidate' resolved to a different SID than local account '$SamAccountName'. Refusing to register the scheduled task." }
+    }
+    return [pscustomobject]@{ Accepted = $true; Reason = $null }
+}
+
+function Get-ScheduledTaskSamAccountName {
+    param([Parameter(Mandatory = $true)] [string] $UserName)
+    $trimmed = $UserName.Trim()
+    if ($trimmed -match '^[.]\\(.+)$') { return $Matches[1] }
+    if ($trimmed -match '^[^\\]+\\(.+)$') { return $Matches[1] }
+    return $trimmed
+}
+
 function Test-LimsAppMigStageCleanupAllowed {
     param([Parameter(Mandatory = $true)] $Environment)
 
