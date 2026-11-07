@@ -1,9 +1,8 @@
 @{
-    # Static-analysis settings for the LIMS APP data-disk migration scripts.
-    # Copy-LimsAppDataDiskContents.ps1 runs under Windows PowerShell 5.1 via
-    # Managed Run Command. Invoke-LimsAppDataDiskMigration.ps1 runs on the
-    # Ubuntu pipeline agent under pwsh, but is kept 5.1-compatible so this
-    # one colocated settings file covers the whole directory.
+    # Static-analysis settings for retained LIMS APP release scripts.
+    # Configure-LimsAppV2.ps1 is written for Windows PowerShell 5.1 guest
+    # execution. The release entry point runs on the pipeline agent and is
+    # kept 5.1-compatible so this one settings file covers the directory.
     IncludeDefaultRules = $true
     ExcludeRules        = @(
         'PSUseSingularNouns'

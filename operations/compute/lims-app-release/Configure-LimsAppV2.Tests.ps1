@@ -11,11 +11,11 @@
 Set-StrictMode -Version Latest
 
 BeforeAll {
-    $env:LIMS_APP_MIG_CONFIG_DOT_SOURCE_ONLY = '1'
-    . (Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Mapping.ps1')
-    . (Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Safety.ps1')
+    $env:LIMS_APP_RELEASE_DOT_SOURCE_ONLY = '1'
+    . (Join-Path $PSScriptRoot 'LimsAppRelease.Mapping.ps1')
+    . (Join-Path $PSScriptRoot 'LimsAppRelease.Configuration.ps1')
     . (Join-Path $PSScriptRoot 'Configure-LimsAppV2.ps1')
-    $script:Dev = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName 'dev'
+    $script:Dev = Get-LimsAppReleaseEnvironment -EnvironmentName 'dev'
 
     function New-CompleteDevEnvironment {
         $clone = $script:Dev.PSObject.Copy()
@@ -43,8 +43,10 @@ Describe 'reviewed DEV AppV2 mapping' {
         $script:Dev.AppV2.AzureFilesUnc | Should -Be ''
         $script:Dev.AppV2.AzureFilesUncReviewStatus | Should -Be 'BlockedPendingValidation'
         $script:Dev.AppV2.JdbcSettingsReviewStatus | Should -Be 'BlockedPendingValidation'
-        $script:Dev.WindowsReparseValidationStatus | Should -Be 'BlockedPendingValidation'
-        $script:Dev.WindowsSymlinkValidationStatus | Should -Be 'BlockedPendingValidation'
+        $script:Dev.DestinationVmName | Should -Be 'vm-lims-dev-v2-westeu-001'
+        $script:Dev.PSObject.Properties.Name | Should -Not -Contain 'SourceVmName'
+        $script:Dev.PSObject.Properties.Name | Should -Not -Contain 'SnapshotNamePrefix'
+        $script:Dev.PSObject.Properties.Name | Should -Not -Contain 'WindowsReparseValidationStatus'
     }
 }
 
@@ -64,7 +66,26 @@ Describe 'Resolve-ScheduledTaskRunAsUser (mocked adapters)' {
     }
 }
 
-Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
+Describe 'Invoke-LimsAppV2Configure (entry point refuses)' {
+    It 'refuses register and activate without calling guest mutation adapters' {
+        Mock New-LocalUserAdapter { throw 'entry point must not create an account' }
+        Mock Invoke-ProcessAdapter { throw 'entry point must not change a service' }
+        Mock Register-ScheduledTaskAdapter { throw 'entry point must not register a task' }
+        Mock Start-ServiceAdapter { throw 'entry point must not start a service' }
+        foreach ($phase in @('Register', 'Activate')) {
+            $failure = $null
+            try { Invoke-LimsAppV2Configure -ConfigurePhase $phase } catch { $failure = $_.Exception.Message }
+            $failure | Should -Match 'unavailable until release prerequisites'
+            $failure | Should -Match 'snapshot-copy completion marker is not authorization'
+        }
+        Should -Invoke New-LocalUserAdapter -Times 0
+        Should -Invoke Invoke-ProcessAdapter -Times 0
+        Should -Invoke Register-ScheduledTaskAdapter -Times 0
+        Should -Invoke Start-ServiceAdapter -Times 0
+    }
+}
+
+Describe 'Invoke-LimsAppV2ConfigurationWorkflow (orchestration, mocked adapters)' {
     BeforeEach {
         $script:destDiskId = "/subscriptions/$($script:Dev.SubscriptionId)/resourceGroups/$($script:Dev.ResourceGroupName)/providers/Microsoft.Compute/disks/$($script:Dev.DestinationDataDiskName)"
         $script:destUid = $script:Dev.DestinationAttestedGuestUniqueId
@@ -129,7 +150,6 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         }
         $script:Params = @{
             EnvironmentName                   = 'dev'
-            MigrationRunId                    = '10'
             ConfigurePhase                    = 'Register'
             ExpectedDestinationDiskResourceId = $script:destDiskId
             ExpectedDestinationDiskUniqueId   = $script:destUid
@@ -141,7 +161,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
 
     It 'rejects Azure managed-disk uniqueId as destination guest identity' {
         $script:Params.ExpectedDestinationDiskUniqueId = 'ARM-DEST-UID-NOT-GUEST'
-        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*Azure managed-disk uniqueId is not accepted*'
+        { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } | Should -Throw -ExpectedMessage '*Azure managed-disk uniqueId is not accepted*'
         Should -Invoke New-LocalUserAdapter -Times 0
     }
 
@@ -150,10 +170,10 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
             return [pscustomobject]@{
                 subscriptionId    = $script:Dev.SubscriptionId
                 resourceGroupName = $script:Dev.ResourceGroupName
-                name              = $script:Dev.SourceVmName
+                name              = 'vm-lims-dev-westeu-001'
             }
         }
-        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*IMDS VM name*'
+        { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } | Should -Throw -ExpectedMessage '*IMDS VM name*'
         Should -Invoke New-LocalUserAdapter -Times 0
         Should -Invoke Invoke-ProcessAdapter -Times 0
     }
@@ -161,7 +181,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
     It 'fails on a missing secret without writing the secret name-value pair into the error' {
         $script:Params.JbossRunnerPassword = ''
         $failure = $null
-        try { Invoke-LimsAppV2Configure @script:Params } catch { $failure = $_.Exception.Message }
+        try { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } catch { $failure = $_.Exception.Message }
         $failure | Should -Match 'Preflight failed before any guest change'
         $failure | Should -Match 'JbossRunnerPassword'
         $failure | Should -Match 'not logged'
@@ -175,7 +195,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
     It 'reports every missing wrapper setting and does not mutate on rerun when preflight fails' {
         $script:localUsers['jboss-runner'] = [pscustomobject]@{ Name = 'jboss-runner' }
         $failure = $null
-        try { Invoke-LimsAppV2Configure @script:Params } catch { $failure = $_.Exception.Message }
+        try { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } catch { $failure = $_.Exception.Message }
         $failure | Should -Match 'Preflight failed before any guest change'
         $failure | Should -Match 'Procrun settings are incomplete'
         $failure | Should -Match 'Apache-2.4.57'
@@ -188,14 +208,14 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
 
     It 'reconciles an existing jboss-runner account on rerun after preflight passes' {
         $clone = New-CompleteDevEnvironment
-        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Get-LimsAppReleaseEnvironment { return $clone }
         Mock Test-PathExistsAdapter {
             param($Path)
             if ($Path -eq 'A:\lv89\sdmshome') { return $script:createdLinks.ContainsKey($Path) }
             return $true
         }
         $script:localUsers['jboss-runner'] = [pscustomobject]@{ Name = 'jboss-runner' }
-        $null = Invoke-LimsAppV2Configure @script:Params
+        $null = Invoke-LimsAppV2ConfigurationWorkflow @script:Params
         $script:localUsers['jboss-runner'].Reconciled | Should -Be $true
         Should -Invoke New-LocalUserAdapter -Times 0
         Should -Invoke Set-LocalUserPasswordAdapter -Times 1
@@ -207,13 +227,13 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         $clone = New-CompleteDevEnvironment
         $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
         $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
-        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Get-LimsAppReleaseEnvironment { return $clone }
         Mock Test-PathExistsAdapter {
             param($Path)
             return $Path -ne 'A:\lv89\sdmshome'
         }
         $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
-        $null = Invoke-LimsAppV2Configure @script:Params
+        $null = Invoke-LimsAppV2ConfigurationWorkflow @script:Params
         Should -Invoke Add-AzureFilesCredentialAdapter -Times 1 -ParameterFilter { $RunAsUserName -eq '.\jboss-runner' -and $Target -eq 'limsdevfiles.file.core.windows.net' }
         Should -Invoke Register-ScheduledTaskAdapter -Times 1 -ParameterFilter { $Disabled -eq $true -and $UserName -eq '.\jboss-runner' }
         Should -Invoke New-DirectorySymbolicLinkAdapter -Times 1
@@ -224,7 +244,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         $clone = New-CompleteDevEnvironment
         $clone.AppV2.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
         $clone.AppV2.AzureFilesUncReviewStatus = 'Passed'
-        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Get-LimsAppReleaseEnvironment { return $clone }
         Mock Test-PathExistsAdapter {
             param($Path)
             if ($Path -eq 'A:\lv89\sdmshome') { return $true }
@@ -237,7 +257,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
             Target        = $null
         }
         $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
-        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*existing directory*'
+        { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } | Should -Throw -ExpectedMessage '*existing directory*'
         Should -Invoke New-LocalUserAdapter -Times 0
         Should -Invoke Register-ScheduledTaskAdapter -Times 0
         Should -Invoke New-DirectorySymbolicLinkAdapter -Times 0
@@ -251,7 +271,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         $clone.AppV2.JdbcSettingsReviewStatus = 'Passed'
         $clone.AppV2.ApacheSettingsReviewStatus = 'Passed'
         $clone.AppV2.ShibbolethSettingsReviewStatus = 'Passed'
-        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Get-LimsAppReleaseEnvironment { return $clone }
         Mock Test-PathExistsAdapter { return $true }
         $link = 'A:\lv89\sdmshome'
         $script:createdLinks[$link] = [pscustomobject]@{
@@ -266,7 +286,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         }
         $script:Params.ConfigurePhase = 'Activate'
         $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
-        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*stale*'
+        { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } | Should -Throw -ExpectedMessage '*stale*'
         Should -Invoke Start-ServiceAdapter -Times 0
         Should -Invoke Enable-ScheduledTaskAdapter -Times 0
         Should -Invoke Disable-ScheduledTaskAdapter -Times 1
@@ -280,7 +300,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         $clone.AppV2.JdbcSettingsReviewStatus = 'Passed'
         $clone.AppV2.ApacheSettingsReviewStatus = 'Passed'
         $clone.AppV2.ShibbolethSettingsReviewStatus = 'Passed'
-        Mock Get-LimsAppDataDiskMigrationEnvironment { return $clone }
+        Mock Get-LimsAppReleaseEnvironment { return $clone }
         Mock Test-PathExistsAdapter { return $true }
         $link = 'A:\lv89\sdmshome'
         $script:createdLinks[$link] = [pscustomobject]@{
@@ -296,7 +316,7 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
         Mock Test-PathReadAsProcessAdapter { return [pscustomobject]@{ Readable = $false; Reason = "JBoss service context cannot read '$link'." } }
         $script:Params.ConfigurePhase = 'Activate'
         $script:Params.AzureFilesUnc = '\\limsdevfiles.file.core.windows.net\lv89'
-        { Invoke-LimsAppV2Configure @script:Params } | Should -Throw -ExpectedMessage '*JBoss service context cannot read*'
+        { Invoke-LimsAppV2ConfigurationWorkflow @script:Params } | Should -Throw -ExpectedMessage '*JBoss service context cannot read*'
         $script:services['JBoss-8.0'].Status | Should -Be 'Stopped'
         $script:tasks['LIMS-AzureFiles-Sdmshome'].Disabled | Should -Be $true
         Should -Invoke Enable-ScheduledTaskAdapter -Times 0
@@ -305,16 +325,18 @@ Describe 'Invoke-LimsAppV2Configure (orchestration, mocked adapters)' {
 }
 
 Describe 'committed pipeline and scripts keep secrets out of source' {
-    It 'references the variable group only for configure-app and never hardcodes secret values' {
-        $pipeline = Get-Content -LiteralPath (Join-Path $PSScriptRoot '..\..\..\.azuredevops\pipelines\migrate-lims-app-data-disk.yml') -Raw
-        $pipeline | Should -Match 'lims-dev-app-v2-secrets'
-        $pipeline | Should -Match '(?m)^\s+default: ''auto'''
-        $pipeline | Should -Match '(?m)^\s+default: ''not-used'''
-        $pipeline | Should -Match 'eq\(parameters\.action, ''configure-app''\)'
-        $pipeline | Should -Match '\$\(jbossRunnerPassword\)'
-        $pipeline | Should -Match '\$\(azureFilesAccessKey\)'
-        $pipeline | Should -Not -Match 'jbossRunnerPassword:\s*[''"][^$]'
-        $pipeline | Should -Not -Match 'azureFilesAccessKey:\s*[''"][^$]'
+    It 'does not submit secrets, guest commands, or the retired migration pipeline' {
+        $pipelinePath = Join-Path $PSScriptRoot '..\..\..\.azuredevops\pipelines\release-lims-app.yml'
+        $retiredPath = Join-Path $PSScriptRoot '..\..\..\.azuredevops\pipelines\migrate-lims-app-data-disk.yml'
+        Test-Path -LiteralPath $retiredPath | Should -Be $false
+        $pipeline = Get-Content -LiteralPath $pipelinePath -Raw
+        $pipeline | Should -Match 'Invoke-LimsAppRelease\.ps1'
+        $pipeline | Should -Not -Match 'lims-dev-app-v2-secrets'
+        $pipeline | Should -Not -Match 'jbossRunnerPassword'
+        $pipeline | Should -Not -Match 'azureFilesAccessKey'
+        $pipeline | Should -Not -Match 'submit-and-wait-run-command'
+        $pipeline | Should -Not -Match 'AzureCLI@2'
+        $pipeline | Should -Not -Match 'limsAppMigCopyCompleted'
         $guest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'Configure-LimsAppV2.ps1') -Raw
         $guest | Should -Not -Match 'NotARealPassword'
         $guest | Should -Match 'protected parameters'

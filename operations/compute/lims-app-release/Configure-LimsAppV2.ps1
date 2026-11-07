@@ -1,15 +1,19 @@
 <#
 .SYNOPSIS
-    Post-copy configuration of the replacement LIMS APP v2 VM.
+    Retained LIMS APP v2 account, service, and Azure Files configuration.
 
 .DESCRIPTION
-    Managed Run Command on the mapped destination APP VM only. Verifies
-    the completed copy and the mapped A: volume, then either registers
-    local account / services / Azure Files task (Register) or runs the
-    separate activation check (Activate).
+    The configuration workflow verifies the mapped destination A: volume,
+    then either registers the local account, Windows services, and Azure
+    Files task (Register) or runs the separate activation check (Activate).
+    Direct execution of this script does not run that workflow. Configuration
+    and activation stay refused until release prerequisites and exact-target
+    checks are implemented. A snapshot-copy completion marker is not
+    authorization.
 
-    Secrets arrive only as Managed Run Command protected parameters.
-    This script never writes those values to stdout, files, or logs.
+    Secrets, when a future authorized caller supplies them, arrive only as
+    protected parameters. This script never writes those values to stdout,
+    files, or logs.
 #>
 
 [CmdletBinding()]
@@ -19,47 +23,23 @@ param(
     [string] $EnvironmentName = 'dev',
 
     [Parameter(Mandatory = $false)]
-    [string] $MigrationRunId = '',
-
-    [Parameter(Mandatory = $false)]
     [ValidateSet('Register', 'Activate')]
-    [string] $ConfigurePhase = 'Register',
-
-    [Parameter(Mandatory = $false)]
-    [string] $ExpectedDestinationDiskResourceId = '',
-
-    [Parameter(Mandatory = $false)]
-    [string] $ExpectedDestinationDiskUniqueId = '',
-
-    [Parameter(Mandatory = $false)]
-    [AllowEmptyString()]
-    [string] $AzureFilesUnc = '',
-
-    [Parameter(Mandatory = $false)]
-    [AllowEmptyString()]
-    [string] $JbossRunnerPassword = '',
-
-    [Parameter(Mandatory = $false)]
-    [AllowEmptyString()]
-    [string] $AzureFilesAccessKey = ''
+    [string] $ConfigurePhase = 'Register'
 )
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 
-# <LIMS_APP_MIG_MAPPING_INJECT>
-# <LIMS_APP_MIG_SAFETY_INJECT>
-
-function Import-LimsAppDataDiskMigrationMapping {
-    if (-not (Get-Command Get-LimsAppDataDiskMigrationEnvironmentMapping -ErrorAction SilentlyContinue)) {
-        $adjacent = Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Mapping.ps1'
+function Import-LimsAppReleaseConfiguration {
+    if (-not (Get-Command Get-LimsAppReleaseEnvironmentMapping -ErrorAction SilentlyContinue)) {
+        $adjacent = Join-Path $PSScriptRoot 'LimsAppRelease.Mapping.ps1'
         if (Test-Path -LiteralPath $adjacent) { . $adjacent }
-        else { throw [System.InvalidOperationException]::new('The reviewed environment mapping was not loaded.') }
+        else { throw [System.InvalidOperationException]::new('The reviewed APP release mapping was not loaded.') }
     }
-    if (-not (Get-Command Resolve-GuestDiskIdentity -ErrorAction SilentlyContinue)) {
-        $safety = Join-Path $PSScriptRoot 'LimsAppDataDiskMigration.Safety.ps1'
-        if (Test-Path -LiteralPath $safety) { . $safety }
-        else { throw [System.InvalidOperationException]::new('Safety functions were not loaded.') }
+    if (-not (Get-Command Get-LimsAppReleaseExecutionDecision -ErrorAction SilentlyContinue)) {
+        $configuration = Join-Path $PSScriptRoot 'LimsAppRelease.Configuration.ps1'
+        if (Test-Path -LiteralPath $configuration) { . $configuration }
+        else { throw [System.InvalidOperationException]::new('APP release configuration functions were not loaded.') }
     }
 }
 
@@ -856,10 +836,14 @@ function Invoke-LimsAppV2Activate {
     }
 }
 
-function Invoke-LimsAppV2Configure {
+function Invoke-LimsAppV2ConfigurationWorkflow {
+    <#
+        Retained register/activate workflow for tests and a future
+        authorized caller. This function is not the script entry point
+        and does not treat a snapshot-copy tag as permission to run.
+    #>
     param(
         [Parameter(Mandatory = $true)] [string] $EnvironmentName,
-        [Parameter(Mandatory = $true)] [string] $MigrationRunId,
         [Parameter(Mandatory = $true)] [string] $ConfigurePhase,
         [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskResourceId,
         [Parameter(Mandatory = $true)] [string] $ExpectedDestinationDiskUniqueId,
@@ -868,11 +852,8 @@ function Invoke-LimsAppV2Configure {
         [Parameter(Mandatory = $false)] [AllowEmptyString()] [string] $AzureFilesAccessKey = ''
     )
 
-    $runIdCheck = Test-LimsAppMigNumericBuildId -Value $MigrationRunId
-    if (-not $runIdCheck.Accepted) { Assert-LimsAppV2ConfigFailure $runIdCheck.Reason }
-
-    Import-LimsAppDataDiskMigrationMapping
-    $environment = Get-LimsAppDataDiskMigrationEnvironment -EnvironmentName $EnvironmentName
+    Import-LimsAppReleaseConfiguration
+    $environment = Get-LimsAppReleaseEnvironment -EnvironmentName $EnvironmentName
     $imds = Assert-ConfigureTargetIdentity -Environment $environment
     if ([string]::IsNullOrWhiteSpace($ExpectedDestinationDiskUniqueId)) {
         $ExpectedDestinationDiskUniqueId = $environment.DestinationAttestedGuestUniqueId
@@ -886,24 +867,45 @@ function Invoke-LimsAppV2Configure {
         $result = Invoke-LimsAppV2Register -Environment $environment -JbossRunnerPassword $JbossRunnerPassword -AzureFilesAccessKey $AzureFilesAccessKey -AzureFilesUnc $AzureFilesUnc
     }
 
-    Write-Host '===== LIMS APP v2 post-copy configuration ====='
-    Write-Host "Migration run ID     : $MigrationRunId"
+    Write-Host '===== LIMS APP v2 configuration workflow ====='
     Write-Host "Phase                : $($result.Phase)"
     Write-Host "Status               : $($result.Status)"
     Write-Host "Automatic startup    : $($result.AutomaticStartup)"
     Write-Host 'Secrets              : not written to this log'
     Write-Host 'Legacy APP / SQL VMs : not targeted'
+    Write-Host 'Release action       : not authorized by this workflow'
     Write-Host '================================================'
     return $result
 }
 
-if ($env:LIMS_APP_MIG_CONFIG_DOT_SOURCE_ONLY -ne '1') {
+function Invoke-LimsAppV2Configure {
+    <#
+        Script entry point. Refuses Register and Activate. An allowed
+        decision is still refused here because exact-target checks are
+        not implemented in this entry point.
+    #>
+    param(
+        [Parameter(Mandatory = $false)]
+        [ValidateSet('Register', 'Activate')]
+        [string] $ConfigurePhase = 'Register'
+    )
+
+    Import-LimsAppReleaseConfiguration
+    $action = if ($ConfigurePhase -eq 'Activate') { 'activate' } else { 'configure' }
+    $decision = Get-LimsAppReleaseExecutionDecision -Action $action
+    if ($decision.Allowed) {
+        Assert-LimsAppV2ConfigFailure "APP $action was marked allowed, but this entry point does not implement release prerequisites or exact-target checks. Refusing to continue."
+    }
+    Assert-LimsAppV2ConfigFailure $decision.Reason
+}
+
+if ($env:LIMS_APP_RELEASE_DOT_SOURCE_ONLY -ne '1') {
     try {
-        Invoke-LimsAppV2Configure -EnvironmentName $EnvironmentName -MigrationRunId $MigrationRunId -ConfigurePhase $ConfigurePhase -ExpectedDestinationDiskResourceId $ExpectedDestinationDiskResourceId -ExpectedDestinationDiskUniqueId $ExpectedDestinationDiskUniqueId -AzureFilesUnc $AzureFilesUnc -JbossRunnerPassword $JbossRunnerPassword -AzureFilesAccessKey $AzureFilesAccessKey | Out-Null
+        Invoke-LimsAppV2Configure -ConfigurePhase $ConfigurePhase | Out-Null
         exit 0
     }
     catch {
-        Write-Error $_.Exception.Message
+        Write-Error "Refusing environment '$EnvironmentName' phase '$ConfigurePhase'. $($_.Exception.Message)"
         exit 1
     }
 }

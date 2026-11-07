@@ -1,0 +1,50 @@
+# =============================================================================
+# LIMS APP release automation
+# =============================================================================
+# Purpose:
+#   Entry point for future APP provisioning and release automation.
+#   Every action refuses before any Azure call, guest command, disk
+#   change, or service change. Configuration and activation stay
+#   unavailable until release prerequisites and exact-target checks are
+#   implemented. A retired snapshot-copy completion tag is not
+#   authorization.
+#
+#   This pipeline does not capture application content, deploy a package,
+#   configure services, or activate services. It does not use a service
+#   connection, a Library variable group, or Managed Run Command.
+#
+# Manual only. A run is expected to fail closed.
+# =============================================================================
+
+trigger: none
+pr: none
+
+parameters:
+  - name: environment
+    displayName: Environment. Selection is recorded and then refused.
+    type: string
+    default: dev
+    values:
+      - dev
+      - tst
+      - acc
+      - preprd
+      - prd
+  - name: action
+    displayName: Release action. Every value is refused.
+    type: string
+    default: status
+    values:
+      - status
+      - capture
+      - deploy
+      - configure
+      - activate
+
+pool:
+  vmImage: ubuntu-latest
+
+steps:
+  - pwsh: |
+      & ./operations/compute/lims-app-release/Invoke-LimsAppRelease.ps1 -Action '${{ parameters.action }}' -EnvironmentName '${{ parameters.environment }}'
+    displayName: Refuse APP release actions
